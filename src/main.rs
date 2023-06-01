@@ -1,407 +1,798 @@
-#![allow(unused)]
+use std::cell::Cell;
 
-// rule function {
-//   'fn' ident <commit> '(' fn_args ')' '->' type expr
-// }
+/// ```ignore
+/// tokenizer {
+///     #[skip] whitespace r"\s+"
+///     #[contextual] node 'node'
+///     eq '='
+///     number r"\d+"
+///     hash_string r#"r#*""# 'parse_raw_string'
+/// }
+///
+/// rule function {
+///   'fn' ident '(' fn_args ')' '->' type expr
+/// }
+/// ```
 
-pub mod grammar;
+/// Starting code from
+///  https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html
+///  https://github.com/matklad/resilient-ll-parsing/blob/master/src/lib.rs
 
-use ariadne::{sources, Color, Label, Report, ReportKind};
-use chumsky::prelude::*;
-use std::{collections::HashMap, env, fmt, fs};
-
-pub type Span = SimpleSpan<usize>;
-
-#[derive(Clone, Debug, PartialEq)]
-enum Token<'src> {
-    Str(&'src str),
-    Ident(&'src str),
-    // parens
-    LParen,
-    RParen,
-    LBrace,
-    RBrace,
-    Pipe,
-    // keywords
-    Rule,
-    Function,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[rustfmt::skip]
+enum TokenKind {
+    Ident, Literal, RawLiteral,
+    ErrorToken, Eof,
+  
+    LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
+    TokenizerKeyword, RuleKeyword,
+    Hash,
 }
 
-impl<'src> fmt::Display for Token<'src> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Token::Str(a) => write!(f, "'{a}'"),
-            Token::Ident(a) => a.fmt(f),
-            Token::LParen => '('.fmt(f),
-            Token::RParen => ')'.fmt(f),
-            Token::LBrace => '{'.fmt(f),
-            Token::RBrace => '}'.fmt(f),
-            Token::Pipe => '|'.fmt(f),
-            Token::Rule => "rule".fmt(f),
-            Token::Function => "function".fmt(f),
+#[derive(Clone, Copy, Debug)]
+#[rustfmt::skip]
+enum TreeKind {
+    File,
+      ErrorTree,
+      Meta,
+      Tokenizer,
+        TokenRule,
+      Rule,
+        Annotation,
+}
+
+use TokenKind::*;
+use TreeKind::*;
+
+#[derive(Clone, Copy, Debug)]
+struct Span {
+    start: u32,
+    end: u32,
+}
+
+impl Span {
+    pub fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Token {
+    kind: TokenKind,
+    span: Span,
+}
+
+impl Token {
+    #[inline]
+    pub fn as_str(self, src: &str) -> &str {
+        &src[self.span.start as usize..self.span.end as usize]
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Child {
+    Token(Token),
+    Tree(Tree),
+}
+
+#[derive(Clone, Debug)]
+pub struct Tree {
+    kind: TreeKind,
+    children: Vec<Child>,
+}
+
+pub fn parse(text: &str) -> Tree {
+    let tokens = lex(text);
+    let mut p = Parser::new(tokens);
+    file(&mut p);
+    p.build_tree()
+}
+
+#[macro_export]
+macro_rules! format_to {
+    ($buf:expr) => ();
+    ($buf:expr, $lit:literal $($arg:tt)*) => {
+        { let _ = ::std::write!($buf, $lit $($arg)*); }
+    };
+}
+
+impl Tree {
+    fn print(&self, buf: &mut dyn std::fmt::Write, src: &str, level: usize) {
+        let indent = "  ".repeat(level);
+        format_to!(buf, "{indent}{:?}\n", self.kind);
+        for child in &self.children {
+            match child {
+                Child::Token(token) => {
+                    format_to!(buf, "{indent}  {}\n", token.as_str(src))
+                }
+                Child::Tree(tree) => tree.print(buf, src, level + 1),
+            }
         }
     }
 }
 
-fn lexer<'src>(
-) -> impl Parser<'src, &'src str, Vec<(Token<'src>, Span)>, extra::Err<Rich<'src, char, Span>>> {
-    // A parser for strings
-    let str = just('\'')
-        .ignore_then(none_of('\'').repeated())
-        .then_ignore(just('\''))
-        .map_slice(Token::Str);
+fn lex(src: &str) -> Vec<Token> {
+    let punctuation = (
+        "# ( ) { } [ ] < >",
+        [
+            Hash, LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
+        ],
+    );
 
-    let ctrl = one_of("(){}|").map(|c| match c {
-        '(' => Token::LParen,
-        ')' => Token::RParen,
-        '{' => Token::LBrace,
-        '}' => Token::RBrace,
-        '|' => Token::Pipe,
-        _ => unreachable!(),
-    });
+    let keywords = ("rule tokenizer", [RuleKeyword, TokenizerKeyword]);
 
-    // A parser for identifiers and keywords
-    let ident = text::ident().map(|ident: &str| match ident {
-        "rule" => Token::Rule,
-        "function" => Token::Function,
-        _ => Token::Ident(ident),
-    });
+    let mut text = src;
+    let mut result = Vec::new();
+    while !text.is_empty() {
+        if let Some(rest) = trim(text, |it| it.is_ascii_whitespace()) {
+            text = rest;
+            continue;
+        }
 
-    // A single token can be one of the above
-    let token = ident.or(str).or(ctrl);
+        let text_orig = text;
+        let mut kind = 'kind: {
+            for (i, symbol) in punctuation.0.split_ascii_whitespace().enumerate() {
+                if let Some(rest) = text.strip_prefix(symbol) {
+                    text = rest;
+                    break 'kind punctuation.1[i];
+                }
+            }
 
-    let comment = just("//")
-        .then(any().and_is(just('\n').not()).repeated())
-        .padded();
+            // 'string'
+            let mut string_chars = text.chars();
+            if string_chars.next().unwrap() == '\'' {
+                let mut escaped = false;
+                while let Some(c) = string_chars.next() {
+                    if c == '\\' {
+                        escaped = true;
+                        continue;
+                    }
 
-    token
-        .map_with_span(|tok, span| (tok, span))
-        .padded_by(comment.repeated())
-        .padded()
-        // If we encounter an error, skip and attempt to lex the next character as a token instead
-        .recover_with(skip_then_retry_until(any().ignored(), end()))
-        .repeated()
-        .collect()
+                    if c == '\'' && !escaped {
+                        text = string_chars.as_str();
+                        break 'kind Literal;
+                    }
+
+                    escaped = false;
+                }
+            }
+
+            // r#"escaped string"#
+            let mut string_chars = text.chars();
+            if string_chars.next().unwrap() == 'r' {
+                let mut balance = 0;
+                'inner: {
+                    while let Some(c) = string_chars.next() {
+                        match c {
+                            '#' => balance += 1,
+                            '"' => break,
+                            _ => break 'inner,
+                        }
+                    }
+
+                    while let Some(c) = string_chars.next() {
+                        if c == '"' {
+                            if balance == 0 {
+                                text = string_chars.as_str();
+                                break 'kind RawLiteral;
+                            }
+
+                            let mut balance = balance;
+                            let mut string_chars = string_chars.clone();
+                            while let Some('#') = string_chars.next() {
+                                balance -= 1;
+                                if balance == 0 {
+                                    text = string_chars.as_str();
+                                    break 'kind RawLiteral;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ident
+            if let Some(rest) = trim(text, name_char) {
+                text = rest;
+                break 'kind Ident;
+            }
+
+            let error_index = text
+                .find(|it: char| it.is_ascii_whitespace())
+                .unwrap_or(text.len());
+            text = &text[error_index..];
+            ErrorToken
+        };
+
+        // assert that we've consumed _something_
+        assert!(text.len() < text_orig.len());
+
+        let token_text = &text_orig[..text_orig.len() - text.len()];
+        if kind == Ident {
+            for (i, symbol) in keywords.0.split_ascii_whitespace().enumerate() {
+                if token_text == symbol {
+                    kind = keywords.1[i];
+                    break;
+                }
+            }
+        }
+
+        let start = unsafe {
+            text_orig
+                .as_ptr()
+                .offset_from(src.as_ptr())
+                .try_into()
+                .unwrap()
+        };
+        let end = unsafe { text.as_ptr().offset_from(src.as_ptr()).try_into().unwrap() };
+
+        result.push(Token {
+            kind,
+            span: Span::new(start, end),
+        })
+    }
+    return result;
+
+    fn name_char(c: char) -> bool {
+        matches!(c, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9')
+    }
+
+    fn trim(text: &str, predicate: impl std::ops::Fn(char) -> bool) -> Option<&str> {
+        let index = text.find(|it: char| !predicate(it)).unwrap_or(text.len());
+        if index == 0 {
+            None
+        } else {
+            Some(&text[index..])
+        }
+    }
 }
 
-pub type Spanned<T> = (T, Span);
-
-// An expression node in the AST. Children are spanned so we can generate useful runtime errors.
 #[derive(Debug)]
-enum Expr<'src> {
-    Terminal(&'src str),
-    NonTerminal(&'src str),
-    // structuring node
-    Sequence(Vec<Expr<'src>>),
-    // postfix repetition
-    OneOrMore(Box<Expr<'src>>),
-    ZeroOrMore(Box<Expr<'src>>),
-    Maybe(Box<Expr<'src>>),
-    Choice(Box<Expr<'src>>, Box<Expr<'src>>),
-    // immediatelly matches, just an empty rule
-    Empty,
+enum Event {
+    Open { kind: TreeKind },
+    Close,
+    Advance,
+}
+
+#[derive(Clone, Copy)]
+struct MarkOpened {
+    index: u32,
+    pos: u32,
+}
+
+#[derive(Clone, Copy)]
+struct MarkClosed {
+    index: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ParseError {
+    NoMatch,
     Error,
 }
 
-// A function node in the AST.
-#[derive(Debug)]
-struct Rule<'src> {
-    args: Vec<&'src str>,
-    body: Expr<'src>,
-    function_span: Span,
-    body_span: Span,
+type ParseResult = Result<(), ParseError>;
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: u32,
+    fuel: Cell<u32>,
+    events: Vec<Event>,
 }
 
-// The type of the input that our parser operates on. The input is the `&[(Token, Span)]` token buffer generated by the
-// lexer, wrapped in a `SpannedInput` which 'splits' it apart into its constituent parts, tokens and spans, for chumsky
-// to understand.
-type ParserInput<'tokens, 'src> =
-    chumsky::input::SpannedInput<Token<'src>, Span, &'tokens [(Token<'src>, Span)]>;
-
-// This looks complex, but don't be scared!
-
-// There are two lifetimes here:
-//     - 'src: the lifetime of the underlying source code (the string we read from disk)
-//     - 'tokens: the lifetime of the token buffer emitted by the lexer
-// Our source code lives longer than the token buffer, hence `'src: 'tokens`
-
-// From this function, we return a parser that parses an input of type `ParserInput` (see above for an explanation of
-// that) and produces a `Spanned<Expr>` (an expression with a span attached to it, so we can point to the right thing
-// for runtime errors).
-
-// We also specify an error type used by the parser. In this case, it's `Rich`, one of chumsky's default error types.
-fn expr_parser<'tokens, 'src: 'tokens>() -> impl Parser<
-    'tokens,
-    ParserInput<'tokens, 'src>,
-    Spanned<Expr<'src>>,
-    extra::Err<Rich<'tokens, Token<'src>, Span>>,
-> + Clone {
-    recursive(|expr| {
-        let symbol = select! {
-            Token::Str(a) => Expr::Terminal(a),
-            Token::Ident(a) => Expr::NonTerminal(a),
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Parser {
+        Parser {
+            tokens,
+            pos: 0,
+            fuel: Cell::new(256),
+            events: Vec::new(),
         }
-        .or(expr);
+    }
 
-        // 'srctoms' are expressions that contain no ambiguity
-        let atom = symbol
-            // .map_with_span(|expr, span| (expr, span))
-            // Atoms can also just be normal expressions, but surrounded with parentheses
-            .or(expr
-                .clone()
-                .delimited_by(just(Token::LParen), just(Token::RParen)))
-            // Attempt to recover anything that looks like a parenthesised expression but contains errors
-            // .recover_with(via_parser(nested_delimiters(
-            //     Token::LParen,
-            //     Token::RParen,
-            //     [(Token::LBrace, Token::RBrace)],
-            //     |span| (Expr::Error, span),
-            // )))
-            .boxed();
+    fn build_tree(self) -> Tree {
+        let mut tokens = self.tokens.into_iter();
+        let mut events = self.events;
 
-        let mono = atom.then(choice);
-
-        // A list of expressions
-        let sequence = atom
-            .clone()
-            .repeated()
-            .collect::<Vec<_>>()
-            .map(Expr::Sequence);
-
-        sequence.then(just(Token::Pipe)).or_not()
-    })
-}
-
-fn funcs_parser<'tokens, 'src: 'tokens>() -> impl Parser<
-    'tokens,
-    ParserInput<'tokens, 'src>,
-    HashMap<&'src str, Func<'src>>,
-    extra::Err<Rich<'tokens, Token<'src>, Span>>,
-> + Clone {
-    let ident = select! { Token::Ident(ident) => ident.clone() };
-
-    // Argument lists are just identifiers separated by commas, surrounded by parentheses
-    let args = ident
-        .separated_by(just(Token::Ctrl(',')))
-        .allow_trailing()
-        .collect()
-        .delimited_by(just(Token::LParen), just(Token::RParen))
-        .labelled("function args");
-
-    let func = just(Token::Fn)
-        .ignore_then(
-            ident
-                .map_with_span(|name, span| (name, span))
-                .labelled("function name"),
-        )
-        .then(args)
-        .map_with_span(|start, span| (start, span))
-        .then(
-            expr_parser()
-                .delimited_by(just(Token::LBrace), just(Token::RBrace))
-                // Attempt to recover anything that looks like a function body but contains errors
-                .recover_with(via_parser(nested_delimiters(
-                    Token::LBrace,
-                    Token::RBrace,
-                    [
-                        (Token::LParen, Token::RParen),
-                        (Token::Ctrl('['), Token::Ctrl(']')),
-                    ],
-                    |span| (Expr::Error, span),
-                ))),
-        )
-        .map(|(((name, args), span), body)| (name, Func { args, span, body }))
-        .labelled("function");
-
-    func.repeated()
-        .collect::<Vec<_>>()
-        .validate(|fs, _, emitter| {
-            let mut funcs = HashMap::new();
-            for ((name, name_span), f) in fs {
-                if funcs.insert(name.clone(), f).is_some() {
-                    emitter.emit(Rich::custom(
-                        name_span.clone(),
-                        format!("Function '{}' already exists", name),
-                    ));
+        assert!(matches!(events.pop(), Some(Event::Close)));
+        let mut stack = Vec::new();
+        for event in events {
+            match event {
+                Event::Open { kind } => stack.push(Tree {
+                    kind,
+                    children: Vec::new(),
+                }),
+                Event::Close => {
+                    let tree = stack.pop().unwrap();
+                    stack.last_mut().unwrap().children.push(Child::Tree(tree));
                 }
-            }
-            funcs
-        })
-}
-
-struct Error {
-    span: Span,
-    msg: String,
-}
-
-fn eval_expr<'src>(
-    expr: &Spanned<Expr<'src>>,
-    funcs: &HashMap<&'src str, Func<'src>>,
-    stack: &mut Vec<(&'src str, Value<'src>)>,
-) -> Result<Value<'src>, Error> {
-    Ok(match &expr.0 {
-        Expr::Error => unreachable!(), // Error expressions only get created by parser errors, so cannot exist in a valid AST
-        Expr::Value(val) => val.clone(),
-        Expr::List(items) => Value::List(
-            items
-                .iter()
-                .map(|item| eval_expr(item, funcs, stack))
-                .collect::<Result<_, _>>()?,
-        ),
-        Expr::Local(name) => stack
-            .iter()
-            .rev()
-            .find(|(l, _)| l == name)
-            .map(|(_, v)| v.clone())
-            .or_else(|| Some(Value::Func(name.clone())).filter(|_| funcs.contains_key(name)))
-            .ok_or_else(|| Error {
-                span: expr.1.clone(),
-                msg: format!("No such variable '{}' in scope", name),
-            })?,
-        Expr::Let(local, val, body) => {
-            let val = eval_expr(val, funcs, stack)?;
-            stack.push((local.clone(), val));
-            let res = eval_expr(body, funcs, stack)?;
-            stack.pop();
-            res
-        }
-        Expr::Then(a, b) => {
-            eval_expr(a, funcs, stack)?;
-            eval_expr(b, funcs, stack)?
-        }
-        Expr::Binary(a, BinaryOp::Add, b) => Value::Num(
-            eval_expr(a, funcs, stack)?.num(a.1.clone())?
-                + eval_expr(b, funcs, stack)?.num(b.1.clone())?,
-        ),
-        Expr::Binary(a, BinaryOp::Sub, b) => Value::Num(
-            eval_expr(a, funcs, stack)?.num(a.1.clone())?
-                - eval_expr(b, funcs, stack)?.num(b.1.clone())?,
-        ),
-        Expr::Binary(a, BinaryOp::Mul, b) => Value::Num(
-            eval_expr(a, funcs, stack)?.num(a.1.clone())?
-                * eval_expr(b, funcs, stack)?.num(b.1.clone())?,
-        ),
-        Expr::Binary(a, BinaryOp::Div, b) => Value::Num(
-            eval_expr(a, funcs, stack)?.num(a.1.clone())?
-                / eval_expr(b, funcs, stack)?.num(b.1.clone())?,
-        ),
-        Expr::Binary(a, BinaryOp::Eq, b) => {
-            Value::Bool(eval_expr(a, funcs, stack)? == eval_expr(b, funcs, stack)?)
-        }
-        Expr::Binary(a, BinaryOp::NotEq, b) => {
-            Value::Bool(eval_expr(a, funcs, stack)? != eval_expr(b, funcs, stack)?)
-        }
-        Expr::Call(func, args) => {
-            let f = eval_expr(func, funcs, stack)?;
-            match f {
-                Value::Func(name) => {
-                    let f = &funcs[&name];
-                    let mut stack = if f.args.len() != args.len() {
-                        return Err(Error {
-                            span: expr.1.clone(),
-                            msg: format!("'{}' called with wrong number of arguments (expected {}, found {})", name, f.args.len(), args.len()),
-                        });
-                    } else {
-                        f.args
-                            .iter()
-                            .zip(args.iter())
-                            .map(|(name, arg)| Ok((name.clone(), eval_expr(arg, funcs, stack)?)))
-                            .collect::<Result<_, _>>()?
-                    };
-                    eval_expr(&f.body, funcs, &mut stack)?
-                }
-                f => {
-                    return Err(Error {
-                        span: func.1.clone(),
-                        msg: format!("'{:?}' is not callable", f),
-                    })
+                Event::Advance => {
+                    let token = tokens.next().unwrap();
+                    stack.last_mut().unwrap().children.push(Child::Token(token));
                 }
             }
         }
-        Expr::If(cond, a, b) => {
-            let c = eval_expr(cond, funcs, stack)?;
-            match c {
-                Value::Bool(true) => eval_expr(a, funcs, stack)?,
-                Value::Bool(false) => eval_expr(b, funcs, stack)?,
-                c => {
-                    return Err(Error {
-                        span: cond.1.clone(),
-                        msg: format!("Conditions must be booleans, found '{:?}'", c),
-                    })
+
+        // println!("{stack:#?}\n\n{:#?}", tokens.clone().collect::<Vec<_>>());
+
+        let tree = stack.pop().unwrap();
+        assert!(stack.is_empty());
+        assert!(tokens.next().is_none());
+        tree
+    }
+
+    fn open(&mut self) -> MarkOpened {
+        let mark = MarkOpened {
+            index: self.events.len() as u32,
+            pos: self.pos,
+        };
+        self.events.push(Event::Open {
+            kind: TreeKind::ErrorTree,
+        });
+        mark
+    }
+
+    // fn open_before(&mut self, m: MarkClosed) -> MarkOpened {
+    //     let mark = MarkOpened {
+    //         // TODO is this correct?
+    //         index: m.index + 1,
+    //         pos: self.pos,
+    //     };
+    //     self.events.insert(
+    //         m.index as usize,
+    //         Event::Open {
+    //             kind: TreeKind::ErrorTree,
+    //         },
+    //     );
+    //     mark
+    // }
+
+    fn close(&mut self, m: MarkOpened, kind: TreeKind) -> MarkClosed {
+        self.events[m.index as usize] = Event::Open { kind };
+        self.events.push(Event::Close);
+        MarkClosed { index: m.index }
+    }
+
+    fn close_advance_with_error(&mut self, m: MarkOpened, error: &str) -> MarkClosed {
+        eprintln!("{error}");
+        self.advance();
+        self.close(m, ErrorTree)
+    }
+
+    fn reset(&mut self, m: MarkOpened) {
+        self.events.truncate((m.index + 1) as usize);
+        self.pos = m.pos;
+    }
+
+    fn unopen(&mut self, m: MarkOpened) {
+        self.events.truncate((m.index) as usize);
+        self.pos = m.pos;
+    }
+
+    fn advance(&mut self) {
+        assert!(!self.eof());
+        self.fuel.set(256);
+        self.events.push(Event::Advance);
+        self.pos += 1;
+    }
+
+    fn advance_with_error(&mut self, error: &str) {
+        let m = self.open();
+        // TODO: Error reporting.
+        // eprintln!("{error}");
+        self.advance();
+        self.close(m, ErrorTree);
+    }
+
+    fn advance_with_error_fmt(&mut self, error: std::fmt::Arguments) {
+        let m = self.open();
+        // TODO: Error reporting.
+        // eprintln!("{error}");
+        self.advance();
+        self.close(m, ErrorTree);
+    }
+
+    fn eof(&self) -> bool {
+        self.pos as usize == self.tokens.len()
+    }
+
+    fn nth(&self, lookahead: u32) -> TokenKind {
+        if self.fuel.get() == 0 {
+            panic!("parser is stuck")
+        }
+        self.fuel.set(self.fuel.get() - 1);
+        self.tokens
+            .get((self.pos + lookahead) as usize)
+            .map_or(TokenKind::Eof, |it| it.kind)
+    }
+
+    fn at(&self, kind: TokenKind) -> bool {
+        self.nth(0) == kind
+    }
+
+    fn at_any(&self, kinds: &[TokenKind]) -> bool {
+        kinds.contains(&self.nth(0))
+    }
+
+    #[must_use]
+    fn eat(&mut self, kind: TokenKind) -> ParseResult {
+        if self.at(kind) {
+            self.advance();
+            ParseResult::Ok(())
+        } else {
+            ParseResult::Err(ParseError::NoMatch)
+        }
+    }
+
+    #[must_use]
+    fn expect(&mut self, kind: TokenKind) -> ParseResult {
+        let cur = self.nth(0);
+        if cur == kind {
+            self.advance();
+            ParseResult::Ok(())
+        } else {
+            self.advance_with_error_fmt(format_args!("Expected token {kind:?}"));
+            ParseResult::Err(ParseError::Error)
+        }
+    }
+
+    fn match_try(
+        &mut self,
+        m: MarkOpened,
+        kind: TreeKind,
+        fun: fn(&mut Parser) -> ParseResult,
+    ) -> bool {
+        match fun(self) {
+            Ok(()) | Err(ParseError::Error) => {
+                self.close(m, kind);
+                true
+            }
+            Err(ParseError::NoMatch) => {
+                self.reset(m);
+                false
+            }
+        }
+    }
+
+    fn match_optional(
+        &mut self,
+        kind: TreeKind,
+        fun: fn(&mut Parser) -> ParseResult,
+    ) -> ParseResult {
+        let m = self.open();
+        let res = fun(self);
+        match res {
+            Ok(()) | Err(ParseError::Error) => {
+                self.close(m, kind);
+            }
+            Err(ParseError::NoMatch) => {
+                self.unopen(m);
+                return Ok(());
+            }
+        }
+        res
+    }
+
+    fn match_repetition_star(
+        &mut self,
+        kind: TreeKind,
+        fun: fn(&mut Parser) -> ParseResult,
+    ) -> ParseResult {
+        while !self.eof() {
+            let m = self.open();
+            let res = fun(self);
+            match res {
+                Ok(()) | Err(ParseError::Error) => {
+                    self.close(m, kind);
+                    continue;
+                }
+                Err(ParseError::NoMatch) => {
+                    self.unopen(m);
+                    break;
                 }
             }
         }
-        Expr::Print(a) => {
-            let val = eval_expr(a, funcs, stack)?;
-            println!("{}", val);
-            val
+        Ok(())
+    }
+
+    fn match_repetition_plus(
+        &mut self,
+        kind: TreeKind,
+        fun: fn(&mut Parser) -> ParseResult,
+    ) -> ParseResult {
+        let mut first = true;
+        while !self.eof() {
+            let m = self.open();
+            let res = fun(self);
+            match res {
+                Ok(()) | Err(ParseError::Error) => {
+                    first = false;
+                    self.close(m, kind);
+                    continue;
+                }
+                Err(ParseError::NoMatch) => {
+                    self.unopen(m);
+                    break;
+                }
+            }
         }
-    })
+        if first {
+            // TODO custom recover
+            self.advance_with_error_fmt(format_args!("{kind:?} must occur at leats once"));
+            return Err(ParseError::Error);
+        }
+        Ok(())
+    }
 }
+
+fn file(p: &mut Parser) {
+    let m = p.open();
+    while !p.eof() {
+        let m = p.open();
+        if p.match_try(m, Tokenizer, tokenizer) {
+            continue;
+        }
+
+        p.unopen(m);
+        break;
+        // p.close_advance_with_error(m, "Unknown patern");
+    }
+    p.close(m, File);
+}
+
+/// ```ignore
+/// tokenizer {
+///     #[skip] whitespace r"\s+"
+///     #[contextual] node 'node'
+///     eq '='
+///     number r"\d+"
+///     hash_string r#"r#*""# 'parse_raw_string'
+/// }
+/// ```
+fn tokenizer(p: &mut Parser) -> ParseResult {
+    p.eat(TokenizerKeyword)?;
+    p.expect(LCurly)?;
+
+    p.match_repetition_star(TokenRule, token_rule)?;
+
+    p.expect(RCurly)?;
+    Ok(())
+}
+
+fn meta(p: &mut Parser) -> ParseResult {
+    p.eat(Hash)?;
+    // commit
+    p.expect(LBracket)?;
+    p.expect(Ident)?;
+    p.expect(RBracket)?;
+    Ok(())
+}
+
+fn token_rule(p: &mut Parser) -> ParseResult {
+    p.match_optional(Meta, meta)?;
+    p.eat(Ident)?;
+    // commit
+    p.eat(Literal).or_else(|_| p.expect(RawLiteral))?;
+    let _ = p.eat(Literal);
+
+    Ok(())
+}
+
+// const PARAM_LIST_RECOVERY: &[TokenKind] = &[FnKeyword, LCurly];
+// fn param_list(p: &mut Parser) {
+//     assert!(p.at(LParen));
+//     let m = p.open();
+
+//     p.expect(LParen);
+//     while !p.at(RParen) && !p.eof() {
+//         if p.at(Name) {
+//             param(p);
+//         } else {
+//             if p.at_any(PARAM_LIST_RECOVERY) {
+//                 break;
+//             }
+//             p.advance_with_error("expected parameter");
+//         }
+//     }
+//     p.expect(RParen);
+
+//     p.close(m, ParamList);
+// }
+
+// fn param(p: &mut Parser) {
+//     assert!(p.at(Name));
+//     let m = p.open();
+
+//     p.expect(Name);
+//     p.expect(Colon);
+//     type_expr(p);
+//     if !p.at(RParen) {
+//         p.expect(Comma);
+//     }
+
+//     p.close(m, Param);
+// }
+
+// fn type_expr(p: &mut Parser) {
+//     let m = p.open();
+//     p.expect(Name);
+//     p.close(m, TypeExpr);
+// }
+
+// const STMT_RECOVERY: &[TokenKind] = &[FnKeyword];
+// const EXPR_FIRST: &[TokenKind] = &[Int, TrueKeyword, FalseKeyword, Name, LParen];
+// fn block(p: &mut Parser) {
+//     assert!(p.at(LCurly));
+//     let m = p.open();
+
+//     p.expect(LCurly);
+//     while !p.at(RCurly) && !p.eof() {
+//         match p.nth(0) {
+//             LetKeyword => stmt_let(p),
+//             ReturnKeyword => stmt_return(p),
+//             _ => {
+//                 if p.at_any(EXPR_FIRST) {
+//                     stmt_expr(p)
+//                 } else {
+//                     if p.at_any(STMT_RECOVERY) {
+//                         break;
+//                     }
+//                     p.advance_with_error("expected statement");
+//                 }
+//             }
+//         }
+//     }
+//     p.expect(RCurly);
+
+//     p.close(m, Block);
+// }
+
+// fn stmt_let(p: &mut Parser) {
+//     assert!(p.at(LetKeyword));
+//     let m = p.open();
+
+//     p.expect(LetKeyword);
+//     p.expect(Name);
+//     p.expect(Eq);
+//     expr(p);
+//     p.expect(Semi);
+
+//     p.close(m, StmtLet);
+// }
+
+// fn stmt_return(p: &mut Parser) {
+//     assert!(p.at(ReturnKeyword));
+//     let m = p.open();
+
+//     p.expect(ReturnKeyword);
+//     expr(p);
+//     p.expect(Semi);
+
+//     p.close(m, StmtReturn);
+// }
+
+// fn stmt_expr(p: &mut Parser) {
+//     let m = p.open();
+
+//     expr(p);
+//     p.expect(Semi);
+
+//     p.close(m, StmtExpr);
+// }
+
+// fn expr(p: &mut Parser) {
+//     expr_rec(p, Eof);
+// }
+
+// fn expr_rec(p: &mut Parser, left: TokenKind) {
+//     let Some(mut lhs) = expr_delimited(p) else {
+//     return;
+//   };
+
+//     while p.at(LParen) {
+//         let m = p.open_before(lhs);
+//         arg_list(p);
+//         lhs = p.close(m, ExprCall);
+//     }
+
+//     loop {
+//         let right = p.nth(0);
+//         if right_binds_tighter(left, right) {
+//             let m = p.open_before(lhs);
+//             p.advance();
+//             expr_rec(p, right);
+//             lhs = p.close(m, ExprBinary);
+//         } else {
+//             break;
+//         }
+//     }
+// }
+
+// fn right_binds_tighter(left: TokenKind, right: TokenKind) -> bool {
+//     fn tightness(kind: TokenKind) -> Option<usize> {
+//         [
+//             // Precedence table:
+//             [Plus, Minus].as_slice(),
+//             &[Star, Slash],
+//         ]
+//         .iter()
+//         .position(|level| level.contains(&kind))
+//     }
+//     let Some(right_tightness) = tightness(right) else {
+//     return false
+//   };
+//     let Some(left_tightness) = tightness(left) else {
+//     assert!(left == Eof);
+//     return true;
+//   };
+//     right_tightness > left_tightness
+// }
+
+// fn expr_delimited(p: &mut Parser) -> Option<MarkClosed> {
+//     let result = match p.nth(0) {
+//         TrueKeyword | FalseKeyword | Int => {
+//             let m = p.open();
+//             p.advance();
+//             p.close(m, ExprLiteral)
+//         }
+//         Name => {
+//             let m = p.open();
+//             p.advance();
+//             p.close(m, ExprName)
+//         }
+//         LParen => {
+//             let m = p.open();
+//             p.expect(LParen);
+//             expr(p);
+//             p.expect(RParen);
+//             p.close(m, ExprParen)
+//         }
+//         _ => return None,
+//     };
+//     Some(result)
+// }
+
+// fn arg_list(p: &mut Parser) {
+//     assert!(p.at(LParen));
+//     let m = p.open();
+
+//     p.expect(LParen);
+//     while !p.at(RParen) && !p.eof() {
+//         if p.at_any(EXPR_FIRST) {
+//             arg(p);
+//         } else {
+//             break;
+//         }
+//     }
+//     p.expect(RParen);
+
+//     p.close(m, ArgList);
+// }
+
+// fn arg(p: &mut Parser) {
+//     let m = p.open();
+//     expr(p);
+//     if !p.at(RParen) {
+//         p.expect(Comma);
+//     }
+//     p.close(m, Arg);
+// }
 
 fn main() {
-    let src = env::args().nth(1).expect("Expected file argument");
+    #[rustfmt::skip]
+    let text = 
+r#####"
+tokenizer {
+    #[skip] whitespace r"\\\\s+"
+    #[contextual] node 'node'
+    eq '='
+    number r"\\\\d+"
+    hash_string r#"r#*""# 'parse_raw_string'
+}
+"#####;
 
-    // let src = fs::read_to_string(&filename).expect("Failed to read file");
-
-    let (tokens, mut errs) = lexer().parse(src.as_str()).into_output_errors();
-
-    println!("{:#?}\n\n{:#?}", tokens.unwrap(), errs);
-
-    // let parse_errs = if let Some(tokens) = &tokens {
-    //     let (ast, parse_errs) = funcs_parser()
-    //         .map_with_span(|ast, span| (ast, span))
-    //         .parse(tokens.as_slice().spanned((src.len()..src.len()).into()))
-    //         .into_output_errors();
-
-    //     if let Some((funcs, file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
-    //         if let Some(main) = funcs.get("main") {
-    //             if main.args.len() != 0 {
-    //                 errs.push(Rich::custom(
-    //                     main.span,
-    //                     format!("The main function cannot have arguments"),
-    //                 ))
-    //             } else {
-    //                 match eval_expr(&main.body, &funcs, &mut Vec::new()) {
-    //                     Ok(val) => println!("Return value: {}", val),
-    //                     Err(e) => errs.push(Rich::custom(e.span, e.msg)),
-    //                 }
-    //             }
-    //         } else {
-    //             errs.push(Rich::custom(
-    //                 file_span,
-    //                 format!("Programs need a main function but none was found"),
-    //             ));
-    //         }
-    //     }
-
-    //     parse_errs
-    // } else {
-    //     Vec::new()
-    // };
-
-    // errs.into_iter()
-    //     .map(|e| e.map_token(|c| c.to_string()))
-    //     .chain(
-    //         parse_errs
-    //             .into_iter()
-    //             .map(|e| e.map_token(|tok| tok.to_string())),
-    //     )
-    //     .for_each(|e| {
-    //         Report::build(ReportKind::Error, filename.clone(), e.span().start)
-    //             .with_message(e.to_string())
-    //             .with_label(
-    //                 Label::new((filename.clone(), e.span().into_range()))
-    //                     .with_message(e.reason().to_string())
-    //                     .with_color(Color::Red),
-    //             )
-    //             .with_labels(e.contexts().map(|(label, span)| {
-    //                 Label::new((filename.clone(), span.into_range()))
-    //                     .with_message(format!("while parsing this {}", label))
-    //                     .with_color(Color::Yellow)
-    //             }))
-    //             .finish()
-    //             .print(sources([(filename.clone(), src.clone())]))
-    //             .unwrap()
-    //     });
+    let cst = parse(text);
+    let mut buf = String::new();
+    cst.print(&mut buf, text, 0);
+    eprintln!("{buf}");
 }

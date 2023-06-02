@@ -520,6 +520,7 @@ pub trait RecoverMethod {
 
 pub struct RecoverUntil<'a>(&'a [TokenKind]);
 impl<'a> RecoverMethod for RecoverUntil<'a> {
+    #[cold]
     fn recover(&self, p: &mut Parser) {
         let eof = p.eof();
         let at_any = p.at_any(self.0);
@@ -544,99 +545,53 @@ pub type ParseResult = Result<(), ParseErr>;
 
 
 macro_rules! probe {
-    ($($recover_scope:lifetime)? ; $($rule:expr;)+) => {
-        'finished: {
-            'error_trampoline: {
-                $(
-                    match $rule {
-                        ParseResult::Match => {},
-                        ParseResult::NoMatch => return ParseResult::NoMatch,
-                        ParseResult::Error => break 'error_trampoline,
-                    }
-                )+  
-                break 'finished
+    (err $err:expr, $($rule:expr),+) => {
+        $(
+            match $rule {
+                ParseResult::Match => {},
+                ParseResult::NoMatch => return ParseResult::NoMatch,
+                ParseResult::Error => $err,
             }
-    
-            $(
-                break $recover_scope;
-            )?
-            return ParseResult::Error;
-        }
+        )+
     };
 }
 
 macro_rules! optional {
-    ($($recover_scope:lifetime)? ; $($rule:expr;)+) => {
-        'finished: {
-            'error_trampoline: {
-                $(
-                    match $rule {
-                        ParseResult::Match | ParseResult::NoMatch => {},
-                        ParseResult::Error => break 'error_trampoline,
-                    }
-                )+  
-                break 'finished
+    (err $err:expr, $($rule:expr),+) => {
+        $(
+            match $rule {
+                ParseResult::Match | ParseResult::NoMatch => {},
+                ParseResult::Error => $err,
             }
-    
-            $(
-                break $recover_scope;
-            )?
-            return ParseResult::Error;
-        }
+        )+
     };
 }
 
-macro_rules! commit {
-    ($($recover_scope:lifetime)? ; $($rule:expr;)+) => {
-        'finished: {
-            'error_trampoline: {
-                $(
-                    match $rule {
-                        ParseResult::Match => {},
-                        ParseResult::NoMatch | ParseResult::Error => break 'error_trampoline,
-                    }
-                )+  
-                break 'finished
+macro_rules! expect {
+    (err $err:expr, $($rule:expr),+) => {
+        $(
+            match $rule {
+                ParseResult::Match => {},
+                ParseResult::NoMatch | ParseResult::Error => $err,
             }
-    
-            $(
-                break $recover_scope;
-            )?
-            return ParseResult::Error;
-        }
+        )+
     };
 }
 
 macro_rules! choice {
-    ($($recover_scope:lifetime)? ; default $default_scope:lifetime; $($rule:expr;)+) => {
-        'finished: {
-            'error_trampoline: {
-                $(
-                    match $rule {
-                        ParseResult::Match => break 'finished ParseResult::Match,
-                        ParseResult::NoMatch => {}
-                        ParseResult::Error => break 'error_trampoline,
-                    }
-                )+  
-                break $default_scope;
-            }
-    
+    (err $err:expr, $($rule:expr),+) => {
+        'choice: {
             $(
-                break $recover_scope;
-            )?
-            return ParseResult::Error;
-        }
-    };
-}
-
-macro_rules! recover {
-    ($name:lifetime, $p:expr, $method:expr => $rules:tt) => {
-        'escape: {
-            $name: {
-                $rules
-                break 'escape;
-            }
-            $method.recover($p);
+                match $rule {
+                    ParseResult::Match => break 'choice ParseResult::Match,
+                    ParseResult::NoMatch => {}
+                    ParseResult::Error => {
+                        $err;
+                        break 'choice ParseResult::Error;
+                    },
+                }
+            )+
+            $err;
         }
     };
 }
@@ -683,34 +638,18 @@ fn file(p: &mut Parser) -> ParseResult {
     ParseResult::Match
 }
 
-// macro_rules! recover_with {
-//     ($rule:expr, $recover:expr) => {{
-//         fn anonymous(p: &mut Parser) -> ParseResult {
-//             match $rule.1(p) {
-//                 ParseResult::Error => {
-//                     $recover.recover(p);
-//                     return ParseResult::Match;
-//                 }
-//                 other => other,
-//             }
-//         }
-//         pub const RECOVER: (TreeKind, fn(&mut Parser) -> ParseResult) = ($rule.0, anonymous);
-//         RECOVER
-//     }};
-// }
-
 // 'tokenizer' '{' TokenRule* '}'
 parser_rule! {Tokenizer, tokenizer}
 fn tokenizer(p: &mut Parser) -> ParseResult {
     probe! {
-        ;
-        p.terminal(TokenizerKeyword);
+        err {return ParseResult::Error},
+        p.terminal(TokenizerKeyword)
     }
-    commit! {
-        ;
-        p.terminal(LCurly);
-        p.nonterminal_repetition_star(TokenRule);
-        p.terminal(RCurly);
+    expect! {
+        err {return ParseResult::Error},
+        p.terminal(LCurly),
+        p.nonterminal_repetition_star(TokenRule),
+        p.terminal(RCurly)
     }
     Ok(())
 }
@@ -719,14 +658,14 @@ fn tokenizer(p: &mut Parser) -> ParseResult {
 parser_rule! {Meta, meta}
 fn meta(p: &mut Parser) -> ParseResult {
     probe! {
-        ;
-        p.terminal(Hash);
+        err {return ParseResult::Error},
+        p.terminal(Hash)
     }
-    commit! {
-        ;
-        p.terminal(LBracket);
-        p.terminal(Ident);
-        p.terminal(RBracket);
+    expect! {
+        err {return ParseResult::Error},
+        p.terminal(LBracket),
+        p.terminal(Ident),
+        p.terminal(RBracket)
     }
     Ok(())
 }
@@ -734,28 +673,23 @@ fn meta(p: &mut Parser) -> ParseResult {
 // Meta? Ident (Literal|RawLiteral) Literal?
 parser_rule! {TokenRule, token_rule}
 fn token_rule(p: &mut Parser) -> ParseResult {
-    recover! {
-        'recover, p, RecoverUntil(&[Hash, Ident]) => {
-            optional!{
-                'recover;
-                p.nonterminal(Meta);
-            };
-
-            probe!(
-                'recover;
-                p.terminal(Ident);
-            );
-
-            commit!(
-                'recover;
-                choice!{
-                    'recover; default 'recover;
-                    p.terminal(Literal);
-                    p.terminal(RawLiteral);
-                };
-                p.terminal(Literal);
-            );
-        }
+    let r = RecoverUntil(&[Hash, Ident]);
+    optional! {
+        err {r.recover(p); return Ok(())},
+        p.nonterminal(Meta)
+    }
+    probe! {
+        err {r.recover(p); return Ok(())},
+        p.terminal(Ident)
+    }
+    expect! {
+        err {r.recover(p); return Ok(())},
+        choice!{
+            err {r.recover(p); return Ok(())},
+            p.terminal(Literal),
+            p.terminal(RawLiteral)
+        },
+        p.terminal(Literal)
     }
     Ok(())
 }

@@ -1,4 +1,6 @@
-use std::{cell::Cell, fmt::Display};
+#![allow(unreachable_code)]
+
+use std::{cell::Cell};
 
 /// ```ignore
 /// tokenizer {
@@ -540,57 +542,110 @@ pub enum ParseErr {
 
 pub type ParseResult = Result<(), ParseErr>;
 
+
+macro_rules! probe {
+    ($($recover_scope:lifetime)? ; $($rule:expr;)+) => {
+        'finished: {
+            'error_trampoline: {
+                $(
+                    match $rule {
+                        ParseResult::Match => {},
+                        ParseResult::NoMatch => return ParseResult::NoMatch,
+                        ParseResult::Error => break 'error_trampoline,
+                    }
+                )+  
+                break 'finished
+            }
+    
+            $(
+                break $recover_scope;
+            )?
+            return ParseResult::Error;
+        }
+    };
+}
+
+macro_rules! optional {
+    ($($recover_scope:lifetime)? ; $($rule:expr;)+) => {
+        'finished: {
+            'error_trampoline: {
+                $(
+                    match $rule {
+                        ParseResult::Match | ParseResult::NoMatch => {},
+                        ParseResult::Error => break 'error_trampoline,
+                    }
+                )+  
+                break 'finished
+            }
+    
+            $(
+                break $recover_scope;
+            )?
+            return ParseResult::Error;
+        }
+    };
+}
+
+macro_rules! commit {
+    ($($recover_scope:lifetime)? ; $($rule:expr;)+) => {
+        'finished: {
+            'error_trampoline: {
+                $(
+                    match $rule {
+                        ParseResult::Match => {},
+                        ParseResult::NoMatch | ParseResult::Error => break 'error_trampoline,
+                    }
+                )+  
+                break 'finished
+            }
+    
+            $(
+                break $recover_scope;
+            )?
+            return ParseResult::Error;
+        }
+    };
+}
+
+macro_rules! choice {
+    ($($recover_scope:lifetime)? ; default $default_scope:lifetime; $($rule:expr;)+) => {
+        'finished: {
+            'error_trampoline: {
+                $(
+                    match $rule {
+                        ParseResult::Match => break 'finished ParseResult::Match,
+                        ParseResult::NoMatch => {}
+                        ParseResult::Error => break 'error_trampoline,
+                    }
+                )+  
+                break $default_scope;
+            }
+    
+            $(
+                break $recover_scope;
+            )?
+            return ParseResult::Error;
+        }
+    };
+}
+
+macro_rules! recover {
+    ($name:lifetime, $p:expr, $method:expr => $rules:tt) => {
+        'escape: {
+            $name: {
+                $rules
+                break 'escape;
+            }
+            $method.recover($p);
+        }
+    };
+}
+
 #[allow(non_upper_case_globals)]
 trait ParseResultTrait: Into<ParseResult> + Copy {
     const Match: ParseResult = ParseResult::Ok(());
     const NoMatch: ParseResult = ParseResult::Err(ParseErr::NoMatch);
     const Error: ParseResult = ParseResult::Err(ParseErr::Error);
-    fn probe(self) -> ParseResult {
-        match self.into() {
-            ParseResult::Match => ParseResult::Match,
-            _ => ParseResult::NoMatch,
-        }
-    }
-    fn optional(self) -> ParseResult {
-        match self.into() {
-            ParseResult::Match | ParseResult::NoMatch => ParseResult::Match,
-            _ => ParseResult::NoMatch,
-        }
-    }
-    fn commit(self) -> ParseResult {
-        match self.into() {
-            ParseResult::NoMatch => ParseResult::Error,
-            other => other,
-        }
-    }
-    fn recover(
-        self,
-        p: &mut Parser,
-        m: SpanIndex,
-        kind: TreeKind,
-        method: &dyn RecoverMethod,
-        err: &dyn Display,
-    ) -> ParseResult {
-        let this = self.into();
-        match this {
-            ParseResult::Match => {
-                p.close(m, kind);
-            }
-            ParseResult::NoMatch => {}
-            ParseResult::Error => {
-                method.recover(p);
-                p.close_with_err_kind(m, kind, err);
-                return ParseResult::Match;
-            }
-        }
-
-        this
-    }
-    fn close(self, p: &mut Parser, m: SpanIndex, kind: TreeKind) {
-        if self.into() == ParseResult::Match {
-            p.close(m, kind);
-        }
-    }
 }
 impl ParseResultTrait for ParseResult {}
 
@@ -628,68 +683,101 @@ fn file(p: &mut Parser) -> ParseResult {
     ParseResult::Match
 }
 
-macro_rules! recover_with {
-    ($rule:expr, $recover:expr) => {{
-        fn anonymous(p: &mut Parser) -> ParseResult {
-            match $rule.1(p) {
-                ParseResult::Error => {
-                    $recover.recover(p);
-                    return ParseResult::Match;
-                }
-                other => other,
-            }
-        }
-        pub const RECOVER: (TreeKind, fn(&mut Parser) -> ParseResult) = ($rule.0, anonymous);
-        RECOVER
-    }};
-}
+// macro_rules! recover_with {
+//     ($rule:expr, $recover:expr) => {{
+//         fn anonymous(p: &mut Parser) -> ParseResult {
+//             match $rule.1(p) {
+//                 ParseResult::Error => {
+//                     $recover.recover(p);
+//                     return ParseResult::Match;
+//                 }
+//                 other => other,
+//             }
+//         }
+//         pub const RECOVER: (TreeKind, fn(&mut Parser) -> ParseResult) = ($rule.0, anonymous);
+//         RECOVER
+//     }};
+// }
 
-// 'tokenizer' { TokenRule* }
+// 'tokenizer' '{' TokenRule* '}'
 parser_rule! {Tokenizer, tokenizer}
 fn tokenizer(p: &mut Parser) -> ParseResult {
-    p.terminal(TokenizerKeyword).probe()?;
-    p.terminal(LCurly).commit()?;
-    p.nonterminal_repetition_star(recover_with!(
-        TokenRule,
-        &RecoverUntil(&[Hash, Ident, RCurly])
-    ))?;
-    p.terminal(RCurly).commit()?;
+    probe! {
+        ;
+        p.terminal(TokenizerKeyword);
+    }
+    commit! {
+        ;
+        p.terminal(LCurly);
+        p.nonterminal_repetition_star(TokenRule);
+        p.terminal(RCurly);
+    }
     Ok(())
 }
 
 // '#' '[' Ident ']'
 parser_rule! {Meta, meta}
 fn meta(p: &mut Parser) -> ParseResult {
-    p.terminal(Hash).probe()?;
-    p.terminal(LBracket).commit()?;
-    p.terminal(Ident).commit()?;
-    p.terminal(RBracket).commit()?;
+    probe! {
+        ;
+        p.terminal(Hash);
+    }
+    commit! {
+        ;
+        p.terminal(LBracket);
+        p.terminal(Ident);
+        p.terminal(RBracket);
+    }
     Ok(())
 }
 
 // Meta? Ident (Literal|RawLiteral) Literal?
 parser_rule! {TokenRule, token_rule}
 fn token_rule(p: &mut Parser) -> ParseResult {
-    p.nonterminal(Meta).optional()?;
-    p.terminal(Ident).probe()?;
-    p.terminal(Literal)
-        .or_else(|_| p.terminal(RawLiteral))
-        .commit()?;
-    p.terminal(Literal).optional()?;
+    recover! {
+        'recover, p, RecoverUntil(&[Hash, Ident]) => {
+            optional!{
+                'recover;
+                p.nonterminal(Meta);
+            };
+
+            probe!(
+                'recover;
+                p.terminal(Ident);
+            );
+
+            commit!(
+                'recover;
+                choice!{
+                    'recover; default 'recover;
+                    p.terminal(Literal);
+                    p.terminal(RawLiteral);
+                };
+                p.terminal(Literal);
+            );
+        }
+    }
     Ok(())
 }
 
-// 'rule' Ident '{' rule_expr '}'
-parser_rule! {Rule, rule}
-fn rule(p: &mut Parser) -> ParseResult {
-    p.nonterminal(Meta).optional()?;
-    p.terminal(Ident).probe()?;
-    p.terminal(Literal)
-        .or_else(|_| p.terminal(RawLiteral))
-        .commit()?;
-    p.terminal(Literal).optional()?;
-    Ok(())
-}
+// // 'rule' Ident '{' rule_expr '}'
+// parser_rule! {Rule, rule}
+// fn rule(p: &mut Parser) -> ParseResult {
+//     optional! {
+//         ;
+//         p.nonterminal(Meta);
+//     }
+//     probe! {
+//         ;
+//         p.terminal(Ident);
+//     }
+
+//     p.terminal(Literal)
+//         .or_else(|_| p.terminal(RawLiteral))
+//         .commit()?;
+//     p.terminal(Literal).optional()?;
+//     Ok(())
+// }
 
 // const PARAM_LIST_RECOVERY: &[TokenKind] = &[FnKeyword, LCurly];
 // fn param_list(p: &mut Parser) {
@@ -895,7 +983,13 @@ fn main() {
     #[rustfmt::skip]
     let text = 
 r#####"
-rule
+tokenizer {
+    #[skip] whitespace r"\\\\\\\\\\\\\\\\s+"
+    #[contextual] node 'node'
+    eq '='
+    number r"\\\\\\\\\\\\\\\\d+"
+    hash_string r#"r#*""# 'parse_raw_string'
+}
 "#####;
 
     let cst = parse(text);

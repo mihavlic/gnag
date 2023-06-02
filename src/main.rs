@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::{cell::Cell, fmt::Display};
 
 /// ```ignore
 /// tokenizer {
@@ -31,7 +31,7 @@ enum TokenKind {
 
 #[derive(Clone, Copy, Debug)]
 #[rustfmt::skip]
-enum TreeKind {
+pub enum TreeKind {
     File,
       ErrorTree,
       Meta,
@@ -42,7 +42,6 @@ enum TreeKind {
 }
 
 use TokenKind::*;
-use TreeKind::*;
 
 #[derive(Clone, Copy, Debug)]
 struct Span {
@@ -75,16 +74,10 @@ enum Child {
     Tree(Tree),
 }
 
-#[derive(Clone, Debug)]
-pub struct Tree {
-    kind: TreeKind,
-    children: Vec<Child>,
-}
-
 pub fn parse(text: &str) -> Tree {
     let tokens = lex(text);
     let mut p = Parser::new(tokens);
-    file(&mut p);
+    _ = file(&mut p);
     p.build_tree()
 }
 
@@ -96,10 +89,21 @@ macro_rules! format_to {
     };
 }
 
+#[derive(Clone, Debug)]
+pub struct Tree {
+    kind: TreeKind,
+    children: Vec<Child>,
+    err: Option<String>,
+}
+
 impl Tree {
     fn print(&self, buf: &mut dyn std::fmt::Write, src: &str, level: usize) {
         let indent = "  ".repeat(level);
-        format_to!(buf, "{indent}{:?}\n", self.kind);
+        format_to!(buf, "{indent}{:?}", self.kind);
+        if let Some(err) = &self.err {
+            format_to!(buf, "'{err}'");
+        }
+        format_to!(buf, "\n");
         for child in &self.children {
             match child {
                 Child::Token(token) => {
@@ -247,37 +251,23 @@ fn lex(src: &str) -> Vec<Token> {
     }
 }
 
-#[derive(Debug)]
-enum Event {
-    Open { kind: TreeKind },
-    Close,
-    Advance,
-}
-
 #[derive(Clone, Copy)]
-struct MarkOpened {
-    index: u32,
-    pos: u32,
+struct SpanIndex(u32);
+
+#[derive(Clone)]
+struct TreeSpan {
+    kind: TreeKind,
+    start: u32,
+    end: u32,
+    // TODO pointer to bump allocator?
+    err: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-struct MarkClosed {
-    index: u32,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ParseError {
-    NoMatch,
-    Error,
-}
-
-type ParseResult = Result<(), ParseError>;
-
-struct Parser {
+pub struct Parser {
     tokens: Vec<Token>,
     pos: u32,
     fuel: Cell<u32>,
-    events: Vec<Event>,
+    tree: Vec<TreeSpan>,
 }
 
 impl Parser {
@@ -286,112 +276,138 @@ impl Parser {
             tokens,
             pos: 0,
             fuel: Cell::new(256),
-            events: Vec::new(),
+            tree: Vec::new(),
         }
     }
 
     fn build_tree(self) -> Tree {
-        let mut tokens = self.tokens.into_iter();
-        let mut events = self.events;
+        let root = self.tree.first().unwrap();
+        assert_eq!(root.start, 0);
+        assert_eq!(root.end, self.tokens.len() as u32);
 
-        assert!(matches!(events.pop(), Some(Event::Close)));
+        let tokens = self.tokens.into_iter();
+        let mut tree_spans = self.tree.iter();
+
+        // println!("{stack:#?}\n\n{:#?}", tokens.clone().collect::<Vec<_>>());
+
+        // |-A------------|  -- root
+        // |  |-b-|   |-c-|  -- intermediate tree nodes
+        // |tttttttttttttt|  -- tokens
         let mut stack = Vec::new();
-        for event in events {
-            match event {
-                Event::Open { kind } => stack.push(Tree {
-                    kind,
-                    children: Vec::new(),
-                }),
-                Event::Close => {
-                    let tree = stack.pop().unwrap();
-                    stack.last_mut().unwrap().children.push(Child::Tree(tree));
+        let mut span_end_stack = Vec::new();
+
+        for (token, i) in tokens.zip(0..) {
+            while let Some(peek) = tree_spans.clone().next() {
+                // debug_assert!(peek.start <= i);
+                if i == peek.start {
+                    stack.push(Tree {
+                        kind: peek.kind,
+                        children: Vec::new(),
+                        err: peek.err.clone(),
+                    });
+                    span_end_stack.push(peek.end - 1);
+                    tree_spans.next();
+                    continue;
                 }
-                Event::Advance => {
-                    let token = tokens.next().unwrap();
-                    stack.last_mut().unwrap().children.push(Child::Token(token));
+                break;
+            }
+
+            let node = stack.last_mut().unwrap();
+            node.children.push(Child::Token(token));
+
+            while let Some(end) = span_end_stack.last().copied() {
+                if i == end {
+                    if stack.len() == 1 {
+                        break;
+                    }
+
+                    span_end_stack.pop();
+                    let node = stack.pop().unwrap();
+                    stack.last_mut().unwrap().children.push(Child::Tree(node));
+                } else {
+                    break;
                 }
             }
         }
 
-        // println!("{stack:#?}\n\n{:#?}", tokens.clone().collect::<Vec<_>>());
-
         let tree = stack.pop().unwrap();
-        assert!(stack.is_empty());
-        assert!(tokens.next().is_none());
         tree
     }
 
-    fn open(&mut self) -> MarkOpened {
-        let mark = MarkOpened {
-            index: self.events.len() as u32,
-            pos: self.pos,
-        };
-        self.events.push(Event::Open {
+    fn open(&mut self) -> SpanIndex {
+        let len = self.tree.len() as u32;
+
+        self.tree.push(TreeSpan {
             kind: TreeKind::ErrorTree,
+            start: self.pos,
+            end: self.pos,
+            err: None,
         });
-        mark
+
+        SpanIndex(len)
     }
 
-    // fn open_before(&mut self, m: MarkClosed) -> MarkOpened {
-    //     let mark = MarkOpened {
-    //         // TODO is this correct?
-    //         index: m.index + 1,
-    //         pos: self.pos,
-    //     };
-    //     self.events.insert(
-    //         m.index as usize,
-    //         Event::Open {
-    //             kind: TreeKind::ErrorTree,
-    //         },
-    //     );
-    //     mark
+    fn close(&mut self, m: SpanIndex, kind: TreeKind) {
+        let span = &mut self.tree[m.0 as usize];
+        span.end = self.pos;
+        span.kind = kind;
+    }
+
+    fn close_with_err(&mut self, m: SpanIndex, err: impl ToString) {
+        self.close_with_err_impl(m, TreeKind::ErrorTree, err.to_string());
+    }
+
+    fn close_with_err_kind(&mut self, m: SpanIndex, kind: TreeKind, err: impl ToString) {
+        self.close_with_err_impl(m, kind, err.to_string());
+    }
+
+    #[doc(hidden)]
+    fn close_with_err_impl(&mut self, m: SpanIndex, kind: TreeKind, err: String) {
+        let span = &mut self.tree[m.0 as usize];
+        span.end = self.pos;
+        span.kind = kind;
+        span.err = Some(err);
+    }
+
+    // fn close_last(&mut self, kind: TreeKind) {
+    //     let span = self.tree.last_mut().unwrap();
+    //     debug_assert!(span.is_empty(), "Attempt to close span twice");
+    //     span.end = self.pos;
+    //     span.kind = kind;
     // }
 
-    fn close(&mut self, m: MarkOpened, kind: TreeKind) -> MarkClosed {
-        self.events[m.index as usize] = Event::Open { kind };
-        self.events.push(Event::Close);
-        MarkClosed { index: m.index }
+    fn remove(&mut self, m: SpanIndex) {
+        let span = &self.tree[m.0 as usize];
+        self.pos = span.start;
+        self.tree.truncate(m.0 as usize);
     }
 
-    fn close_advance_with_error(&mut self, m: MarkOpened, error: &str) -> MarkClosed {
-        eprintln!("{error}");
-        self.advance();
-        self.close(m, ErrorTree)
+    // fn remove_last(&mut self) {
+    //     let span = self.tree.pop().unwrap();
+    //     debug_assert!(span.is_empty(), "Cannot remove closed span");
+    //     self.pos = span.start;
+    // }
+
+    fn reset(&mut self, m: SpanIndex) {
+        self.tree.truncate((m.0 + 1) as usize);
+        let span = &mut self.tree[m.0 as usize];
+        span.end = span.start;
+        self.pos = span.start;
     }
 
-    fn reset(&mut self, m: MarkOpened) {
-        self.events.truncate((m.index + 1) as usize);
-        self.pos = m.pos;
-    }
-
-    fn unopen(&mut self, m: MarkOpened) {
-        self.events.truncate((m.index) as usize);
-        self.pos = m.pos;
-    }
+    // fn reset_last(&mut self) {
+    //     let span = self.tree.last_mut().unwrap();
+    //     span.end = span.start;
+    //     self.pos = span.start;
+    // }
 
     fn advance(&mut self) {
         assert!(!self.eof());
         self.fuel.set(256);
-        self.events.push(Event::Advance);
         self.pos += 1;
     }
 
-    fn advance_with_error(&mut self, error: &str) {
-        let m = self.open();
-        // TODO: Error reporting.
-        // eprintln!("{error}");
-        self.advance();
-        self.close(m, ErrorTree);
-    }
-
-    fn advance_with_error_fmt(&mut self, error: std::fmt::Arguments) {
-        let m = self.open();
-        // TODO: Error reporting.
-        // eprintln!("{error}");
-        self.advance();
-        self.close(m, ErrorTree);
-    }
-
+    #[inline]
     fn eof(&self) -> bool {
         self.pos as usize == self.tokens.len()
     }
@@ -406,175 +422,272 @@ impl Parser {
             .map_or(TokenKind::Eof, |it| it.kind)
     }
 
+    #[inline]
     fn at(&self, kind: TokenKind) -> bool {
         self.nth(0) == kind
     }
 
+    #[inline]
     fn at_any(&self, kinds: &[TokenKind]) -> bool {
         kinds.contains(&self.nth(0))
     }
 
     #[must_use]
-    fn eat(&mut self, kind: TokenKind) -> ParseResult {
+    fn terminal(&mut self, kind: TokenKind) -> ParseResult {
         if self.at(kind) {
             self.advance();
-            ParseResult::Ok(())
+            ParseResult::Match
         } else {
-            ParseResult::Err(ParseError::NoMatch)
+            ParseResult::NoMatch
         }
     }
 
     #[must_use]
-    fn expect(&mut self, kind: TokenKind) -> ParseResult {
-        let cur = self.nth(0);
-        if cur == kind {
-            self.advance();
-            ParseResult::Ok(())
-        } else {
-            self.advance_with_error_fmt(format_args!("Expected token {kind:?}"));
-            ParseResult::Err(ParseError::Error)
-        }
-    }
-
-    fn match_try(
+    fn nonterminal(
         &mut self,
-        m: MarkOpened,
-        kind: TreeKind,
-        fun: fn(&mut Parser) -> ParseResult,
-    ) -> bool {
-        match fun(self) {
-            Ok(()) | Err(ParseError::Error) => {
-                self.close(m, kind);
-                true
-            }
-            Err(ParseError::NoMatch) => {
-                self.reset(m);
-                false
-            }
-        }
-    }
-
-    fn match_optional(
-        &mut self,
-        kind: TreeKind,
-        fun: fn(&mut Parser) -> ParseResult,
+        (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult),
     ) -> ParseResult {
         let m = self.open();
         let res = fun(self);
         match res {
-            Ok(()) | Err(ParseError::Error) => {
+            ParseResult::Match => {
                 self.close(m, kind);
             }
-            Err(ParseError::NoMatch) => {
-                self.unopen(m);
-                return Ok(());
+            ParseResult::NoMatch => {
+                self.remove(m);
+            }
+            ParseResult::Error => {
+                self.close_with_err(m, "Error");
             }
         }
         res
     }
 
-    fn match_repetition_star(
+    #[must_use]
+    fn nonterminal_repetition_star(
         &mut self,
-        kind: TreeKind,
-        fun: fn(&mut Parser) -> ParseResult,
+        rule: (TreeKind, fn(&mut Parser) -> ParseResult),
     ) -> ParseResult {
         while !self.eof() {
-            let m = self.open();
-            let res = fun(self);
-            match res {
-                Ok(()) | Err(ParseError::Error) => {
-                    self.close(m, kind);
-                    continue;
+            match self.nonterminal(rule) {
+                ParseResult::Match => { /* continue */ }
+                ParseResult::NoMatch => {
+                    return ParseResult::Match;
                 }
-                Err(ParseError::NoMatch) => {
-                    self.unopen(m);
-                    break;
+                ParseResult::Error => {
+                    return ParseResult::Error;
                 }
             }
         }
-        Ok(())
+
+        ParseResult::Match
     }
 
-    fn match_repetition_plus(
+    #[must_use]
+    fn nonterminal_repetition_plus(
         &mut self,
-        kind: TreeKind,
-        fun: fn(&mut Parser) -> ParseResult,
+        (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult),
     ) -> ParseResult {
         let mut first = true;
         while !self.eof() {
-            let m = self.open();
-            let res = fun(self);
-            match res {
-                Ok(()) | Err(ParseError::Error) => {
-                    first = false;
-                    self.close(m, kind);
-                    continue;
+            match self.nonterminal((kind, fun)) {
+                ParseResult::Match => { /* continue */ }
+                ParseResult::NoMatch => {
+                    if first {
+                        // FIXME or ParseResult::Error?
+                        // we want optional(repetition_plus) to have the same behaviour as repetition_star
+                        return ParseResult::NoMatch;
+                    } else {
+                        return ParseResult::Match;
+                    }
                 }
-                Err(ParseError::NoMatch) => {
-                    self.unopen(m);
-                    break;
+                ParseResult::Error => {
+                    return ParseResult::Error;
                 }
             }
+            first = false;
         }
-        if first {
-            // TODO custom recover
-            self.advance_with_error_fmt(format_args!("{kind:?} must occur at leats once"));
-            return Err(ParseError::Error);
-        }
-        Ok(())
+
+        ParseResult::Match
     }
 }
 
-fn file(p: &mut Parser) {
+pub trait RecoverMethod {
+    fn recover(&self, p: &mut Parser);
+}
+
+pub struct RecoverUntil<'a>(&'a [TokenKind]);
+impl<'a> RecoverMethod for RecoverUntil<'a> {
+    fn recover(&self, p: &mut Parser) {
+        let eof = p.eof();
+        let at_any = p.at_any(self.0);
+        while !(eof || at_any) {
+            p.advance()
+        }
+    }
+}
+
+pub struct RecoverStop;
+impl RecoverMethod for RecoverStop {
+    fn recover(&self, _: &mut Parser) {}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseErr {
+    NoMatch,
+    Error,
+}
+
+pub type ParseResult = Result<(), ParseErr>;
+
+#[allow(non_upper_case_globals)]
+trait ParseResultTrait: Into<ParseResult> + Copy {
+    const Match: ParseResult = ParseResult::Ok(());
+    const NoMatch: ParseResult = ParseResult::Err(ParseErr::NoMatch);
+    const Error: ParseResult = ParseResult::Err(ParseErr::Error);
+    fn probe(self) -> ParseResult {
+        match self.into() {
+            ParseResult::Match => ParseResult::Match,
+            _ => ParseResult::NoMatch,
+        }
+    }
+    fn optional(self) -> ParseResult {
+        match self.into() {
+            ParseResult::Match | ParseResult::NoMatch => ParseResult::Match,
+            _ => ParseResult::NoMatch,
+        }
+    }
+    fn commit(self) -> ParseResult {
+        match self.into() {
+            ParseResult::NoMatch => ParseResult::Error,
+            other => other,
+        }
+    }
+    fn recover(
+        self,
+        p: &mut Parser,
+        m: SpanIndex,
+        kind: TreeKind,
+        method: &dyn RecoverMethod,
+        err: &dyn Display,
+    ) -> ParseResult {
+        let this = self.into();
+        match this {
+            ParseResult::Match => {
+                p.close(m, kind);
+            }
+            ParseResult::NoMatch => {}
+            ParseResult::Error => {
+                method.recover(p);
+                p.close_with_err_kind(m, kind, err);
+                return ParseResult::Match;
+            }
+        }
+
+        this
+    }
+    fn close(self, p: &mut Parser, m: SpanIndex, kind: TreeKind) {
+        if self.into() == ParseResult::Match {
+            p.close(m, kind);
+        }
+    }
+}
+impl ParseResultTrait for ParseResult {}
+
+macro_rules! parser_rule {
+    ($kind:ident, $function:expr) => {
+        #[allow(non_upper_case_globals)]
+        pub const $kind: (TreeKind, fn(&mut Parser) -> ParseResult) = (TreeKind::$kind, $function);
+    };
+}
+
+parser_rule! {File, file}
+fn file(p: &mut Parser) -> ParseResult {
     let m = p.open();
-    while !p.eof() {
+    'main: while !p.eof() {
         let m = p.open();
-        if p.match_try(m, Tokenizer, tokenizer) {
-            continue;
+        // TODO put this inside the rule itself
+        'err: {
+            match tokenizer(p) {
+                ParseResult::Match => p.close(m, TreeKind::Tokenizer),
+                ParseResult::NoMatch => {
+                    // no rules matched
+                    RecoverUntil(&[TokenizerKeyword, RuleKeyword]).recover(p);
+                    p.close_with_err(m, "Unknown rule");
+                }
+                ParseResult::Error => break 'err,
+            }
+
+            continue 'main;
         }
-
-        p.unopen(m);
-        break;
-        // p.close_advance_with_error(m, "Unknown patern");
+        RecoverUntil(&[TokenizerKeyword, RuleKeyword]).recover(p);
+        p.close_with_err_kind(m, TreeKind::Tokenizer, "Tokenizer error");
+        continue 'main;
     }
-    p.close(m, File);
+    p.close(m, TreeKind::File);
+    ParseResult::Match
 }
 
-/// ```ignore
-/// tokenizer {
-///     #[skip] whitespace r"\s+"
-///     #[contextual] node 'node'
-///     eq '='
-///     number r"\d+"
-///     hash_string r#"r#*""# 'parse_raw_string'
-/// }
-/// ```
+macro_rules! recover_with {
+    ($rule:expr, $recover:expr) => {{
+        fn anonymous(p: &mut Parser) -> ParseResult {
+            match $rule.1(p) {
+                ParseResult::Error => {
+                    $recover.recover(p);
+                    return ParseResult::Match;
+                }
+                other => other,
+            }
+        }
+        pub const RECOVER: (TreeKind, fn(&mut Parser) -> ParseResult) = ($rule.0, anonymous);
+        RECOVER
+    }};
+}
+
+// 'tokenizer' { TokenRule* }
+parser_rule! {Tokenizer, tokenizer}
 fn tokenizer(p: &mut Parser) -> ParseResult {
-    p.eat(TokenizerKeyword)?;
-    p.expect(LCurly)?;
-
-    p.match_repetition_star(TokenRule, token_rule)?;
-
-    p.expect(RCurly)?;
+    p.terminal(TokenizerKeyword).probe()?;
+    p.terminal(LCurly).commit()?;
+    p.nonterminal_repetition_star(recover_with!(
+        TokenRule,
+        &RecoverUntil(&[Hash, Ident, RCurly])
+    ))?;
+    p.terminal(RCurly).commit()?;
     Ok(())
 }
 
+// '#' '[' Ident ']'
+parser_rule! {Meta, meta}
 fn meta(p: &mut Parser) -> ParseResult {
-    p.eat(Hash)?;
-    // commit
-    p.expect(LBracket)?;
-    p.expect(Ident)?;
-    p.expect(RBracket)?;
+    p.terminal(Hash).probe()?;
+    p.terminal(LBracket).commit()?;
+    p.terminal(Ident).commit()?;
+    p.terminal(RBracket).commit()?;
     Ok(())
 }
 
+// Meta? Ident (Literal|RawLiteral) Literal?
+parser_rule! {TokenRule, token_rule}
 fn token_rule(p: &mut Parser) -> ParseResult {
-    p.match_optional(Meta, meta)?;
-    p.eat(Ident)?;
-    // commit
-    p.eat(Literal).or_else(|_| p.expect(RawLiteral))?;
-    let _ = p.eat(Literal);
+    p.nonterminal(Meta).optional()?;
+    p.terminal(Ident).probe()?;
+    p.terminal(Literal)
+        .or_else(|_| p.terminal(RawLiteral))
+        .commit()?;
+    p.terminal(Literal).optional()?;
+    Ok(())
+}
 
+// 'rule' Ident '{' rule_expr '}'
+parser_rule! {Rule, rule}
+fn rule(p: &mut Parser) -> ParseResult {
+    p.nonterminal(Meta).optional()?;
+    p.terminal(Ident).probe()?;
+    p.terminal(Literal)
+        .or_else(|_| p.terminal(RawLiteral))
+        .commit()?;
+    p.terminal(Literal).optional()?;
     Ok(())
 }
 
@@ -782,13 +895,7 @@ fn main() {
     #[rustfmt::skip]
     let text = 
 r#####"
-tokenizer {
-    #[skip] whitespace r"\\\\s+"
-    #[contextual] node 'node'
-    eq '='
-    number r"\\\\d+"
-    hash_string r#"r#*""# 'parse_raw_string'
-}
+rule
 "#####;
 
     let cst = parse(text);

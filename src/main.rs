@@ -103,7 +103,7 @@ impl Tree {
         let indent = "  ".repeat(level);
         format_to!(buf, "{indent}{:?}", self.kind);
         if let Some(err) = &self.err {
-            format_to!(buf, "'{err}'");
+            format_to!(buf, " '{err}'");
         }
         format_to!(buf, "\n");
         for child in &self.children {
@@ -283,52 +283,65 @@ impl Parser {
     }
 
     fn build_tree(self) -> Tree {
-        let root = self.tree.first().unwrap();
-        assert_eq!(root.start, 0);
-        assert_eq!(root.end, self.tokens.len() as u32);
-
-        let tokens = self.tokens.into_iter();
+        
+        let mut tokens = self.tokens.into_iter();
         let mut tree_spans = self.tree.iter();
-
+        
         // println!("{stack:#?}\n\n{:#?}", tokens.clone().collect::<Vec<_>>());
+
+        let root = tree_spans.next().unwrap();
+        assert_eq!(root.start, 0);
+        assert_eq!(root.end, tokens.len() as u32);
 
         // |-A------------|  -- root
         // |  |-b-|   |-c-|  -- intermediate tree nodes
         // |tttttttttttttt|  -- tokens
-        let mut stack = Vec::new();
-        let mut span_end_stack = Vec::new();
 
-        for (token, i) in tokens.zip(0..) {
-            while let Some(peek) = tree_spans.clone().next() {
-                // debug_assert!(peek.start <= i);
-                if i == peek.start {
-                    stack.push(Tree {
-                        kind: peek.kind,
-                        children: Vec::new(),
-                        err: peek.err.clone(),
-                    });
-                    span_end_stack.push(peek.end - 1);
-                    tree_spans.next();
-                    continue;
+        let mut span_stack = vec![root];
+        let mut stack: Vec<Tree> = vec![Tree {
+            kind: root.kind,
+            children: Vec::new(),
+            err: root.err.clone(),
+        }];
+        let mut pos = 0;
+
+        loop {
+            let cur = stack.last_mut().unwrap();
+            let cur_span = span_stack.last().unwrap();
+            let next = tree_spans.clone().next();
+            
+            let mut limit = cur_span.end;
+            if let Some(next) = next {
+                if next.start < cur_span.end {
+                    debug_assert!(next.end <= cur_span.end);
+                    limit = next.start;
                 }
-                break;
             }
 
-            let node = stack.last_mut().unwrap();
-            node.children.push(Child::Token(token));
-
-            while let Some(end) = span_end_stack.last().copied() {
-                if i == end {
-                    if stack.len() == 1 {
-                        break;
-                    }
-
-                    span_end_stack.pop();
-                    let node = stack.pop().unwrap();
-                    stack.last_mut().unwrap().children.push(Child::Tree(node));
-                } else {
-                    break;
+            while pos < limit {
+                pos += 1;
+                cur.children.push(Child::Token(tokens.next().unwrap()));
+            }
+                        
+            if let Some(next) = next {
+                if next.start < cur_span.end {
+                    tree_spans.next();
+                    span_stack.push(next);
+                    stack.push(Tree {
+                        kind: next.kind,
+                        children: Vec::new(),
+                        err: next.err.clone(),
+                    });
+                    continue;
                 }
+            }
+            
+            if stack.len() > 1 {
+                span_stack.pop();
+                let tree = stack.pop().unwrap();
+                stack.last_mut().unwrap().children.push(Child::Tree(tree));
+            } else {
+                break;
             }
         }
 
@@ -522,11 +535,11 @@ pub struct RecoverUntil<'a>(&'a [TokenKind]);
 impl<'a> RecoverMethod for RecoverUntil<'a> {
     #[cold]
     fn recover(&self, p: &mut Parser) {
-        let eof = p.eof();
-        let at_any = p.at_any(self.0);
-        while !(eof || at_any) {
+        let m = p.open();
+        while !(p.eof() || p.at_any(self.0)) {
             p.advance()
         }
+        p.close_with_err(m, "Recover until");
     }
 }
 
@@ -673,7 +686,7 @@ fn meta(p: &mut Parser) -> ParseResult {
 // Meta? Ident (Literal|RawLiteral) Literal?
 parser_rule! {TokenRule, token_rule}
 fn token_rule(p: &mut Parser) -> ParseResult {
-    let r = RecoverUntil(&[Hash, Ident]);
+    let r = RecoverUntil(&[Hash, Ident, RCurly]);
     optional! {
         err {r.recover(p); return Ok(())},
         p.nonterminal(Meta)

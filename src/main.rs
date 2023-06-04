@@ -1,6 +1,8 @@
 #![allow(unreachable_code)]
 
-use std::{cell::Cell};
+pub mod bump;
+
+use std::cell::Cell;
 
 /// ```ignore
 /// tokenizer {
@@ -254,6 +256,9 @@ fn lex(src: &str) -> Vec<Token> {
 }
 
 #[derive(Clone, Copy)]
+struct SpanStart(u32);
+
+#[derive(Clone, Copy)]
 struct SpanIndex(u32);
 
 #[derive(Clone)]
@@ -261,15 +266,19 @@ struct TreeSpan {
     kind: TreeKind,
     start: u32,
     end: u32,
-    // TODO pointer to bump allocator?
-    err: Option<String>,
+}
+
+struct ParseError {
+    err: String,
+    span: SpanIndex,
 }
 
 pub struct Parser {
     tokens: Vec<Token>,
     pos: u32,
     fuel: Cell<u32>,
-    tree: Vec<TreeSpan>,
+    spans: Vec<TreeSpan>,
+    errors: Vec<ParseError>,
 }
 
 impl Parser {
@@ -278,143 +287,133 @@ impl Parser {
             tokens,
             pos: 0,
             fuel: Cell::new(256),
-            tree: Vec::new(),
+            spans: Vec::new(),
+            errors: Vec::new(),
         }
     }
 
     fn build_tree(self) -> Tree {
-        
-        let mut tokens = self.tokens.into_iter();
-        let mut tree_spans = self.tree.iter();
-        
-        // println!("{stack:#?}\n\n{:#?}", tokens.clone().collect::<Vec<_>>());
-
-        let root = tree_spans.next().unwrap();
-        assert_eq!(root.start, 0);
-        assert_eq!(root.end, tokens.len() as u32);
-
         // |-A------------|  -- root
         // |  |-b-|   |-c-|  -- intermediate tree nodes
         // |tttttttttttttt|  -- tokens
 
+        let mut tokens = self.tokens.into_iter().rev();
+        let mut errors = self
+            .errors
+            .into_iter()
+            .rev()
+            .peekable();
+        let mut spans = self
+            .spans
+            .iter()
+            .zip(0u32..self.spans.len() as u32)
+            .rev();
+
+        let (root, root_index) = spans.next().unwrap();
+        assert_eq!(root.start, 0);
+        assert_eq!(root.end, tokens.len() as u32);
+
         let mut span_stack = vec![root];
-        let mut stack: Vec<Tree> = vec![Tree {
-            kind: root.kind,
-            children: Vec::new(),
-            err: root.err.clone(),
-        }];
-        let mut pos = 0;
+        let mut stack: Vec<Tree> = {
+            let mut root = Tree {
+                kind: root.kind,
+                children: Vec::new(),
+                err: None,
+            };
+            if let Some(ParseError { err: _, span }) = errors.peek() {
+                if span.0 == root_index {
+                    let error = errors.next().unwrap();
+                    root.err = Some(error.err);
+                }
+            }
+            vec![root]
+        };
+
+        let mut token_pos = root.end as i32 - 1;
 
         loop {
             let cur = stack.last_mut().unwrap();
             let cur_span = span_stack.last().unwrap();
-            let next = tree_spans.clone().next();
-            
-            let mut limit = cur_span.end;
-            if let Some(next) = next {
-                if next.start < cur_span.end {
+            let next = spans.clone().next();
+
+            let mut limit = cur_span.start as i32;
+            if let Some((next, _)) = next {
+                if next.end > cur_span.start {
                     debug_assert!(next.end <= cur_span.end);
-                    limit = next.start;
+                    limit = next.end as i32;
                 }
             }
 
-            while pos < limit {
-                pos += 1;
+            while token_pos >= limit {
                 cur.children.push(Child::Token(tokens.next().unwrap()));
+                token_pos -= 1;
             }
-                        
-            if let Some(next) = next {
-                if next.start < cur_span.end {
-                    tree_spans.next();
-                    span_stack.push(next);
-                    stack.push(Tree {
+
+            if let Some((next, span_index)) = next {
+                if next.end > cur_span.start {
+                    let mut node = Tree {
                         kind: next.kind,
                         children: Vec::new(),
-                        err: next.err.clone(),
-                    });
+                        err: None,
+                    };
+
+                    if let Some(ParseError { err: _, span }) = errors.peek() {
+                        if span.0 == span_index {
+                            let error = errors.next().unwrap();
+                            node.err = Some(error.err);
+                        }
+                    }
+
+                    spans.next();
+                    span_stack.push(next);
+                    stack.push(node);
                     continue;
                 }
             }
-            
+
             if stack.len() > 1 {
                 span_stack.pop();
-                let tree = stack.pop().unwrap();
+                let mut tree = stack.pop().unwrap();
+                tree.children.reverse();
                 stack.last_mut().unwrap().children.push(Child::Tree(tree));
             } else {
                 break;
             }
         }
 
-        let tree = stack.pop().unwrap();
+        let mut tree = stack.pop().unwrap();
+        tree.children.reverse();
+        
         tree
     }
 
-    fn open(&mut self) -> SpanIndex {
-        let len = self.tree.len() as u32;
+    fn start(&mut self) -> SpanStart {
+        SpanStart(self.pos)
+    }
 
-        self.tree.push(TreeSpan {
-            kind: TreeKind::ErrorTree,
-            start: self.pos,
+    fn close(&mut self, m: SpanStart, kind: TreeKind) -> SpanIndex {
+        let index: u32 = self.spans.len().try_into().unwrap();
+        self.spans.push(TreeSpan {
+            kind,
+            start: m.0,
             end: self.pos,
-            err: None,
         });
-
-        SpanIndex(len)
+        SpanIndex(index)
     }
 
-    fn close(&mut self, m: SpanIndex, kind: TreeKind) {
-        let span = &mut self.tree[m.0 as usize];
-        span.end = self.pos;
-        span.kind = kind;
-    }
-
-    fn close_with_err(&mut self, m: SpanIndex, err: impl ToString) {
+    fn close_with_err(&mut self, m: SpanStart, err: impl ToString) {
         self.close_with_err_impl(m, TreeKind::ErrorTree, err.to_string());
     }
 
-    fn close_with_err_kind(&mut self, m: SpanIndex, kind: TreeKind, err: impl ToString) {
+    fn close_with_err_kind(&mut self, m: SpanStart, kind: TreeKind, err: impl ToString) {
         self.close_with_err_impl(m, kind, err.to_string());
     }
 
     #[doc(hidden)]
-    fn close_with_err_impl(&mut self, m: SpanIndex, kind: TreeKind, err: String) {
-        let span = &mut self.tree[m.0 as usize];
-        span.end = self.pos;
-        span.kind = kind;
-        span.err = Some(err);
+    fn close_with_err_impl(&mut self, m: SpanStart, kind: TreeKind, err: String) {
+        let span = self.close(m, kind);
+        self.errors.push(ParseError { err, span });
     }
-
-    // fn close_last(&mut self, kind: TreeKind) {
-    //     let span = self.tree.last_mut().unwrap();
-    //     debug_assert!(span.is_empty(), "Attempt to close span twice");
-    //     span.end = self.pos;
-    //     span.kind = kind;
-    // }
-
-    fn remove(&mut self, m: SpanIndex) {
-        let span = &self.tree[m.0 as usize];
-        self.pos = span.start;
-        self.tree.truncate(m.0 as usize);
-    }
-
-    // fn remove_last(&mut self) {
-    //     let span = self.tree.pop().unwrap();
-    //     debug_assert!(span.is_empty(), "Cannot remove closed span");
-    //     self.pos = span.start;
-    // }
-
-    fn reset(&mut self, m: SpanIndex) {
-        self.tree.truncate((m.0 + 1) as usize);
-        let span = &mut self.tree[m.0 as usize];
-        span.end = span.start;
-        self.pos = span.start;
-    }
-
-    // fn reset_last(&mut self) {
-    //     let span = self.tree.last_mut().unwrap();
-    //     span.end = span.start;
-    //     self.pos = span.start;
-    // }
 
     fn advance(&mut self) {
         assert!(!self.eof());
@@ -462,15 +461,13 @@ impl Parser {
         &mut self,
         (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult),
     ) -> ParseResult {
-        let m = self.open();
+        let m = self.start();
         let res = fun(self);
         match res {
             ParseResult::Match => {
                 self.close(m, kind);
             }
-            ParseResult::NoMatch => {
-                self.remove(m);
-            }
+            ParseResult::NoMatch => {}
             ParseResult::Error => {
                 self.close_with_err(m, "Error");
             }
@@ -535,7 +532,7 @@ pub struct RecoverUntil<'a>(&'a [TokenKind]);
 impl<'a> RecoverMethod for RecoverUntil<'a> {
     #[cold]
     fn recover(&self, p: &mut Parser) {
-        let m = p.open();
+        let m = p.start();
         while !(p.eof() || p.at_any(self.0)) {
             p.advance()
         }
@@ -555,7 +552,6 @@ pub enum ParseErr {
 }
 
 pub type ParseResult = Result<(), ParseErr>;
-
 
 macro_rules! probe {
     (err $err:expr, $($rule:expr),+) => {
@@ -626,13 +622,15 @@ macro_rules! parser_rule {
 
 parser_rule! {File, file}
 fn file(p: &mut Parser) -> ParseResult {
-    let m = p.open();
+    let m = p.start();
     'main: while !p.eof() {
-        let m = p.open();
+        let m = p.start();
         // TODO put this inside the rule itself
         'err: {
             match tokenizer(p) {
-                ParseResult::Match => p.close(m, TreeKind::Tokenizer),
+                ParseResult::Match => {
+                    p.close(m, TreeKind::Tokenizer);
+                }
                 ParseResult::NoMatch => {
                     // no rules matched
                     RecoverUntil(&[TokenizerKeyword, RuleKeyword]).recover(p);
@@ -697,11 +695,14 @@ fn token_rule(p: &mut Parser) -> ParseResult {
     }
     expect! {
         err {r.recover(p); return Ok(())},
-        choice!{
+        choice! {
             err {r.recover(p); return Ok(())},
             p.terminal(Literal),
             p.terminal(RawLiteral)
-        },
+        }
+    }
+    optional! {
+        err {r.recover(p); return Ok(())},
         p.terminal(Literal)
     }
     Ok(())

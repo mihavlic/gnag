@@ -28,7 +28,7 @@ enum TokenKind {
   
     LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
     TokenizerKeyword, RuleKeyword,
-    Hash,
+    At, Comma
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +37,7 @@ pub enum TreeKind {
     File,
       ErrorTree,
       Meta,
+        MetaArg,
       Tokenizer,
         TokenRule,
       Rule,
@@ -119,9 +120,9 @@ impl Tree {
 
 fn lex(src: &str) -> Vec<Token> {
     let punctuation = (
-        "# ( ) { } [ ] < >",
+        "@ , ( ) { } [ ] < >",
         [
-            Hash, LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
+            At, Comma, LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
         ],
     );
 
@@ -568,7 +569,7 @@ pub enum ParseErr {
     Error,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ParseResult {
     Match,
     NoMatch,
@@ -610,19 +611,18 @@ macro_rules! expect {
 }
 
 macro_rules! choice {
-    (err $err:expr, $($rule:expr),+) => {
+    (err $err:expr, default $default:expr, $($rule:expr),+) => {
         'choice: {
             $(
                 match $rule {
-                    ParseResult::Match => break 'choice ParseResult::Match,
+                    ParseResult::Match => break 'choice,
                     ParseResult::NoMatch => {}
                     ParseResult::Error => {
                         $err;
-                        break 'choice ParseResult::Error;
                     },
                 }
             )+
-            $err;
+            $default;
         }
     };
 }
@@ -640,6 +640,7 @@ fn file(p: &mut Parser) -> ParseResult {
     while !p.eof() {
         choice!(
             err {return r.recover(p) },
+            default {return r.recover(p) },
             p.nonterminal(Tokenizer)
         );
     }
@@ -662,26 +663,49 @@ fn tokenizer(p: &mut Parser) -> ParseResult {
     ParseResult::Match
 }
 
-// '#' '[' Ident ']'
-parser_rule! {Meta, meta}
-fn meta(p: &mut Parser) -> ParseResult {
-    probe! {
+// (Ident | Literal | RawLiteral) ','?
+parser_rule! {MetaArg, meta_arg}
+fn meta_arg(p: &mut Parser) -> ParseResult {
+    choice! {
         err {return ParseResult::Error},
-        p.terminal(Hash)
-    }
-    expect! {
-        err {return ParseResult::Error},
-        p.terminal(LBracket),
+        default {return ParseResult::NoMatch},
         p.terminal(Ident),
-        p.terminal(RBracket)
+        p.terminal(Literal),
+        p.terminal(RawLiteral)
+    }
+    optional! {
+        err {return ParseResult::Error},
+        p.terminal(Comma)
     }
     ParseResult::Match
 }
 
-// Meta? Ident (Literal|RawLiteral) Literal?
+// '@' Ident ( '(' MetaArg* ')' )?
+parser_rule! {Meta, meta}
+fn meta(p: &mut Parser) -> ParseResult {
+    probe! {
+        err {return ParseResult::Error},
+        p.terminal(At)
+    }
+    expect! {
+        err {return ParseResult::Error},
+        p.terminal(Ident)
+    }
+    if p.terminal(LParen) == ParseResult::Match {
+        expect! {
+            err {return ParseResult::Error},
+            p.nonterminal_repetition_star(MetaArg),
+            p.terminal(RParen)
+        }
+    }
+
+    ParseResult::Match
+}
+
+// Meta? Ident (Literal | RawLiteral) Literal?
 parser_rule! {TokenRule, token_rule}
 fn token_rule(p: &mut Parser) -> ParseResult {
-    let r = RecoverUntil(&[Hash, Ident, RCurly]);
+    let r = RecoverUntil(&[At, Ident, RCurly]);
     optional! {
         err {return r.recover(p);},
         p.nonterminal(Meta)
@@ -690,13 +714,11 @@ fn token_rule(p: &mut Parser) -> ParseResult {
         err {return r.recover(p);},
         p.terminal(Ident)
     }
-    expect! {
+    choice! {
         err {return r.recover(p);},
-        choice! {
-            err {return r.recover(p);},
-            p.terminal(Literal),
-            p.terminal(RawLiteral)
-        }
+        default {return r.recover(p);},
+        p.terminal(Literal),
+        p.terminal(RawLiteral)
     }
     optional! {
         err {return r.recover(p);},
@@ -929,9 +951,9 @@ fn main() {
     let text =
 r#####"
 tokenizer {
-    #[skip] whitespace r"\\\\\\\\\\\\\\\\s+"
-    #[contextual] node 'node'
-    eq '='
+    @skip whitespace r"\\\\\\\\\\\\\\\\s+"
+    @contextual node 'node'
+    @rip(a, b, c) eq '='
     number r"\\\\\\\\\\\\\\\\d+"
     hash_string r#"r#*""# 'parse_raw_string'
 }

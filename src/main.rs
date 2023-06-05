@@ -79,7 +79,7 @@ enum Child {
 pub fn parse(text: &str) -> Tree {
     let tokens = lex(text);
     let mut p = Parser::new(tokens);
-    _ = file(&mut p);
+    _ = p.nonterminal(File);
     p.build_tree()
 }
 
@@ -290,19 +290,31 @@ impl Parser {
         }
     }
 
+    // We push tree spans (and their errors) when we close them, so we end up with a reversed topological order; the root will always be last.
+    // Let there be tree:
+    //  |-----root----|
+    //  |--a---| |--b-|
+    //  | |-c| | |    |
+    //  0123456789abcdef  -- indices of tokens
+    // The spans will be like so:
+    //  (label, start..end)
+    //  [ (b, 9..f) (c, 2..6) (a, 0..8) (root, 0..f) ]
     fn build_tree(self) -> Tree {
-        // |-A------------|  -- root
-        // |  |-b-|   |-c-|  -- intermediate tree nodes
-        // |tttttttttttttt|  -- tokens
+        // we operate on reversed iterators so we can build the tree from the root down
+        // note that this will make siblings' order reversed, so we need to reverse them back at the end
+        // with a Vec::reverse
 
         let mut tokens = self.tokens.into_iter().rev();
         let mut errors = self.errors.into_iter().rev().peekable();
         let mut spans = self.spans.iter().zip(0u32..self.spans.len() as u32).rev();
 
+        // check that the root contains all of the tokens
         let (root, root_index) = spans.next().unwrap();
         assert_eq!(root.start, 0);
         assert_eq!(root.end, tokens.len() as u32);
 
+        // stack of tree spans, the Tree object that we're creating doesn't contain them so
+        // we need a separate stack
         let mut span_stack = vec![root];
         let mut stack: Vec<Tree> = {
             let mut root = Tree {
@@ -310,6 +322,7 @@ impl Parser {
                 children: Vec::new(),
                 err: None,
             };
+            // try to attach an error to root
             if let Some(ParseError { err: _, span }) = errors.peek() {
                 if span.0 == root_index {
                     let error = errors.next().unwrap();
@@ -326,27 +339,38 @@ impl Parser {
             let cur_span = span_stack.last().unwrap();
             let next = spans.clone().next();
 
+            // remember: we're iterating from the back
+
+            // see what tokens we can safely push as Child::Token into the current node
             let mut limit = cur_span.start as i32;
             if let Some((next, _)) = next {
-                if next.end > cur_span.start {
+                // the next node may either be a child or a sibling
+                // |-current-node-|
+                //    |-next-|
+                if next.start >= cur_span.start {
                     debug_assert!(next.end <= cur_span.end);
+                    // decrase the limit until the child starts
                     limit = next.end as i32;
                 }
             }
 
+            // consume the tokens
             while token_pos >= limit {
                 cur.children.push(Child::Token(tokens.next().unwrap()));
                 token_pos -= 1;
             }
 
+            // try to enter a child
             if let Some((next, span_index)) = next {
-                if next.end > cur_span.start {
+                // same logic for children as before
+                if next.start >= cur_span.start {
                     let mut node = Tree {
                         kind: next.kind,
                         children: Vec::new(),
                         err: None,
                     };
 
+                    // try to attach an error
                     if let Some(ParseError { err: _, span }) = errors.peek() {
                         if span.0 == span_index {
                             let error = errors.next().unwrap();
@@ -361,6 +385,7 @@ impl Parser {
                 }
             }
 
+            // pop the node from the stack, leaving only root
             if stack.len() > 1 {
                 span_stack.pop();
                 let mut tree = stack.pop().unwrap();
@@ -380,7 +405,6 @@ impl Parser {
     fn start(&mut self) -> SpanStart {
         SpanStart(self.pos)
     }
-
     fn close(&mut self, m: SpanStart, kind: TreeKind) -> SpanIndex {
         let index: u32 = self.spans.len().try_into().unwrap();
         self.spans.push(TreeSpan {
@@ -612,30 +636,13 @@ macro_rules! parser_rule {
 
 parser_rule! {File, file}
 fn file(p: &mut Parser) -> ParseResult {
-    let m = p.start();
-    'main: while !p.eof() {
-        let m = p.start();
-        // TODO put this inside the rule itself
-        'err: {
-            match tokenizer(p) {
-                ParseResult::Match => {
-                    p.close(m, TreeKind::Tokenizer);
-                }
-                ParseResult::NoMatch => {
-                    // no rules matched
-                    RecoverUntil(&[TokenizerKeyword, RuleKeyword]).recover(p);
-                    p.close_with_err(m, "Unknown rule");
-                }
-                ParseResult::Error => break 'err,
-            }
-
-            continue 'main;
-        }
-        RecoverUntil(&[TokenizerKeyword, RuleKeyword]).recover(p);
-        p.close_with_err_kind(m, TreeKind::Tokenizer, "Tokenizer error");
-        continue 'main;
+    let r = RecoverUntil(&[TokenizerKeyword, RuleKeyword]);
+    while !p.eof() {
+        choice!(
+            err {return r.recover(p) },
+            p.nonterminal(Tokenizer)
+        );
     }
-    p.close(m, TreeKind::File);
     ParseResult::Match
 }
 

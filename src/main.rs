@@ -1,7 +1,5 @@
 #![allow(unreachable_code)]
 
-pub mod bump;
-
 use std::cell::Cell;
 
 /// ```ignore
@@ -298,16 +296,8 @@ impl Parser {
         // |tttttttttttttt|  -- tokens
 
         let mut tokens = self.tokens.into_iter().rev();
-        let mut errors = self
-            .errors
-            .into_iter()
-            .rev()
-            .peekable();
-        let mut spans = self
-            .spans
-            .iter()
-            .zip(0u32..self.spans.len() as u32)
-            .rev();
+        let mut errors = self.errors.into_iter().rev().peekable();
+        let mut spans = self.spans.iter().zip(0u32..self.spans.len() as u32).rev();
 
         let (root, root_index) = spans.next().unwrap();
         assert_eq!(root.start, 0);
@@ -383,7 +373,7 @@ impl Parser {
 
         let mut tree = stack.pop().unwrap();
         tree.children.reverse();
-        
+
         tree
     }
 
@@ -506,9 +496,9 @@ impl Parser {
                 ParseResult::Match => { /* continue */ }
                 ParseResult::NoMatch => {
                     if first {
-                        // FIXME or ParseResult::Error?
+                        // FIXME or ParseResult::NoMatch?
                         // we want optional(repetition_plus) to have the same behaviour as repetition_star
-                        return ParseResult::NoMatch;
+                        return ParseResult::Error;
                     } else {
                         return ParseResult::Match;
                     }
@@ -525,24 +515,27 @@ impl Parser {
 }
 
 pub trait RecoverMethod {
-    fn recover(&self, p: &mut Parser);
+    fn recover(&self, p: &mut Parser) -> ParseResult;
 }
 
 pub struct RecoverUntil<'a>(&'a [TokenKind]);
 impl<'a> RecoverMethod for RecoverUntil<'a> {
     #[cold]
-    fn recover(&self, p: &mut Parser) {
+    fn recover(&self, p: &mut Parser) -> ParseResult {
         let m = p.start();
         while !(p.eof() || p.at_any(self.0)) {
             p.advance()
         }
         p.close_with_err(m, "Recover until");
+        ParseResult::Match
     }
 }
 
 pub struct RecoverStop;
 impl RecoverMethod for RecoverStop {
-    fn recover(&self, _: &mut Parser) {}
+    fn recover(&self, _: &mut Parser) -> ParseResult {
+        ParseResult::Match
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -551,7 +544,12 @@ pub enum ParseErr {
     Error,
 }
 
-pub type ParseResult = Result<(), ParseErr>;
+#[derive(Clone, Copy)]
+pub enum ParseResult {
+    Match,
+    NoMatch,
+    Error,
+}
 
 macro_rules! probe {
     (err $err:expr, $($rule:expr),+) => {
@@ -605,14 +603,6 @@ macro_rules! choice {
     };
 }
 
-#[allow(non_upper_case_globals)]
-trait ParseResultTrait: Into<ParseResult> + Copy {
-    const Match: ParseResult = ParseResult::Ok(());
-    const NoMatch: ParseResult = ParseResult::Err(ParseErr::NoMatch);
-    const Error: ParseResult = ParseResult::Err(ParseErr::Error);
-}
-impl ParseResultTrait for ParseResult {}
-
 macro_rules! parser_rule {
     ($kind:ident, $function:expr) => {
         #[allow(non_upper_case_globals)]
@@ -662,7 +652,7 @@ fn tokenizer(p: &mut Parser) -> ParseResult {
         p.nonterminal_repetition_star(TokenRule),
         p.terminal(RCurly)
     }
-    Ok(())
+    ParseResult::Match
 }
 
 // '#' '[' Ident ']'
@@ -678,7 +668,7 @@ fn meta(p: &mut Parser) -> ParseResult {
         p.terminal(Ident),
         p.terminal(RBracket)
     }
-    Ok(())
+    ParseResult::Match
 }
 
 // Meta? Ident (Literal|RawLiteral) Literal?
@@ -686,26 +676,26 @@ parser_rule! {TokenRule, token_rule}
 fn token_rule(p: &mut Parser) -> ParseResult {
     let r = RecoverUntil(&[Hash, Ident, RCurly]);
     optional! {
-        err {r.recover(p); return Ok(())},
+        err {return r.recover(p);},
         p.nonterminal(Meta)
     }
     probe! {
-        err {r.recover(p); return Ok(())},
+        err {return r.recover(p);},
         p.terminal(Ident)
     }
     expect! {
-        err {r.recover(p); return Ok(())},
+        err {return r.recover(p);},
         choice! {
-            err {r.recover(p); return Ok(())},
+            err {return r.recover(p);},
             p.terminal(Literal),
             p.terminal(RawLiteral)
         }
     }
     optional! {
-        err {r.recover(p); return Ok(())},
+        err {return r.recover(p);},
         p.terminal(Literal)
     }
-    Ok(())
+    ParseResult::Match
 }
 
 // // 'rule' Ident '{' rule_expr '}'
@@ -929,7 +919,7 @@ fn token_rule(p: &mut Parser) -> ParseResult {
 
 fn main() {
     #[rustfmt::skip]
-    let text = 
+    let text =
 r#####"
 tokenizer {
     #[skip] whitespace r"\\\\\\\\\\\\\\\\s+"

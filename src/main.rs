@@ -294,6 +294,13 @@ struct SpanStart(u32);
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SpanIndex(u32);
 
+struct ParserCheckpoint {
+    pos: u32,
+    fuel: u32,
+    spans_len: u32,
+    errors_len: u32,
+}
+
 #[derive(Clone)]
 struct TreeSpan {
     kind: TreeKind,
@@ -437,9 +444,37 @@ impl Parser {
         tree
     }
 
-    fn start(&mut self) -> SpanStart {
+    fn checkpoint(&self) -> ParserCheckpoint {
+        ParserCheckpoint {
+            pos: self.pos,
+            fuel: self.fuel.get(),
+            spans_len: self.spans.len().try_into().unwrap(),
+            errors_len: self.errors.len().try_into().unwrap(),
+        }
+    }
+
+    fn restore(&mut self, checkpoint: ParserCheckpoint) {
+        let ParserCheckpoint {
+            pos,
+            fuel,
+            spans_len,
+            errors_len,
+        } = checkpoint;
+
+        self.pos = pos;
+        self.fuel.set(fuel);
+
+        assert!(spans_len as usize <= self.spans.len());
+        self.spans.truncate(spans_len as usize);
+
+        assert!(errors_len as usize <= self.errors.len());
+        self.errors.truncate(errors_len as usize);
+    }
+
+    fn open(&mut self) -> SpanStart {
         SpanStart(self.pos)
     }
+
     fn close(&mut self, m: SpanStart, kind: TreeKind) -> SpanIndex {
         let index: u32 = self.spans.len().try_into().unwrap();
         self.spans.push(TreeSpan {
@@ -517,7 +552,7 @@ impl Parser {
         &mut self,
         (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult),
     ) -> ParseResult {
-        let m = self.start();
+        let m = self.open();
         let res = fun(self);
         match res {
             ParseResult::Match => {
@@ -588,7 +623,7 @@ pub struct RecoverUntil<'a>(&'a [TokenKind]);
 impl<'a> RecoverMethod for RecoverUntil<'a> {
     #[cold]
     fn recover(&self, p: &mut Parser) -> ParseResult {
-        let m = p.start();
+        let m = p.open();
         while !(p.eof() || p.at_any(self.0)) {
             p.advance()
         }
@@ -628,11 +663,15 @@ impl ParseResult {
 }
 
 macro_rules! probe {
-    (err $err:expr; $($rule:expr),+) => {
+    ($p:expr; err $err:expr; $($rule:expr),+) => {
+        let checkpoint = $p.checkpoint();
         $(
             match $rule {
                 ParseResult::Match => {},
-                ParseResult::NoMatch => return ParseResult::NoMatch,
+                ParseResult::NoMatch => {
+                    $p.restore(checkpoint);
+                    return ParseResult::NoMatch;
+                },
                 ParseResult::Error => {$err;},
             }
         )+
@@ -704,6 +743,7 @@ fn file(p: &mut Parser) -> ParseResult {
 parser_rule! {Tokenizer, tokenizer}
 fn tokenizer(p: &mut Parser) -> ParseResult {
     probe! {
+        p;
         err return ParseResult::Error;
         p.terminal(TokenizerKeyword)
     }
@@ -732,6 +772,7 @@ fn attribute_value(p: &mut Parser) -> ParseResult {
 parser_rule! {AttributeExpr, attribute_expr}
 fn attribute_expr(p: &mut Parser) -> ParseResult {
     probe! {
+        p;
         err return ParseResult::Error;
         p.terminal(Ident)
     }
@@ -749,6 +790,7 @@ fn attribute_expr(p: &mut Parser) -> ParseResult {
 parser_rule! {Attribute, attribute}
 fn attribute(p: &mut Parser) -> ParseResult {
     probe! {
+        p;
         err return ParseResult::Error;
         p.terminal(At)
     }
@@ -782,6 +824,7 @@ parser_rule! {TokenRule, token_rule}
 fn token_rule(p: &mut Parser) -> ParseResult {
     let r = RecoverUntil(&[At, Ident, RCurly]);
     probe! {
+        p;
         err return r.recover(p);
         p.nonterminal_repetition_star(Attribute).optional(),
         p.terminal(Ident)
@@ -804,6 +847,7 @@ parser_rule! {SynRule, syn_rule}
 fn syn_rule(p: &mut Parser) -> ParseResult {
     let r = RecoverUntil(&[At, Ident, RCurly]);
     probe! {
+        p;
         err return r.recover(p);
         p.nonterminal_repetition_star(Attribute),
         p.terminal(RuleKeyword)
@@ -824,6 +868,7 @@ parser_rule! {Parameters, parameters}
 fn parameters(p: &mut Parser) -> ParseResult {
     let r = RecoverUntil(&[LCurly]);
     probe! {
+        p;
         err return r.recover(p);
         p.terminal(LParen)
     }
@@ -893,7 +938,7 @@ const _: u32 = 0;
 //  '|'  2 1
 
 fn base_expr(p: &mut Parser) -> ParseResult {
-    let m = p.start();
+    let m = p.open();
     match p.peek() {
         Ident | Literal => {
             p.advance();
@@ -934,8 +979,9 @@ fn base_expr(p: &mut Parser) -> ParseResult {
 }
 
 fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
-    let m = p.start();
+    let m = p.open();
     probe! {
+        p;
         err return ParseResult::Error;
         base_expr(p)
     }
@@ -946,7 +992,7 @@ fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
             Question | Plus | Star => {
                 // bp table lookup
                 let bp = (5, ());
-                if bp.0 < min_bp {
+                if bp.0 <= min_bp {
                     break;
                 }
 
@@ -957,7 +1003,7 @@ fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
             Pipe => {
                 // bp table lookup
                 let bp = (2, 1);
-                if bp.0 < min_bp {
+                if bp.0 <= min_bp {
                     break;
                 }
 
@@ -973,13 +1019,13 @@ fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
             Ident | Literal | LAngle | LParen | At => {
                 // bp table lookup
                 let bp = (3, ());
-                if bp.0 < min_bp {
+                if bp.0 <= min_bp {
                     break;
                 }
 
                 let mut first = true;
                 while !p.eof() {
-                    match expr(p, bp.0 + 1) {
+                    match expr(p, bp.0) {
                         ParseResult::Match => first = false,
                         ParseResult::NoMatch => break,
                         ParseResult::Error => return ParseResult::Error,
@@ -1009,7 +1055,7 @@ tokenizer {
 }
 
 rule a(a, b) {
-    aaa??? | a (a b) | c
+    (a b)???????????????????????? | c
 }
 "#####;
 

@@ -1,5 +1,3 @@
-#![allow(unreachable_code)]
-
 use std::cell::Cell;
 
 /// ```ignore
@@ -67,6 +65,7 @@ pub enum TreeKind {
         SynExpr,
         PreExpr,
         AtomExpr,
+        CallExpr,
         BinExpr,
         SeqExpr,
         PostExpr,
@@ -455,10 +454,6 @@ impl Parser {
         self.close_with_err_impl(m, TreeKind::ErrorTree, err.to_string());
     }
 
-    fn close_with_err_kind(&mut self, m: SpanStart, kind: TreeKind, err: impl ToString) {
-        self.close_with_err_impl(m, kind, err.to_string());
-    }
-
     #[doc(hidden)]
     fn close_with_err_impl(&mut self, m: SpanStart, kind: TreeKind, err: String) {
         let span = self.close(m, kind);
@@ -469,6 +464,13 @@ impl Parser {
         assert!(!self.eof());
         self.fuel.set(256);
         self.pos += 1;
+    }
+
+    fn try_advance(&mut self) {
+        if !self.eof() {
+            self.fuel.set(256);
+            self.pos += 1;
+        }
     }
 
     #[inline]
@@ -595,22 +597,6 @@ impl<'a> RecoverMethod for RecoverUntil<'a> {
     }
 }
 
-pub struct StepRecoverUntil<'a>(SpanStart, &'a [TokenKind]);
-impl<'a> RecoverMethod for StepRecoverUntil<'a> {
-    #[cold]
-    fn recover(&self, p: &mut Parser) -> ParseResult {
-        let m = p.start();
-        if m == self.0 {
-            p.advance();
-        }
-        while !(p.eof() || p.at_any(self.1)) {
-            p.advance()
-        }
-        p.close_with_err(m, "Recover until");
-        ParseResult::Match
-    }
-}
-
 pub struct RecoverStop;
 impl RecoverMethod for RecoverStop {
     fn recover(&self, _: &mut Parser) -> ParseResult {
@@ -703,10 +689,10 @@ macro_rules! parser_rule {
 parser_rule! {File, file}
 fn file(p: &mut Parser) -> ParseResult {
     'repeat: while !p.eof() {
-        let r = StepRecoverUntil(p.start(), &[TokenizerKeyword, RuleKeyword]);
+        let r = RecoverUntil(&[TokenizerKeyword, RuleKeyword]);
         choice!(
             err {r.recover(p); continue 'repeat};
-            default {r.recover(p); continue 'repeat};
+            default {p.try_advance(); r.recover(p); continue 'repeat};
             p.nonterminal(Tokenizer),
             p.nonterminal(SynRule)
         );
@@ -827,7 +813,7 @@ fn syn_rule(p: &mut Parser) -> ParseResult {
         p.terminal(Ident),
         p.nonterminal(Parameters).optional(),
         p.terminal(LCurly),
-        expr(p, u8::MAX),
+        expr(p, 0),
         p.terminal(RCurly)
     }
     ParseResult::Match
@@ -897,16 +883,16 @@ const _: u32 = 0;
 //  '<'  _ _
 //  '('  _ _
 // prefix bp
-//  '@'  _ 0
+//  '@'  _ 4
 // postfix bp
-//  '?'  1 _
-//  '+'  1 _
-//  '*'  1 _
-//  Expr 2 _
+//  '?'  5 _
+//  '+'  5 _
+//  '*'  5 _
+//  Expr 3 _
 // binary bp
-//  '|'  4 3
+//  '|'  2 1
 
-fn atom_expr(p: &mut Parser) -> ParseResult {
+fn base_expr(p: &mut Parser) -> ParseResult {
     let m = p.start();
     match p.peek() {
         Ident | Literal => {
@@ -918,7 +904,7 @@ fn atom_expr(p: &mut Parser) -> ParseResult {
             expect! {
                 err return ParseResult::Error;
                 // bp table lookup
-                expr(p, 0)
+                expr(p, 4)
             }
             p.close(m, TreeKind::PreExpr);
         }
@@ -927,7 +913,7 @@ fn atom_expr(p: &mut Parser) -> ParseResult {
             expect! {
                 err return ParseResult::Error;
                 // bp table lookup
-                expr(p, u8::MAX),
+                expr(p, 0),
                 p.terminal(RParen)
             }
             p.close(m, TreeKind::AtomExpr);
@@ -937,10 +923,10 @@ fn atom_expr(p: &mut Parser) -> ParseResult {
             expect! {
                 err return ParseResult::Error;
                 // bp table lookup
-                expr(p, u8::MAX),
+                expr(p, 0),
                 p.terminal(RAngle)
             }
-            p.close(m, TreeKind::AtomExpr);
+            p.close(m, TreeKind::CallExpr);
         }
         _ => return ParseResult::NoMatch,
     }
@@ -951,31 +937,31 @@ fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
     let m = p.start();
     probe! {
         err return ParseResult::Error;
-        atom_expr(p)
+        base_expr(p)
     }
 
     'outer: loop {
         // parse postfix
         match p.peek() {
             Question | Plus | Star => {
-                p.advance();
                 // bp table lookup
-                let bp = (1, ());
+                let bp = (5, ());
                 if bp.0 < min_bp {
-                    return ParseResult::NoMatch;
+                    break;
                 }
 
+                p.advance();
                 p.close(m, TreeKind::PostExpr);
                 continue 'outer;
             }
             Pipe => {
-                p.advance();
                 // bp table lookup
-                let bp = (4, 3);
+                let bp = (2, 1);
                 if bp.0 < min_bp {
-                    return ParseResult::NoMatch;
+                    break;
                 }
 
+                p.advance();
                 expect! {
                     err return ParseResult::Error;
                     expr(p, bp.1)
@@ -985,9 +971,15 @@ fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
                 continue 'outer;
             }
             Ident | Literal | LAngle | LParen | At => {
+                // bp table lookup
+                let bp = (3, ());
+                if bp.0 < min_bp {
+                    break;
+                }
+
                 let mut first = true;
                 while !p.eof() {
-                    match expr(p, 2) {
+                    match expr(p, bp.0 + 1) {
                         ParseResult::Match => first = false,
                         ParseResult::NoMatch => break,
                         ParseResult::Error => return ParseResult::Error,
@@ -1017,7 +1009,7 @@ tokenizer {
 }
 
 rule a(a, b) {
-    'pepis' aaa | aaa (bbb cc)
+    aaa??? | a (a b) | c
 }
 "#####;
 

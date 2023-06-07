@@ -4,8 +4,8 @@ use std::cell::Cell;
 
 /// ```ignore
 /// tokenizer {
-///     #[skip] whitespace r"\s+"
-///     #[contextual] node 'node'
+///     @skip whitespace r"\s+"
+///     @contextual node 'node'
 ///     eq '='
 ///     number r"\d+"
 ///     hash_string r#"r#*""# 'parse_raw_string'
@@ -13,6 +13,26 @@ use std::cell::Cell;
 ///
 /// rule function {
 ///   'fn' ident '(' fn_args ')' '->' type expr
+/// }
+/// 
+/// @pratt
+/// rule Expr {
+///     PrefixOp | BinaryOp | PostfixOp |
+///     Ident | Literal | '(' Expr ')' 
+/// }
+/// 
+/// rule PrefixOp {
+///     '!' Expr
+/// }
+/// 
+/// rule PostfixOp {
+///     Expr '(' <separated_list Expr ','> ')'
+/// }
+/// 
+/// rule BinaryOp {
+///     Expr '*' Expr |
+///     Expr '/' Expr |
+///     Expr @left ('+' | '-') Expr
 /// }
 /// ```
 
@@ -23,12 +43,12 @@ use std::cell::Cell;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[rustfmt::skip]
 enum TokenKind {
-    Ident, Literal, RawLiteral,
+    Ident, Literal, RawLiteral, Number,
     ErrorToken, Eof,
   
     LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
     TokenizerKeyword, RuleKeyword,
-    At, Comma
+    At, Comma, Pipe, Question, Plus, Star
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,12 +56,20 @@ enum TokenKind {
 pub enum TreeKind {
     File,
       ErrorTree,
-      Meta,
-        MetaArg,
+      Attribute,
+        AttributeExpr,
+        AttributeValue,
       Tokenizer,
         TokenRule,
-      Rule,
-        Annotation,
+      SynRule,
+        Parameters,
+      // expr
+        SynExpr,
+        PreExpr,
+        AtomExpr,
+        BinExpr,
+        SeqExpr,
+        PostExpr,
 }
 
 use TokenKind::*;
@@ -119,15 +147,6 @@ impl Tree {
 }
 
 fn lex(src: &str) -> Vec<Token> {
-    let punctuation = (
-        "@ , ( ) { } [ ] < >",
-        [
-            At, Comma, LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
-        ],
-    );
-
-    let keywords = ("rule tokenizer", [RuleKeyword, TokenizerKeyword]);
-
     let mut text = src;
     let mut result = Vec::new();
     while !text.is_empty() {
@@ -138,11 +157,27 @@ fn lex(src: &str) -> Vec<Token> {
 
         let text_orig = text;
         let mut kind = 'kind: {
-            for (i, symbol) in punctuation.0.split_ascii_whitespace().enumerate() {
-                if let Some(rest) = text.strip_prefix(symbol) {
-                    text = rest;
-                    break 'kind punctuation.1[i];
-                }
+            let mut chars = text.chars();
+            let punct = match chars.next().unwrap() {
+                '@' => Some(At),
+                ',' => Some(Comma),
+                '|' => Some(Pipe),
+                '?' => Some(Question),
+                '+' => Some(Plus),
+                '*' => Some(Star),
+                '(' => Some(LParen),
+                ')' => Some(RParen),
+                '{' => Some(LCurly),
+                '}' => Some(RCurly),
+                '[' => Some(LBracket),
+                ']' => Some(RBracket),
+                '<' => Some(LAngle),
+                '>' => Some(RAngle),
+                _ => None,
+            };
+            if let Some(punct) = punct {
+                text = chars.as_str();
+                break 'kind punct;
             }
 
             // 'string'
@@ -204,6 +239,7 @@ fn lex(src: &str) -> Vec<Token> {
                 break 'kind Ident;
             }
 
+            // TODO configure lexer recovery
             let error_index = text
                 .find(|it: char| it.is_ascii_whitespace())
                 .unwrap_or(text.len());
@@ -216,11 +252,10 @@ fn lex(src: &str) -> Vec<Token> {
 
         let token_text = &text_orig[..text_orig.len() - text.len()];
         if kind == Ident {
-            for (i, symbol) in keywords.0.split_ascii_whitespace().enumerate() {
-                if token_text == symbol {
-                    kind = keywords.1[i];
-                    break;
-                }
+            match token_text {
+                "rule" => kind = RuleKeyword,
+                "tokenizer" => kind = TokenizerKeyword,
+                _ => {}
             }
         }
 
@@ -254,10 +289,10 @@ fn lex(src: &str) -> Vec<Token> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct SpanStart(u32);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct SpanIndex(u32);
 
 #[derive(Clone)]
@@ -441,6 +476,10 @@ impl Parser {
         self.pos as usize == self.tokens.len()
     }
 
+    fn peek(&self) -> TokenKind {
+        self.nth(0)
+    }
+
     fn nth(&self, lookahead: u32) -> TokenKind {
         if self.fuel.get() == 0 {
             panic!("parser is stuck")
@@ -556,6 +595,22 @@ impl<'a> RecoverMethod for RecoverUntil<'a> {
     }
 }
 
+pub struct StepRecoverUntil<'a>(SpanStart, &'a [TokenKind]);
+impl<'a> RecoverMethod for StepRecoverUntil<'a> {
+    #[cold]
+    fn recover(&self, p: &mut Parser) -> ParseResult {
+        let m = p.start();
+        if m == self.0 {
+            p.advance();
+        }
+        while !(p.eof() || p.at_any(self.1)) {
+            p.advance()
+        }
+        p.close_with_err(m, "Recover until");
+        ParseResult::Match
+    }
+}
+
 pub struct RecoverStop;
 impl RecoverMethod for RecoverStop {
     fn recover(&self, _: &mut Parser) -> ParseResult {
@@ -576,42 +631,52 @@ pub enum ParseResult {
     Error,
 }
 
+impl ParseResult {
+    fn optional(self) -> Self {
+        match self {
+            ParseResult::Match => ParseResult::Match,
+            ParseResult::NoMatch => ParseResult::Match,
+            ParseResult::Error => ParseResult::Error,
+        }
+    }
+}
+
 macro_rules! probe {
-    (err $err:expr, $($rule:expr),+) => {
+    (err $err:expr; $($rule:expr),+) => {
         $(
             match $rule {
                 ParseResult::Match => {},
                 ParseResult::NoMatch => return ParseResult::NoMatch,
-                ParseResult::Error => $err,
+                ParseResult::Error => {$err;},
             }
         )+
     };
 }
 
-macro_rules! optional {
-    (err $err:expr, $($rule:expr),+) => {
-        $(
-            match $rule {
-                ParseResult::Match | ParseResult::NoMatch => {},
-                ParseResult::Error => $err,
-            }
-        )+
-    };
-}
+// macro_rules! optional {
+//     (err $err:expr; $($rule:expr),+) => {
+//         $(
+//             match $rule {
+//                 ParseResult::Match | ParseResult::NoMatch => {},
+//                 ParseResult::Error => {$err;},
+//             }
+//         )+
+//     };
+// }
 
 macro_rules! expect {
-    (err $err:expr, $($rule:expr),+) => {
+    (err $err:expr; $($rule:expr),+) => {
         $(
             match $rule {
                 ParseResult::Match => {},
-                ParseResult::NoMatch | ParseResult::Error => $err,
+                ParseResult::NoMatch | ParseResult::Error => {$err;},
             }
         )+
     };
 }
 
 macro_rules! choice {
-    (err $err:expr, default $default:expr, $($rule:expr),+) => {
+    (err $err:expr; default $default:expr; $($rule:expr),+) => {
         'choice: {
             $(
                 match $rule {
@@ -634,14 +699,16 @@ macro_rules! parser_rule {
     };
 }
 
+// (Tokenizer | GrammarRule)*
 parser_rule! {File, file}
 fn file(p: &mut Parser) -> ParseResult {
-    let r = RecoverUntil(&[TokenizerKeyword, RuleKeyword]);
-    while !p.eof() {
+    'repeat: while !p.eof() {
+        let r = StepRecoverUntil(p.start(), &[TokenizerKeyword, RuleKeyword]);
         choice!(
-            err {return r.recover(p) },
-            default {return r.recover(p) },
-            p.nonterminal(Tokenizer)
+            err {r.recover(p); continue 'repeat};
+            default {r.recover(p); continue 'repeat};
+            p.nonterminal(Tokenizer),
+            p.nonterminal(SynRule)
         );
     }
     ParseResult::Match
@@ -651,11 +718,11 @@ fn file(p: &mut Parser) -> ParseResult {
 parser_rule! {Tokenizer, tokenizer}
 fn tokenizer(p: &mut Parser) -> ParseResult {
     probe! {
-        err {return ParseResult::Error},
+        err return ParseResult::Error;
         p.terminal(TokenizerKeyword)
     }
     expect! {
-        err {return ParseResult::Error},
+        err return ParseResult::Error;
         p.terminal(LCurly),
         p.nonterminal_repetition_star(TokenRule),
         p.terminal(RCurly)
@@ -663,299 +730,294 @@ fn tokenizer(p: &mut Parser) -> ParseResult {
     ParseResult::Match
 }
 
-// (Ident | Literal | RawLiteral) ','?
-parser_rule! {MetaArg, meta_arg}
-fn meta_arg(p: &mut Parser) -> ParseResult {
+// ( Number | Ident )
+parser_rule! {AttributeValue, attribute_value}
+fn attribute_value(p: &mut Parser) -> ParseResult {
     choice! {
-        err {return ParseResult::Error},
-        default {return ParseResult::NoMatch},
+        err return ParseResult::Error;
+        default return ParseResult::NoMatch;
         p.terminal(Ident),
-        p.terminal(Literal),
-        p.terminal(RawLiteral)
-    }
-    optional! {
-        err {return ParseResult::Error},
-        p.terminal(Comma)
+        p.terminal(Number)
     }
     ParseResult::Match
 }
 
-// '@' Ident ( '(' MetaArg* ')' )?
-parser_rule! {Meta, meta}
-fn meta(p: &mut Parser) -> ParseResult {
+// Ident ( '(' AttributeValue ')' )?
+parser_rule! {AttributeExpr, attribute_expr}
+fn attribute_expr(p: &mut Parser) -> ParseResult {
     probe! {
-        err {return ParseResult::Error},
-        p.terminal(At)
-    }
-    expect! {
-        err {return ParseResult::Error},
+        err return ParseResult::Error;
         p.terminal(Ident)
     }
     if p.terminal(LParen) == ParseResult::Match {
         expect! {
-            err {return ParseResult::Error},
-            p.nonterminal_repetition_star(MetaArg),
+            err return ParseResult::Error;
+            p.nonterminal(AttributeValue),
             p.terminal(RParen)
         }
     }
-
     ParseResult::Match
 }
 
-// Meta? Ident (Literal | RawLiteral) Literal?
+// '@' Ident ( '(' <separated_list Attribute ','> ')' )?
+parser_rule! {Attribute, attribute}
+fn attribute(p: &mut Parser) -> ParseResult {
+    probe! {
+        err return ParseResult::Error;
+        p.terminal(At)
+    }
+    expect! {
+        err return ParseResult::Error;
+        p.terminal(Ident)
+    }
+    if p.terminal(LParen) == ParseResult::Match {
+        while !p.eof() {
+            match p.nonterminal(AttributeExpr) {
+                ParseResult::Match => {}
+                ParseResult::NoMatch => break,
+                ParseResult::Error => return ParseResult::Error,
+            }
+            match p.terminal(Comma) {
+                ParseResult::Match => {}
+                ParseResult::NoMatch => break,
+                ParseResult::Error => return ParseResult::Error,
+            }
+        }
+        expect! {
+            err return ParseResult::Error;
+            p.terminal(RParen)
+        }
+    }
+    ParseResult::Match
+}
+
+// Attribute* Ident (Literal | RawLiteral) Literal?
 parser_rule! {TokenRule, token_rule}
 fn token_rule(p: &mut Parser) -> ParseResult {
     let r = RecoverUntil(&[At, Ident, RCurly]);
-    optional! {
-        err {return r.recover(p);},
-        p.nonterminal(Meta)
-    }
     probe! {
-        err {return r.recover(p);},
+        err return r.recover(p);
+        p.nonterminal_repetition_star(Attribute).optional(),
         p.terminal(Ident)
     }
     choice! {
-        err {return r.recover(p);},
-        default {return r.recover(p);},
+        err return r.recover(p);
+        default return r.recover(p);
         p.terminal(Literal),
         p.terminal(RawLiteral)
     }
-    optional! {
-        err {return r.recover(p);},
-        p.terminal(Literal)
+    expect! {
+        err return r.recover(p);
+        p.terminal(Literal).optional()
     }
     ParseResult::Match
 }
 
-// // 'rule' Ident '{' rule_expr '}'
-// parser_rule! {Rule, rule}
-// fn rule(p: &mut Parser) -> ParseResult {
-//     optional! {
-//         ;
-//         p.nonterminal(Meta);
-//     }
-//     probe! {
-//         ;
-//         p.terminal(Ident);
-//     }
+// Attribute* 'rule' Ident Parameters? '{' SynExpr '}'
+parser_rule! {SynRule, syn_rule}
+fn syn_rule(p: &mut Parser) -> ParseResult {
+    let r = RecoverUntil(&[At, Ident, RCurly]);
+    probe! {
+        err return r.recover(p);
+        p.nonterminal_repetition_star(Attribute),
+        p.terminal(RuleKeyword)
+    }
+    expect! {
+        err r.recover(p);
+        p.terminal(Ident),
+        p.nonterminal(Parameters).optional(),
+        p.terminal(LCurly),
+        expr(p, u8::MAX),
+        p.terminal(RCurly)
+    }
+    ParseResult::Match
+}
 
-//     p.terminal(Literal)
-//         .or_else(|_| p.terminal(RawLiteral))
-//         .commit()?;
-//     p.terminal(Literal).optional()?;
-//     Ok(())
-// }
+// '(' <separated_list Ident ','> ')'
+parser_rule! {Parameters, parameters}
+fn parameters(p: &mut Parser) -> ParseResult {
+    let r = RecoverUntil(&[LCurly]);
+    probe! {
+        err return r.recover(p);
+        p.terminal(LParen)
+    }
+    while !p.eof() {
+        match p.nonterminal(AttributeExpr) {
+            ParseResult::Match => {}
+            ParseResult::NoMatch => break,
+            ParseResult::Error => return r.recover(p),
+        }
+        match p.terminal(Comma) {
+            ParseResult::Match => {}
+            ParseResult::NoMatch => break,
+            ParseResult::Error => return r.recover(p),
+        }
+    }
+    expect! {
+        err return r.recover(p);
+        p.terminal(RParen)
+    }
+    ParseResult::Match
+}
 
-// const PARAM_LIST_RECOVERY: &[TokenKind] = &[FnKeyword, LCurly];
-// fn param_list(p: &mut Parser) {
-//     assert!(p.at(LParen));
-//     let m = p.open();
+/// ```ignore
+/// @pratt
+/// rule Expr {
+///   Ident | Literal | PreExpr | BinExpr | PostExpr
+/// }
+///
+/// rule PreExpr {
+///   Attribute Expr
+/// }
+///
+/// rule AtomExpr {
+///   '<' Ident Expr '>' |
+///   '(' Expr ')'
+/// }
+///
+/// rule SeqExpr {
+///     // incredible
+///     Expr Expr+
+/// }
+///
+/// rule BinExpr {
+///   Expr '|' Expr
+/// }
+///
+/// rule PostExpr {
+///   Expr '?' |
+///   Expr '+' |
+///   Expr Expr
+/// }
+///
+/// ```
+const _: u32 = 0;
 
-//     p.expect(LParen);
-//     while !p.at(RParen) && !p.eof() {
-//         if p.at(Name) {
-//             param(p);
-//         } else {
-//             if p.at_any(PARAM_LIST_RECOVERY) {
-//                 break;
-//             }
-//             p.advance_with_error("expected parameter");
-//         }
-//     }
-//     p.expect(RParen);
+// atom bp
+//  '<'  _ _
+//  '('  _ _
+// prefix bp
+//  '@'  _ 0
+// postfix bp
+//  '?'  1 _
+//  '+'  1 _
+//  '*'  1 _
+//  Expr 2 _
+// binary bp
+//  '|'  4 3
 
-//     p.close(m, ParamList);
-// }
+fn atom_expr(p: &mut Parser) -> ParseResult {
+    let m = p.start();
+    match p.peek() {
+        Ident | Literal => {
+            p.advance();
+            p.close(m, TreeKind::AtomExpr);
+        }
+        At => {
+            p.advance();
+            expect! {
+                err return ParseResult::Error;
+                // bp table lookup
+                expr(p, 0)
+            }
+            p.close(m, TreeKind::PreExpr);
+        }
+        LParen => {
+            p.advance();
+            expect! {
+                err return ParseResult::Error;
+                // bp table lookup
+                expr(p, u8::MAX),
+                p.terminal(RParen)
+            }
+            p.close(m, TreeKind::AtomExpr);
+        }
+        LAngle => {
+            p.advance();
+            expect! {
+                err return ParseResult::Error;
+                // bp table lookup
+                expr(p, u8::MAX),
+                p.terminal(RAngle)
+            }
+            p.close(m, TreeKind::AtomExpr);
+        }
+        _ => return ParseResult::NoMatch,
+    }
+    ParseResult::Match
+}
 
-// fn param(p: &mut Parser) {
-//     assert!(p.at(Name));
-//     let m = p.open();
+fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
+    let m = p.start();
+    probe! {
+        err return ParseResult::Error;
+        atom_expr(p)
+    }
 
-//     p.expect(Name);
-//     p.expect(Colon);
-//     type_expr(p);
-//     if !p.at(RParen) {
-//         p.expect(Comma);
-//     }
+    'outer: loop {
+        // parse postfix
+        match p.peek() {
+            Question | Plus | Star => {
+                p.advance();
+                // bp table lookup
+                let bp = (1, ());
+                if bp.0 < min_bp {
+                    return ParseResult::NoMatch;
+                }
 
-//     p.close(m, Param);
-// }
+                p.close(m, TreeKind::PostExpr);
+                continue 'outer;
+            }
+            Pipe => {
+                p.advance();
+                // bp table lookup
+                let bp = (4, 3);
+                if bp.0 < min_bp {
+                    return ParseResult::NoMatch;
+                }
 
-// fn type_expr(p: &mut Parser) {
-//     let m = p.open();
-//     p.expect(Name);
-//     p.close(m, TypeExpr);
-// }
+                expect! {
+                    err return ParseResult::Error;
+                    expr(p, bp.1)
+                }
 
-// const STMT_RECOVERY: &[TokenKind] = &[FnKeyword];
-// const EXPR_FIRST: &[TokenKind] = &[Int, TrueKeyword, FalseKeyword, Name, LParen];
-// fn block(p: &mut Parser) {
-//     assert!(p.at(LCurly));
-//     let m = p.open();
+                p.close(m, TreeKind::BinExpr);
+                continue 'outer;
+            }
+            Ident | Literal | LAngle | LParen | At => {
+                let mut first = true;
+                while !p.eof() {
+                    match expr(p, 2) {
+                        ParseResult::Match => first = false,
+                        ParseResult::NoMatch => break,
+                        ParseResult::Error => return ParseResult::Error,
+                    }
+                }
 
-//     p.expect(LCurly);
-//     while !p.at(RCurly) && !p.eof() {
-//         match p.nth(0) {
-//             LetKeyword => stmt_let(p),
-//             ReturnKeyword => stmt_return(p),
-//             _ => {
-//                 if p.at_any(EXPR_FIRST) {
-//                     stmt_expr(p)
-//                 } else {
-//                     if p.at_any(STMT_RECOVERY) {
-//                         break;
-//                     }
-//                     p.advance_with_error("expected statement");
-//                 }
-//             }
-//         }
-//     }
-//     p.expect(RCurly);
+                if !first {
+                    p.close(m, TreeKind::SeqExpr);
+                    continue 'outer;
+                }
+            }
+            _ => {}
+        }
 
-//     p.close(m, Block);
-// }
+        break;
+    }
 
-// fn stmt_let(p: &mut Parser) {
-//     assert!(p.at(LetKeyword));
-//     let m = p.open();
-
-//     p.expect(LetKeyword);
-//     p.expect(Name);
-//     p.expect(Eq);
-//     expr(p);
-//     p.expect(Semi);
-
-//     p.close(m, StmtLet);
-// }
-
-// fn stmt_return(p: &mut Parser) {
-//     assert!(p.at(ReturnKeyword));
-//     let m = p.open();
-
-//     p.expect(ReturnKeyword);
-//     expr(p);
-//     p.expect(Semi);
-
-//     p.close(m, StmtReturn);
-// }
-
-// fn stmt_expr(p: &mut Parser) {
-//     let m = p.open();
-
-//     expr(p);
-//     p.expect(Semi);
-
-//     p.close(m, StmtExpr);
-// }
-
-// fn expr(p: &mut Parser) {
-//     expr_rec(p, Eof);
-// }
-
-// fn expr_rec(p: &mut Parser, left: TokenKind) {
-//     let Some(mut lhs) = expr_delimited(p) else {
-//     return;
-//   };
-
-//     while p.at(LParen) {
-//         let m = p.open_before(lhs);
-//         arg_list(p);
-//         lhs = p.close(m, ExprCall);
-//     }
-
-//     loop {
-//         let right = p.nth(0);
-//         if right_binds_tighter(left, right) {
-//             let m = p.open_before(lhs);
-//             p.advance();
-//             expr_rec(p, right);
-//             lhs = p.close(m, ExprBinary);
-//         } else {
-//             break;
-//         }
-//     }
-// }
-
-// fn right_binds_tighter(left: TokenKind, right: TokenKind) -> bool {
-//     fn tightness(kind: TokenKind) -> Option<usize> {
-//         [
-//             // Precedence table:
-//             [Plus, Minus].as_slice(),
-//             &[Star, Slash],
-//         ]
-//         .iter()
-//         .position(|level| level.contains(&kind))
-//     }
-//     let Some(right_tightness) = tightness(right) else {
-//     return false
-//   };
-//     let Some(left_tightness) = tightness(left) else {
-//     assert!(left == Eof);
-//     return true;
-//   };
-//     right_tightness > left_tightness
-// }
-
-// fn expr_delimited(p: &mut Parser) -> Option<MarkClosed> {
-//     let result = match p.nth(0) {
-//         TrueKeyword | FalseKeyword | Int => {
-//             let m = p.open();
-//             p.advance();
-//             p.close(m, ExprLiteral)
-//         }
-//         Name => {
-//             let m = p.open();
-//             p.advance();
-//             p.close(m, ExprName)
-//         }
-//         LParen => {
-//             let m = p.open();
-//             p.expect(LParen);
-//             expr(p);
-//             p.expect(RParen);
-//             p.close(m, ExprParen)
-//         }
-//         _ => return None,
-//     };
-//     Some(result)
-// }
-
-// fn arg_list(p: &mut Parser) {
-//     assert!(p.at(LParen));
-//     let m = p.open();
-
-//     p.expect(LParen);
-//     while !p.at(RParen) && !p.eof() {
-//         if p.at_any(EXPR_FIRST) {
-//             arg(p);
-//         } else {
-//             break;
-//         }
-//     }
-//     p.expect(RParen);
-
-//     p.close(m, ArgList);
-// }
-
-// fn arg(p: &mut Parser) {
-//     let m = p.open();
-//     expr(p);
-//     if !p.at(RParen) {
-//         p.expect(Comma);
-//     }
-//     p.close(m, Arg);
-// }
+    ParseResult::Match
+}
 
 fn main() {
     #[rustfmt::skip]
     let text =
 r#####"
 tokenizer {
-    @skip whitespace r"\\\\\\\\\\\\\\\\s+"
-    @contextual node 'node'
-    @rip(a, b, c) eq '='
-    number r"\\\\\\\\\\\\\\\\d+"
-    hash_string r#"r#*""# 'parse_raw_string'
+    @skip(a(b), c, d) whitespace r"\\\\\\\\\\\\\\\\s+"
+}
+
+rule a(a, b) {
+    'pepis' aaa | aaa (bbb cc)
 }
 "#####;
 

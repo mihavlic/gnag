@@ -17,17 +17,39 @@ pub struct Lexer {
 
 // PARSER
 
+pub struct TerminalHandle(u32);
+pub struct NonterminalHandle(u32);
+
+pub enum ParserRuleAst {
+    // base nodes
+    Literal(Span),
+    Ident(Span),
+    // structuring nodes
+    Sequence(Vec<ParserRuleAst>),
+    Choice(Vec<ParserRuleAst>),
+    // repetition
+    OneOrMore(Vec<ParserRuleAst>),
+    ZeroOrMore(Vec<ParserRuleAst>),
+    Maybe(Vec<ParserRuleAst>),
+    // function call
+    Call(Span, Vec<ParserRuleAst>),
+}
+
 pub enum ParserRuleExpr {
-    Terminal(String),
-    NonTerminal(String),
-    // structuring node
+    // base nodes
+    Terminal(TerminalHandle),
+    NonTerminal(NonterminalHandle),
+    // structuring nodes
     Sequence(Vec<ParserRuleExpr>),
-    // postfix repetition
+    Choice(Vec<ParserRuleExpr>),
+    // repetition
     OneOrMore(Vec<ParserRuleExpr>),
     ZeroOrMore(Vec<ParserRuleExpr>),
     Maybe(Vec<ParserRuleExpr>),
-    // immediatelly matches, just an empty rule
-    Empty,
+    // builtins
+    Any,
+    Not(TerminalHandle),
+    ZeroSpace,
 }
 
 pub struct ParserRule {

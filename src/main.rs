@@ -1,12 +1,18 @@
-use std::cell::Cell;
+mod support;
+
+use std::{cell::Cell, ops::Index};
 
 /// ```ignore
 /// tokenizer {
-///     @skip whitespace r"\s+"
-///     @contextual node 'node'
+///     @skip
+///     whitespace r"\s+"
+///     @contextual
+///     node 'node'
 ///     eq '='
 ///     number r"\d+"
-///     hash_string r#"r#*""# 'parse_raw_string'
+///     @verbatim hash_string r#"
+///         
+///     "#
 /// }
 ///
 /// rule function {
@@ -61,8 +67,7 @@ pub enum TreeKind {
         TokenRule,
       SynRule,
         Parameters,
-      // expr
-        SynExpr,
+      SynExpr,
         PreExpr,
         AtomExpr,
         CallExpr,
@@ -74,21 +79,38 @@ pub enum TreeKind {
 use TokenKind::*;
 
 #[derive(Clone, Copy, Debug)]
-struct Span {
-    start: u32,
-    end: u32,
+pub struct StrSpan {
+    pub start: u32,
+    pub end: u32,
 }
 
-impl Span {
-    pub fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
+impl Index<StrSpan> for str {
+    type Output = str;
+    fn index(&self, index: StrSpan) -> &Self::Output {
+        &self[index.start as usize..index.end as usize]
+    }
+}
+
+impl<'a> Index<StrSpan> for Lexer<'a> {
+    type Output = str;
+    fn index(&self, index: StrSpan) -> &Self::Output {
+        &self.str[index.start as usize..index.end as usize]
+    }
+}
+
+impl StrSpan {
+    pub fn is_empty(self) -> bool {
+        self.end <= self.start
+    }
+    pub fn len(self) -> u32 {
+        self.end.saturating_sub(self.start)
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Token {
     kind: TokenKind,
-    span: Span,
+    span: StrSpan,
 }
 
 impl Token {
@@ -104,21 +126,6 @@ enum Child {
     Tree(Tree),
 }
 
-pub fn parse(text: &str) -> Tree {
-    let tokens = lex(text);
-    let mut p = Parser::new(tokens);
-    _ = p.nonterminal(File);
-    p.build_tree()
-}
-
-#[macro_export]
-macro_rules! format_to {
-    ($buf:expr) => ();
-    ($buf:expr, $lit:literal $($arg:tt)*) => {
-        { let _ = ::std::write!($buf, $lit $($arg)*); }
-    };
-}
-
 #[derive(Clone, Debug)]
 pub struct Tree {
     kind: TreeKind,
@@ -129,15 +136,15 @@ pub struct Tree {
 impl Tree {
     fn print(&self, buf: &mut dyn std::fmt::Write, src: &str, level: usize) {
         let indent = "  ".repeat(level);
-        format_to!(buf, "{indent}{:?}", self.kind);
+        _ = write!(buf, "{indent}{:?}", self.kind);
         if let Some(err) = &self.err {
-            format_to!(buf, " '{err}'");
+            _ = write!(buf, " '{err}'");
         }
-        format_to!(buf, "\n");
+        _ = write!(buf, "\n");
         for child in &self.children {
             match child {
                 Child::Token(token) => {
-                    format_to!(buf, "{indent}  {}\n", token.as_str(src))
+                    _ = write!(buf, "{indent}  {}\n", token.as_str(src));
                 }
                 Child::Tree(tree) => tree.print(buf, src, level + 1),
             }
@@ -145,146 +152,197 @@ impl Tree {
     }
 }
 
-fn lex(src: &str) -> Vec<Token> {
-    let mut text = src;
+pub struct Lexer<'str> {
+    str: &'str str,
+    pos: u32,
+}
+
+impl<'a> Lexer<'a> {
+    pub fn new(str: &'a str) -> Self {
+        Self { str, pos: 0 }
+    }
+
+    pub fn pos(&self) -> u32 {
+        self.pos
+    }
+
+    pub fn span_since(&self, start: u32) -> StrSpan {
+        StrSpan {
+            start,
+            end: self.pos(),
+        }
+    }
+
+    pub fn restore_pos(&mut self, pos: u32) {
+        debug_assert!(pos as usize <= self.str.len());
+        self.pos = pos;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pos as usize >= self.str.len()
+    }
+
+    pub fn current(&self) -> Option<char> {
+        self.str[self.pos as usize..].chars().next()
+    }
+
+    pub fn next(&mut self) -> Option<char> {
+        let pos = self.pos as usize;
+        if pos < self.str.len() {
+            let c = self.str[pos..].chars().next().unwrap();
+            self.pos += c.len_utf8() as u32;
+            Some(c)
+        } else {
+            None
+        }
+    }
+
+    pub fn peek(&self) -> Option<char> {
+        let pos = self.pos as usize;
+        if pos < self.str.len() {
+            let c = self.str[pos..].chars().next().unwrap();
+            Some(c)
+        } else {
+            None
+        }
+    }
+
+    pub fn previous(&self) -> Option<char> {
+        let pos = self.pos as usize;
+        self.str[..pos].chars().rev().next()
+    }
+
+    fn consume_while(&mut self, predicate: impl std::ops::Fn(char) -> bool) -> StrSpan {
+        let start = self.pos();
+        while let Some(c) = self.peek() {
+            if predicate(c) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+        StrSpan {
+            start,
+            end: self.pos(),
+        }
+    }
+
+    fn choice<T>(&mut self, funs: &[fn(&mut Lexer) -> Option<T>]) -> Option<T> {
+        let pos = self.pos();
+        for fun in funs {
+            match fun(self) {
+                None => self.restore_pos(pos),
+                some => return some,
+            }
+        }
+        None
+    }
+}
+
+fn lex(l: &mut Lexer) -> Vec<Token> {
     let mut result = Vec::new();
-    while !text.is_empty() {
-        if let Some(rest) = trim(text, |it| it.is_ascii_whitespace()) {
-            text = rest;
+    while !l.is_empty() {
+        if !l.consume_while(char::is_whitespace).is_empty() {
             continue;
         }
 
-        let text_orig = text;
-        let mut kind = 'kind: {
-            let mut chars = text.chars();
-            let punct = match chars.next().unwrap() {
-                '@' => Some(At),
-                ',' => Some(Comma),
-                '|' => Some(Pipe),
-                '?' => Some(Question),
-                '+' => Some(Plus),
-                '*' => Some(Star),
-                '(' => Some(LParen),
-                ')' => Some(RParen),
-                '{' => Some(LCurly),
-                '}' => Some(RCurly),
-                '[' => Some(LBracket),
-                ']' => Some(RBracket),
-                '<' => Some(LAngle),
-                '>' => Some(RAngle),
-                _ => None,
-            };
-            if let Some(punct) = punct {
-                text = chars.as_str();
-                break 'kind punct;
-            }
-
-            // 'string'
-            let mut string_chars = text.chars();
-            if string_chars.next().unwrap() == '\'' {
-                let mut escaped = false;
-                while let Some(c) = string_chars.next() {
-                    if c == '\\' {
-                        escaped = true;
-                        continue;
-                    }
-
-                    if c == '\'' && !escaped {
-                        text = string_chars.as_str();
-                        break 'kind Literal;
-                    }
-
-                    escaped = false;
-                }
-            }
-
-            // r#"escaped string"#
-            let mut string_chars = text.chars();
-            if string_chars.next().unwrap() == 'r' {
-                let mut balance = 0;
-                'inner: {
-                    while let Some(c) = string_chars.next() {
-                        match c {
-                            '#' => balance += 1,
-                            '"' => break,
-                            _ => break 'inner,
-                        }
-                    }
-
-                    while let Some(c) = string_chars.next() {
-                        if c == '"' {
-                            if balance == 0 {
-                                text = string_chars.as_str();
-                                break 'kind RawLiteral;
+        let start = l.pos();
+        let kind = l
+            .choice(&[
+                |l| match l.next().unwrap() {
+                    '@' => Some(At),
+                    ',' => Some(Comma),
+                    '|' => Some(Pipe),
+                    '?' => Some(Question),
+                    '+' => Some(Plus),
+                    '*' => Some(Star),
+                    '(' => Some(LParen),
+                    ')' => Some(RParen),
+                    '{' => Some(LCurly),
+                    '}' => Some(RCurly),
+                    '[' => Some(LBracket),
+                    ']' => Some(RBracket),
+                    '<' => Some(LAngle),
+                    '>' => Some(RAngle),
+                    _ => None,
+                },
+                |l| {
+                    if l.next().unwrap() == '\'' {
+                        let mut escaped = false;
+                        while let Some(c) = l.next() {
+                            if c == '\\' {
+                                escaped = true;
+                                continue;
                             }
 
-                            let mut balance = balance;
-                            let mut string_chars = string_chars.clone();
-                            while let Some('#') = string_chars.next() {
-                                balance -= 1;
-                                if balance == 0 {
-                                    text = string_chars.as_str();
-                                    break 'kind RawLiteral;
+                            if c == '\'' && !escaped {
+                                return Some(Literal);
+                            }
+
+                            escaped = false;
+                        }
+                    }
+                    None
+                },
+                |l| {
+                    if l.next().unwrap() == 'r' {
+                        let mut balance = 0;
+                        while let Some(c) = l.next() {
+                            match c {
+                                '#' => balance += 1,
+                                '"' => break,
+                                _ => return None,
+                            }
+                        }
+
+                        while let Some(c) = l.next() {
+                            if c == '"' {
+                                let mut balance_copy = balance;
+                                loop {
+                                    if balance_copy == 0 {
+                                        return Some(RawLiteral);
+                                    }
+                                    if let Some('#') = l.next() {
+                                        balance_copy -= 1;
+                                    } else {
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
+                    None
+                },
+                |l| {
+                    let span = l.consume_while(name_char);
+                    if span.is_empty() {
+                        return None;
+                    }
+                    match &l[span] {
+                        "rule" => Some(RuleKeyword),
+                        "tokenizer" => Some(TokenizerKeyword),
+                        _ => Some(Ident),
+                    }
+                },
+                |l| {
+                    let span = l.consume_while(|c| !c.is_ascii_whitespace());
+                    if span.is_empty() {
+                        l.next();
+                    }
+                    Some(ErrorToken)
+                },
+            ])
+            .unwrap();
 
-            // ident
-            if let Some(rest) = trim(text, name_char) {
-                text = rest;
-                break 'kind Ident;
-            }
+        let span = l.span_since(start);
+        assert!(!span.is_empty());
 
-            // TODO configure lexer recovery
-            let error_index = text
-                .find(|it: char| it.is_ascii_whitespace())
-                .unwrap_or(text.len());
-            text = &text[error_index..];
-            ErrorToken
-        };
-
-        // assert that we've consumed _something_
-        assert!(text.len() < text_orig.len());
-
-        let token_text = &text_orig[..text_orig.len() - text.len()];
-        if kind == Ident {
-            match token_text {
-                "rule" => kind = RuleKeyword,
-                "tokenizer" => kind = TokenizerKeyword,
-                _ => {}
-            }
-        }
-
-        let start = unsafe {
-            text_orig
-                .as_ptr()
-                .offset_from(src.as_ptr())
-                .try_into()
-                .unwrap()
-        };
-        let end = unsafe { text.as_ptr().offset_from(src.as_ptr()).try_into().unwrap() };
-
-        result.push(Token {
-            kind,
-            span: Span::new(start, end),
-        })
+        result.push(Token { kind, span })
     }
     return result;
 
     fn name_char(c: char) -> bool {
         matches!(c, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9')
-    }
-
-    fn trim(text: &str, predicate: impl std::ops::Fn(char) -> bool) -> Option<&str> {
-        let index = text.find(|it: char| !predicate(it)).unwrap_or(text.len());
-        if index == 0 {
-            None
-        } else {
-            Some(&text[index..])
-        }
     }
 }
 
@@ -1044,6 +1102,14 @@ fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
     }
 
     ParseResult::Match
+}
+
+pub fn parse(text: &str) -> Tree {
+    let mut lexer = Lexer::new(text);
+    let tokens = lex(&mut lexer);
+    let mut parser = Parser::new(tokens);
+    _ = parser.nonterminal(File);
+    parser.build_tree()
 }
 
 fn main() {

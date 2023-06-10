@@ -297,13 +297,13 @@ fn lex(l: &mut Lexer) -> Vec<Token> {
 
                         while let Some(c) = l.next() {
                             if c == '"' {
-                                let mut balance_copy = balance;
+                                let mut balance = balance;
                                 loop {
-                                    if balance_copy == 0 {
+                                    if balance == 0 {
                                         return Some(RawLiteral);
                                     }
                                     if let Some('#') = l.next() {
-                                        balance_copy -= 1;
+                                        balance -= 1;
                                     } else {
                                         break;
                                     }
@@ -314,7 +314,8 @@ fn lex(l: &mut Lexer) -> Vec<Token> {
                     None
                 },
                 |l| {
-                    let span = l.consume_while(name_char);
+                    let span =
+                        l.consume_while(|c| matches!(c, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'));
                     if span.is_empty() {
                         return None;
                     }
@@ -340,10 +341,6 @@ fn lex(l: &mut Lexer) -> Vec<Token> {
         result.push(Token { kind, span })
     }
     return result;
-
-    fn name_char(c: char) -> bool {
-        matches!(c, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9')
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1117,11 +1114,11 @@ fn main() {
     let text =
 r#####"
 tokenizer {
-    @skip(a(b), c, d) whitespace r"\\\\\\\\\\\\\\\\s+"
+    @skip(a(b), c, d) whitespace r##"\\\\\\\\\\\\\\\\s+"##
 }
 
 rule a(a, b) {
-    (a b)???????????????????????? | c
+    (a b)? | c
 }
 "#####;
 

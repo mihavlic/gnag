@@ -42,7 +42,9 @@ use std::{cell::Cell, ops::Index};
 
 /// Starting code from
 ///  https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html
-///  https://github.com/matklad/resilient-ll-parsing/blob/master/src/lib.rs
+///  - https://github.com/matklad/resilient-ll-parsing/blob/master/src/lib.rs
+///  https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
+///  - https://github.com/matklad/minipratt/blob/master/src/bin/pratt.rs 
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[rustfmt::skip]

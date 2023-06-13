@@ -1,4 +1,6 @@
-mod support;
+mod ast;
+pub mod bump;
+pub mod handle;
 
 use std::{cell::Cell, ops::Index};
 
@@ -403,9 +405,12 @@ impl Parser {
         // note that this will make siblings' order reversed, so we need to reverse them back at the end
         // with a Vec::reverse
 
-        let mut tokens = self.tokens.into_iter().rev();
-        let mut errors = self.errors.into_iter().rev().peekable();
-        let mut spans = self.spans.iter().zip(0u32..self.spans.len() as u32).rev();
+        let mut tokens: std::iter::Rev<std::vec::IntoIter<Token>> = self.tokens.into_iter().rev();
+        let mut errors: std::iter::Peekable<std::iter::Rev<std::vec::IntoIter<ParseError>>> =
+            self.errors.into_iter().rev().peekable();
+        let mut spans: std::iter::Rev<
+            std::iter::Zip<std::slice::Iter<'_, TreeSpan>, std::ops::Range<u32>>,
+        > = self.spans.iter().zip(0u32..self.spans.len() as u32).rev();
 
         // check that the root contains all of the tokens
         let (root, root_index) = spans.next().unwrap();
@@ -1024,6 +1029,7 @@ fn base_expr(p: &mut Parser) -> ParseResult {
             p.advance();
             expect! {
                 err return ParseResult::Error;
+                p.terminal(Ident),
                 // bp table lookup
                 expr(p, 0),
                 p.terminal(RAngle)
@@ -1101,6 +1107,83 @@ fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
     }
 
     ParseResult::Match
+}
+
+pub struct TreeIter<'a> {
+    pos: i32,
+    tokens: std::iter::Rev<std::vec::IntoIter<Token>>,
+    errors: std::iter::Peekable<std::iter::Rev<std::vec::IntoIter<ParseError>>>,
+    spans: std::iter::Rev<std::iter::Zip<std::slice::Iter<'a, TreeSpan>, std::ops::Range<u32>>>,
+}
+
+enum IterEvent {
+    Token(Token),
+    OpenTree(TreeKind),
+    CloseTree(TreeKind),
+}
+
+impl TreeIter {
+    fn visit(&mut self, until_start: u32) {
+        let cur = stack.last_mut().unwrap();
+        let cur_span = span_stack.last().unwrap();
+        let next = spans.clone().next();
+
+        // remember: we're iterating from the back
+
+        // see what tokens we can safely push as Child::Token into the current node
+        let mut limit = cur_span.start as i32;
+        if let Some((next, _)) = next {
+            // the next node may either be a child or a sibling
+            // |-current-node-|
+            //    |-next-|
+            if next.start >= cur_span.start {
+                debug_assert!(next.end <= cur_span.end);
+                // decrase the limit until the child starts
+                limit = next.end as i32;
+            }
+        }
+
+        // consume the tokens
+        while token_pos >= limit {
+            cur.children.push(Child::Token(tokens.next().unwrap()));
+            token_pos -= 1;
+        }
+
+        // try to enter a child
+        if let Some((next, span_index)) = next {
+            // same logic for children as before
+            if next.start >= cur_span.start {
+                let mut node = Tree {
+                    kind: next.kind,
+                    children: Vec::new(),
+                    err: None,
+                };
+
+                // try to attach an error
+                if let Some(ParseError { err: _, span }) = errors.peek() {
+                    if span.0 == span_index {
+                        let error = errors.next().unwrap();
+                        node.err = Some(error.err);
+                    }
+                }
+
+                spans.next();
+                span_stack.push(next);
+                stack.push(node);
+                continue;
+            }
+        }
+
+        // pop the node from the stack, leaving only root
+        if stack.len() > 1 {
+            span_stack.pop();
+            let mut tree = stack.pop().unwrap();
+            tree.children.reverse();
+            stack.last_mut().unwrap().children.push(Child::Tree(tree));
+        } else {
+            break;
+        }
+    }
 }
 
 pub fn parse(text: &str) -> Tree {

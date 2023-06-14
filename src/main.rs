@@ -648,12 +648,8 @@ impl Parser {
         while !self.eof() {
             match self.nonterminal(rule) {
                 ParseResult::Match => { /* continue */ }
-                ParseResult::NoMatch => {
-                    return ParseResult::Match;
-                }
-                ParseResult::Error => {
-                    return ParseResult::Error;
-                }
+                ParseResult::NoMatch => break,
+                ParseResult::Error => return ParseResult::Error,
             }
         }
 
@@ -669,18 +665,9 @@ impl Parser {
         while !self.eof() {
             match self.nonterminal((kind, fun)) {
                 ParseResult::Match => { /* continue */ }
-                ParseResult::NoMatch => {
-                    if first {
-                        // FIXME or ParseResult::NoMatch?
-                        // we want optional(repetition_plus) to have the same behaviour as repetition_star
-                        return ParseResult::Error;
-                    } else {
-                        return ParseResult::Match;
-                    }
-                }
-                ParseResult::Error => {
-                    return ParseResult::Error;
-                }
+                ParseResult::NoMatch if first => return ParseResult::NoMatch,
+                ParseResult::NoMatch => break,
+                ParseResult::Error => return ParseResult::Error,
             }
             first = false;
         }

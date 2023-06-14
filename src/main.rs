@@ -563,6 +563,10 @@ impl Parser {
         self.close_with_err_impl(m, TreeKind::ErrorTree, err.to_string());
     }
 
+    fn close_with_err_kind(&mut self, m: SpanStart, kind: TreeKind, err: impl ToString) {
+        self.close_with_err_impl(m, kind, err.to_string());
+    }
+
     #[doc(hidden)]
     fn close_with_err_impl(&mut self, m: SpanStart, kind: TreeKind, err: String) {
         let span = self.close(m, kind);
@@ -612,7 +616,7 @@ impl Parser {
     }
 
     #[must_use]
-    fn terminal(&mut self, kind: TokenKind) -> ParseResult {
+    fn terminal(&mut self, kind: TokenKind) -> ParseResult<()> {
         if self.at(kind) {
             self.advance();
             ParseResult::Match
@@ -624,12 +628,12 @@ impl Parser {
     #[must_use]
     fn nonterminal(
         &mut self,
-        (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult),
-    ) -> ParseResult {
+        (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult<()>),
+    ) -> ParseResult<()> {
         let m = self.open();
         let res = fun(self);
         match res {
-            ParseResult::Match => {
+            Ok(()) => {
                 self.close(m, kind);
             }
             ParseResult::NoMatch => {}
@@ -641,13 +645,33 @@ impl Parser {
     }
 
     #[must_use]
+    fn nonterminal_fun<T>(
+        &mut self,
+        kind: TreeKind,
+        fun: impl FnOnce(&mut Parser) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        let m = self.open();
+        let res = fun(self);
+        match res {
+            Ok(_) => {
+                self.close(m, kind);
+            }
+            ParseResult::NoMatch => {}
+            ParseResult::Error => {
+                self.close_with_err_kind(m, kind, "Error");
+            }
+        }
+        res
+    }
+
+    #[must_use]
     fn nonterminal_repetition_star(
         &mut self,
-        rule: (TreeKind, fn(&mut Parser) -> ParseResult),
-    ) -> ParseResult {
+        rule: (TreeKind, fn(&mut Parser) -> ParseResult<()>),
+    ) -> ParseResult<()> {
         while !self.eof() {
             match self.nonterminal(rule) {
-                ParseResult::Match => { /* continue */ }
+                Ok(()) => { /* continue */ }
                 ParseResult::NoMatch => break,
                 ParseResult::Error => return ParseResult::Error,
             }
@@ -659,12 +683,12 @@ impl Parser {
     #[must_use]
     fn nonterminal_repetition_plus(
         &mut self,
-        (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult),
-    ) -> ParseResult {
+        (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult<()>),
+    ) -> ParseResult<()> {
         let mut first = true;
         while !self.eof() {
             match self.nonterminal((kind, fun)) {
-                ParseResult::Match => { /* continue */ }
+                Ok(()) => { /* continue */ }
                 ParseResult::NoMatch if first => return ParseResult::NoMatch,
                 ParseResult::NoMatch => break,
                 ParseResult::Error => return ParseResult::Error,
@@ -677,132 +701,168 @@ impl Parser {
 }
 
 pub trait RecoverMethod {
-    fn recover(&self, p: &mut Parser) -> ParseResult;
+    fn recover(&self, p: &mut Parser);
 }
 
 pub struct RecoverUntil<'a>(&'a [TokenKind]);
 impl<'a> RecoverMethod for RecoverUntil<'a> {
     #[cold]
-    fn recover(&self, p: &mut Parser) -> ParseResult {
+    fn recover(&self, p: &mut Parser) {
         let m = p.open();
         while !(p.eof() || p.at_any(self.0)) {
             p.advance()
         }
         p.close_with_err(m, "Recover until");
-        ParseResult::Match
-    }
-}
-
-pub struct RecoverStop;
-impl RecoverMethod for RecoverStop {
-    fn recover(&self, _: &mut Parser) -> ParseResult {
-        ParseResult::Match
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseErr {
-    NoMatch,
     Error,
+    NoMatch,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ParseResult {
-    Match,
-    NoMatch,
-    Error,
+pub type ParseResult<T> = Result<T, ParseErr>;
+
+trait ParseResultExtUnit {
+    const Match: ParseResult<()> = Ok(());
 }
 
-impl ParseResult {
-    fn optional(self) -> Self {
-        match self {
-            ParseResult::Match => ParseResult::Match,
-            ParseResult::NoMatch => ParseResult::Match,
+trait ParseResultExt<T>: Into<ParseResult<T>> + From<ParseResult<T>> {
+    const NoMatch: ParseResult<T> = Err(ParseErr::NoMatch);
+    const Error: ParseResult<T> = Err(ParseErr::Error);
+
+    #[inline(always)]
+    fn optional(self) -> ParseResult<Option<T>> {
+        match self.into() {
+            Ok(val) => Ok(Some(val)),
+            ParseResult::NoMatch => Ok(None),
+            ParseResult::Error => ParseResult::Error,
+        }
+    }
+
+    #[inline(always)]
+    fn must(self) -> ParseResult<T> {
+        match self.into() {
+            Ok(val) => Ok(val),
+            ParseResult::NoMatch => ParseResult::Error,
             ParseResult::Error => ParseResult::Error,
         }
     }
 }
 
-macro_rules! probe {
-    ($p:expr; err $err:expr; $($rule:expr),+) => {
-        let checkpoint = $p.checkpoint();
-        $(
-            match $rule {
-                ParseResult::Match => {},
-                ParseResult::NoMatch => {
-                    $p.restore(checkpoint);
-                    return ParseResult::NoMatch;
-                },
-                ParseResult::Error => {$err;},
-            }
-        )+
-    };
-}
+impl<T> ParseResultExt<T> for ParseResult<T> {}
+impl ParseResultExtUnit for ParseResult<()> {}
 
-// macro_rules! optional {
-//     (err $err:expr; $($rule:expr),+) => {
+// macro_rules! probe {
+//     ($p:expr; err $err:expr; $($rule:expr),+) => {
+//         let checkpoint = $p.checkpoint();
 //         $(
 //             match $rule {
-//                 ParseResult::Match | ParseResult::NoMatch => {},
+//                 Ok(()) => {},
+//                 ParseResult::NoMatch => {
+//                     $p.restore(checkpoint);
+//                     return ParseResult::NoMatch;
+//                 },
 //                 ParseResult::Error => {$err;},
 //             }
 //         )+
 //     };
 // }
 
-macro_rules! expect {
-    (err $err:expr; $($rule:expr),+) => {
-        $(
-            match $rule {
-                ParseResult::Match => {},
-                ParseResult::NoMatch | ParseResult::Error => {$err;},
-            }
-        )+
-    };
-}
+// macro_rules! optional {
+//     (err $err:expr; $($rule:expr),+) => {
+//         $(
+//             match $rule {
+//                 Ok(()) | ParseResult::NoMatch => {},
+//                 ParseResult::Error => {$err;},
+//             }
+//         )+
+//     };
+// }
 
-macro_rules! choice {
-    (err $err:expr; default $default:expr; $($rule:expr),+) => {
-        'choice: {
-            $(
-                match $rule {
-                    ParseResult::Match => break 'choice,
-                    ParseResult::NoMatch => {}
-                    ParseResult::Error => {
-                        $err;
-                    },
-                }
-            )+
-            $default;
-        }
-    };
-}
+// macro_rules! expect {
+//     (err $err:expr; $($rule:expr),+) => {
+//         $(
+//             match $rule {
+//                 Ok(()) => {},
+//                 ParseResult::NoMatch | ParseResult::Error => {$err;},
+//             }
+//         )+
+//     };
+// }
+
+// macro_rules! choice {
+//     (err $err:expr; default $default:expr; $($rule:expr),+) => {
+//         'choice: {
+//             $(
+//                 match $rule {
+//                     Ok(()) => break 'choice,
+//                     ParseResult::NoMatch => {}
+//                     ParseResult::Error => {
+//                         $err;
+//                     },
+//                 }
+//             )+
+//             $default;
+//         }
+//     };
+// }
 
 macro_rules! parser_rule {
     ($kind:ident, $function:expr) => {
         #[allow(non_upper_case_globals)]
-        pub const $kind: (TreeKind, fn(&mut Parser) -> ParseResult) = (TreeKind::$kind, $function);
+        pub const $kind: (TreeKind, fn(&mut Parser) -> ParseResult<()>) =
+            (TreeKind::$kind, $function);
     };
 }
 
-// (Tokenizer | GrammarRule)*
-parser_rule! {File, file}
-fn file(p: &mut Parser) -> ParseResult {
-    'repeat: while !p.eof() {
-        let r = RecoverUntil(&[TokenizerKeyword, RuleKeyword]);
-        choice!(
-            err {r.recover(p); continue 'repeat};
-            default {p.try_advance(); r.recover(p); continue 'repeat};
-            p.nonterminal(Tokenizer),
-            p.nonterminal(SynRule)
-        );
-    }
-    ParseResult::Match
+pub enum FileNode {
+    Tokenizer(TokenizerNode),
+    GrammarRule(GrammarRuleNode),
+}
+
+// (Tokenizer | GrammarRule)*:items
+fn file(p: &mut Parser) -> ParseResult<FileNode> {
+    p.nonterminal_fun(TreeKind::File, |p| {
+        while !p.eof() {
+            let r = RecoverUntil(&[TokenizerKeyword, RuleKeyword]);
+
+            let a = 'choice: {
+                match p.nonterminal(Tokenizer) {
+                    Ok(val) => break 'choice FileNode::Tokenizer(val),
+                    Err(ParseErr::Error) => todo!(),
+                    Err(ParseErr::NoMatch) => {},
+                }
+
+                if let Some(val) = .optional()? {
+                    break 'choice;
+                }
+
+                if let Some(val) = p.nonterminal(SynRule).optional()? {
+                    break 'choice;
+                }
+
+                p.try_advance();
+                r.recover(p);
+            }
+
+            if let Some(val) = p.nonterminal(Tokenizer).optional()? {
+                // aa
+            } else if let Some(val) = p.nonterminal(SynRule).optional()? {
+                // aa
+            } else {
+                p.try_advance();
+                r.recover(p);
+            }
+        }
+        ParseResult::Match
+    })
 }
 
 // 'tokenizer' '{' TokenRule* '}'
 parser_rule! {Tokenizer, tokenizer}
-fn tokenizer(p: &mut Parser) -> ParseResult {
+fn tokenizer(p: &mut Parser) -> ParseResult<()> {
     probe! {
         p;
         err return ParseResult::Error;
@@ -819,7 +879,7 @@ fn tokenizer(p: &mut Parser) -> ParseResult {
 
 // ( Number | Ident )
 parser_rule! {AttributeValue, attribute_value}
-fn attribute_value(p: &mut Parser) -> ParseResult {
+fn attribute_value(p: &mut Parser) -> ParseResult<()> {
     choice! {
         err return ParseResult::Error;
         default return ParseResult::NoMatch;
@@ -831,13 +891,13 @@ fn attribute_value(p: &mut Parser) -> ParseResult {
 
 // Ident ( '(' AttributeValue ')' )?
 parser_rule! {AttributeExpr, attribute_expr}
-fn attribute_expr(p: &mut Parser) -> ParseResult {
+fn attribute_expr(p: &mut Parser) -> ParseResult<()> {
     probe! {
         p;
         err return ParseResult::Error;
         p.terminal(Ident)
     }
-    if p.terminal(LParen) == ParseResult::Match {
+    if p.terminal(LParen) == Ok(()) {
         expect! {
             err return ParseResult::Error;
             p.nonterminal(AttributeValue),
@@ -849,7 +909,7 @@ fn attribute_expr(p: &mut Parser) -> ParseResult {
 
 // '@' Ident ( '(' <separated_list Attribute ','> ')' )?
 parser_rule! {Attribute, attribute}
-fn attribute(p: &mut Parser) -> ParseResult {
+fn attribute(p: &mut Parser) -> ParseResult<()> {
     probe! {
         p;
         err return ParseResult::Error;
@@ -859,15 +919,15 @@ fn attribute(p: &mut Parser) -> ParseResult {
         err return ParseResult::Error;
         p.terminal(Ident)
     }
-    if p.terminal(LParen) == ParseResult::Match {
+    if p.terminal(LParen) == Ok(()) {
         while !p.eof() {
             match p.nonterminal(AttributeExpr) {
-                ParseResult::Match => {}
+                Ok(()) => {}
                 ParseResult::NoMatch => break,
                 ParseResult::Error => return ParseResult::Error,
             }
             match p.terminal(Comma) {
-                ParseResult::Match => {}
+                Ok(()) => {}
                 ParseResult::NoMatch => break,
                 ParseResult::Error => return ParseResult::Error,
             }
@@ -882,7 +942,7 @@ fn attribute(p: &mut Parser) -> ParseResult {
 
 // Attribute* Ident (Literal | RawLiteral) Literal?
 parser_rule! {TokenRule, token_rule}
-fn token_rule(p: &mut Parser) -> ParseResult {
+fn token_rule(p: &mut Parser) -> ParseResult<()> {
     let r = RecoverUntil(&[At, Ident, RCurly]);
     probe! {
         p;
@@ -905,7 +965,7 @@ fn token_rule(p: &mut Parser) -> ParseResult {
 
 // Attribute* 'rule' Ident Parameters? '{' SynExpr '}'
 parser_rule! {SynRule, syn_rule}
-fn syn_rule(p: &mut Parser) -> ParseResult {
+fn syn_rule(p: &mut Parser) -> ParseResult<()> {
     let r = RecoverUntil(&[At, Ident, RCurly]);
     probe! {
         p;
@@ -926,7 +986,7 @@ fn syn_rule(p: &mut Parser) -> ParseResult {
 
 // '(' <separated_list Ident ','> ')'
 parser_rule! {Parameters, parameters}
-fn parameters(p: &mut Parser) -> ParseResult {
+fn parameters(p: &mut Parser) -> ParseResult<()> {
     let r = RecoverUntil(&[LCurly]);
     probe! {
         p;
@@ -935,12 +995,12 @@ fn parameters(p: &mut Parser) -> ParseResult {
     }
     while !p.eof() {
         match p.nonterminal(AttributeExpr) {
-            ParseResult::Match => {}
+            Ok(()) => {}
             ParseResult::NoMatch => break,
             ParseResult::Error => return r.recover(p),
         }
         match p.terminal(Comma) {
-            ParseResult::Match => {}
+            Ok(()) => {}
             ParseResult::NoMatch => break,
             ParseResult::Error => return r.recover(p),
         }
@@ -998,7 +1058,7 @@ const _: u32 = 0;
 // binary bp
 //  '|'  2 1
 
-fn base_expr(p: &mut Parser) -> ParseResult {
+fn base_expr(p: &mut Parser) -> ParseResult<()> {
     let m = p.open();
     match p.peek() {
         Ident | Literal => {
@@ -1040,7 +1100,7 @@ fn base_expr(p: &mut Parser) -> ParseResult {
     ParseResult::Match
 }
 
-fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
+fn expr(p: &mut Parser, min_bp: u8) -> ParseResult<()> {
     let m = p.open();
     probe! {
         p;
@@ -1088,7 +1148,7 @@ fn expr(p: &mut Parser, min_bp: u8) -> ParseResult {
                 let mut first = true;
                 while !p.eof() {
                     match expr(p, bp.0) {
-                        ParseResult::Match => first = false,
+                        Ok(()) => first = false,
                         ParseResult::NoMatch => break,
                         ParseResult::Error => return ParseResult::Error,
                     }

@@ -55,7 +55,7 @@ use std::{
 #[rustfmt::skip]
 enum TokenKind {
     Ident, Literal, RawLiteral, Number,
-    ErrorToken, Eof,
+    ErrorToken,
   
     LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
     TokenizerKeyword, RuleKeyword,
@@ -369,6 +369,24 @@ struct ParserCheckpoint {
     errors_len: u32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParseValid {
+    Valid,
+    Recovered,
+    Abandoned,
+}
+
+impl ParseValid {
+    fn recover(&mut self) {
+        if *self == ParseValid::Valid {
+            *self = ParseValid::Recovered
+        }
+    }
+    fn abandon(&mut self) {
+        *self = ParseValid::Abandoned;
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TreeSpan {
     kind: TreeKind,
@@ -562,6 +580,24 @@ impl Parser {
         SpanIndex(index)
     }
 
+    fn close_node<T>(
+        &mut self,
+        m: SpanStart,
+        kind: TreeKind,
+        validity: ParseValid,
+        node: impl FnOnce(AstMeta) -> T,
+    ) -> ParseResult<T> {
+        let closed = self.close(m, kind);
+        if validity == ParseValid::Abandoned {
+            ParseResult::Error
+        } else {
+            ParseResult::Match(node(AstMeta {
+                valid: validity == ParseValid::Valid,
+                span: closed,
+            }))
+        }
+    }
+
     fn close_with_err(&mut self, m: SpanStart, err: impl ToString) {
         self.close_with_err_impl(m, TreeKind::ErrorTree, err.to_string());
     }
@@ -594,19 +630,18 @@ impl Parser {
         self.pos as usize == self.tokens.len()
     }
 
-    fn peek(&self) -> TokenKind {
+    fn peek(&self) -> Option<TokenKind> {
         self.nth(0)
     }
 
-    fn peek_span(&self) -> StrSpan {
+    fn prev_span(&self) -> StrSpan {
         let end = self.tokens.last().unwrap().span.end;
         self.nth_impl(0)
             .map_or(StrSpan { start: end, end }, |s| s.span)
     }
 
-    fn nth(&self, lookahead: u32) -> TokenKind {
-        self.nth_impl(lookahead)
-            .map_or(TokenKind::Eof, |it| it.kind)
+    fn nth(&self, lookahead: u32) -> Option<TokenKind> {
+        self.nth_impl(lookahead).map(|it| it.kind)
     }
 
     fn nth_impl(&self, lookahead: u32) -> Option<&Token> {
@@ -619,12 +654,16 @@ impl Parser {
 
     #[inline]
     fn at(&self, kind: TokenKind) -> bool {
-        self.nth(0) == kind
+        self.nth(0) == Some(kind)
     }
 
     #[inline]
     fn at_any(&self, kinds: &[TokenKind]) -> bool {
-        kinds.contains(&self.nth(0))
+        if let Some(any) = self.nth(0) {
+            kinds.contains(&any)
+        } else {
+            false
+        }
     }
 
     #[must_use]
@@ -638,65 +677,102 @@ impl Parser {
     }
 
     #[must_use]
-    fn nonterminal(
-        &mut self,
-        (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult<()>),
-    ) -> ParseResult<()> {
-        let m = self.open();
-        let res = fun(self);
+    fn token_span(&mut self, kind: TokenKind) -> ParseResult<StrSpan> {
+        match self.nth_impl(0) {
+            Some(token) => {
+                let span = token.span;
+                self.advance();
+                ParseResult::Match(span)
+            }
+            None => ParseResult::NoMatch,
+        }
+    }
+
+    fn expect(&mut self, kind: TokenKind) -> ParseResult<()> {
+        if self.at(kind) {
+            self.advance();
+            ParseResult::Match(())
+        } else {
+            let m = self.open();
+            self.close_with_err(m, format!("Expected '{kind:?}'"));
+            ParseResult::NoMatch
+        }
+    }
+
+    #[must_use]
+    fn expect_span(&mut self, kind: TokenKind) -> ParseResult<StrSpan> {
+        let res = self.token_span(kind);
         match res {
-            ParseResult::Match(()) => {
-                self.close(m, kind);
+            ParseResult::Match(_) => {}
+            ParseResult::NoMatch => {
+                let m = self.open();
+                self.close_with_err(m, format!("Expected '{kind:?}'"));
             }
-            ParseResult::NoMatch => {}
-            ParseResult::Error => {
-                self.close_with_err(m, "Error");
-            }
+            ParseResult::Error => unreachable!(),
         }
         res
     }
 
-    #[must_use]
-    fn pub_rule<T>(
-        &mut self,
-        kind: TreeKind,
-        fun: fn(&mut Parser) -> ParseResult<T>,
-    ) -> ParseResult<T> {
-        let m = self.open();
-        let res = fun(self);
-        match res {
-            ParseResult::Match(_) => {
-                self.close(m, kind);
-            }
-            ParseResult::NoMatch => {}
-            ParseResult::Error => {
-                // TODO indicate error in node
-                self.close_with_err_kind(m, kind, "Error");
-            }
-        }
-        res
-    }
+    // #[must_use]
+    // fn nonterminal(
+    //     &mut self,
+    //     (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult<()>),
+    // ) -> ParseResult<()> {
+    //     let m = self.open();
+    //     let res = fun(self);
+    //     match res {
+    //         ParseResult::Match(()) => {
+    //             self.close(m, kind);
+    //         }
+    //         ParseResult::NoMatch => {}
+    //         ParseResult::Error => {
+    //             self.close_with_err(m, "Error");
+    //         }
+    //     }
+    //     res
+    // }
 
-    #[must_use]
-    fn nonterminal_fun<T>(
-        &mut self,
-        kind: TreeKind,
-        fun: fn(&mut Parser) -> ParseResult<T>,
-    ) -> ParseResult<T> {
-        let m = self.open();
-        let res = fun(self);
-        match res {
-            ParseResult::Match(_) => {
-                self.close(m, kind);
-            }
-            ParseResult::NoMatch => {}
-            ParseResult::Error => {
-                // TODO indicate error in node
-                self.close_with_err_kind(m, kind, "Error");
-            }
-        }
-        res
-    }
+    // #[must_use]
+    // fn pub_rule<T>(
+    //     &mut self,
+    //     kind: TreeKind,
+    //     fun: fn(&mut Parser) -> ParseResult<T>,
+    // ) -> ParseResult<T> {
+    //     let m = self.open();
+    //     let res = fun(self);
+    //     match res {
+    //         ParseResult::Match(_) => {
+    //             self.close(m, kind);
+    //         }
+    //         ParseResult::NoMatch => {}
+    //         ParseResult::Error => {
+    //             // TODO indicate error in node
+    //             self.close_with_err_kind(m, kind, "Error");
+    //         }
+    //     }
+    //     res
+    // }
+
+    // #[must_use]
+    // fn nonterminal_fun<T>(
+    //     &mut self,
+    //     kind: TreeKind,
+    //     fun: fn(&mut Parser) -> ParseResult<T>,
+    // ) -> ParseResult<T> {
+    //     let m = self.open();
+    //     let res = fun(self);
+    //     match res {
+    //         ParseResult::Match(_) => {
+    //             self.close(m, kind);
+    //         }
+    //         ParseResult::NoMatch => {}
+    //         ParseResult::Error => {
+    //             // TODO indicate error in node
+    //             self.close_with_err_kind(m, kind, "Error");
+    //         }
+    //     }
+    //     res
+    // }
 
     // #[must_use]
     // fn probe<T>(&mut self, fun: fn(&mut Parser) -> ParseResult<T>) -> ParseResult<T> {
@@ -708,40 +784,40 @@ impl Parser {
     //     res
     // }
 
-    #[must_use]
-    fn nonterminal_repetition_star(
-        &mut self,
-        rule: (TreeKind, fn(&mut Parser) -> ParseResult<()>),
-    ) -> ParseResult<()> {
-        while !self.eof() {
-            match self.nonterminal(rule) {
-                ParseResult::Match(()) => { /* continue */ }
-                ParseResult::NoMatch => break,
-                ParseResult::Error => return ParseResult::Error,
-            }
-        }
+    // #[must_use]
+    // fn nonterminal_repetition_star(
+    //     &mut self,
+    //     rule: (TreeKind, fn(&mut Parser) -> ParseResult<()>),
+    // ) -> ParseResult<()> {
+    //     while !self.eof() {
+    //         match self.nonterminal(rule) {
+    //             ParseResult::Match(()) => { /* continue */ }
+    //             ParseResult::NoMatch => break,
+    //             ParseResult::Error => return ParseResult::Error,
+    //         }
+    //     }
 
-        ParseResult::Match(())
-    }
+    //     ParseResult::Match(())
+    // }
 
-    #[must_use]
-    fn nonterminal_repetition_plus(
-        &mut self,
-        (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult<()>),
-    ) -> ParseResult<()> {
-        let mut first = true;
-        while !self.eof() {
-            match self.nonterminal((kind, fun)) {
-                ParseResult::Match(()) => { /* continue */ }
-                ParseResult::NoMatch if first => return ParseResult::NoMatch,
-                ParseResult::NoMatch => break,
-                ParseResult::Error => return ParseResult::Error,
-            }
-            first = false;
-        }
+    // #[must_use]
+    // fn nonterminal_repetition_plus(
+    //     &mut self,
+    //     (kind, fun): (TreeKind, fn(&mut Parser) -> ParseResult<()>),
+    // ) -> ParseResult<()> {
+    //     let mut first = true;
+    //     while !self.eof() {
+    //         match self.nonterminal((kind, fun)) {
+    //             ParseResult::Match(()) => { /* continue */ }
+    //             ParseResult::NoMatch if first => return ParseResult::NoMatch,
+    //             ParseResult::NoMatch => break,
+    //             ParseResult::Error => return ParseResult::Error,
+    //         }
+    //         first = false;
+    //     }
 
-        ParseResult::Match(())
-    }
+    //     ParseResult::Match(())
+    // }
 }
 
 pub trait RecoverMethod {
@@ -753,6 +829,19 @@ impl<'a> RecoverMethod for RecoverUntil<'a> {
     #[cold]
     fn recover(&self, p: &mut Parser) {
         let m = p.open();
+        while !(p.eof() || p.at_any(self.0)) {
+            p.advance()
+        }
+        p.close_with_err(m, "Recover until");
+    }
+}
+
+pub struct StepRecoverUntil<'a>(&'a [TokenKind]);
+impl<'a> RecoverMethod for StepRecoverUntil<'a> {
+    #[cold]
+    fn recover(&self, p: &mut Parser) {
+        let m = p.open();
+        p.try_advance();
         while !(p.eof() || p.at_any(self.0)) {
             p.advance()
         }
@@ -883,195 +972,343 @@ impl<T> ParseResult<T> {
 //     };
 // }
 
-macro_rules! parser_rule {
-    ($kind:ident, $function:expr) => {
-        #[allow(non_upper_case_globals)]
-        pub const $kind: (TreeKind, fn(&mut Parser) -> ParseResult<()>) =
-            (TreeKind::$kind, $function);
-    };
+pub struct AstMeta {
+    pub valid: bool,
+    pub span: SpanIndex,
 }
 
-pub enum FileNode {
-    Tokenizer(Vec<TokenRuleNode>),
-    GrammarRule(Vec<SynRuleNode>),
+pub enum FileEnum {
+    Tokenizer(Vec<TokenRule>),
+    GrammarRule(Vec<SynRule>),
 }
 
-// (Tokenizer | GrammarRule)#*
-fn file(p: &mut Parser) -> ParseResult<Vec<FileNode>> {
-    p.pub_rule(TreeKind::File, |p| {
-        let mut file = Vec::new();
-        'repeat: while !p.eof() {
-            let r = RecoverUntil(&[TokenizerKeyword, RuleKeyword]);
+pub struct File {
+    meta: AstMeta,
+    files: Vec<FileEnum>,
+}
 
-            let a = 'choice: {
-                match tokenizer(p) {
-                    ParseResult::Match(m) => break 'choice FileNode::Tokenizer(m),
-                    ParseResult::NoMatch => {}
-                    ParseResult::Error => {
-                        p.try_advance();
-                        r.recover(p);
-                        continue 'repeat;
-                    }
+// @always_valid
+// (Tokenizer | GrammarRule)*:files
+fn file(p: &mut Parser) -> ParseResult<File> {
+    let r = StepRecoverUntil(&[TokenizerKeyword, RuleKeyword]);
+
+    let m = p.open();
+    let mut validity = ParseValid::Valid;
+
+    let mut files = Vec::new();
+    'repeat: while !p.eof() {
+        let a = 'choice: {
+            match tokenizer(p) {
+                ParseResult::Match(m) => {
+                    // always valid
+                    break 'choice FileEnum::Tokenizer(m);
                 }
-
-                match syn_rule(p) {
-                    ParseResult::Match(m) => break 'choice FileNode::GrammarRule(m),
-                    ParseResult::NoMatch => {}
-                    ParseResult::Error => {
-                        p.try_advance();
-                        r.recover(p);
-                        continue 'repeat;
-                    }
+                ParseResult::NoMatch => {}
+                ParseResult::Error => {
+                    // always valid
+                    continue 'repeat;
                 }
-
-                p.try_advance();
-                r.recover(p);
-                continue 'repeat;
-            };
-            file.push(a);
-        }
-        ParseResult::Match(file)
-    })
-}
-
-// 'tokenizer' '{' TokenRule#* '}'
-fn tokenizer(p: &mut Parser) -> ParseResult<Vec<TokenRuleNode>> {
-    p.pub_rule(TreeKind::Tokenizer, |p| {
-        if p.token(TokenizerKeyword).is_no_match() {
-            return ParseResult::NoMatch;
-        }
-        if p.token(LCurly).not_match() {
-            return ParseResult::Error;
-        }
-        let mut a = Vec::new();
-        loop {
-            match token_rule(p) {
-                ParseResult::Match(m) => a.push(m),
-                ParseResult::NoMatch => break,
-                ParseResult::Error => return ParseResult::Error,
             }
+
+            match syn_rule(p) {
+                ParseResult::Match(m) => {
+                    // always valid
+                    break 'choice FileEnum::GrammarRule(m);
+                }
+                ParseResult::NoMatch => {}
+                ParseResult::Error => {
+                    // always valid
+                    continue 'repeat;
+                }
+            }
+
+            r.recover(p);
+            continue 'repeat;
+        };
+        files.push(a);
+    }
+
+    p.close_node(m, TreeKind::File, validity, |meta| File { meta, files })
+}
+
+pub struct Tokenizer {
+    meta: AstMeta,
+    rules: Vec<TokenRule>,
+}
+
+// 'tokenizer' '{' TokenRule*:rules '}'
+fn tokenizer(p: &mut Parser) -> ParseResult<Tokenizer> {
+    let m = p.open();
+    let mut validity = ParseValid::Valid;
+
+    if p.token(TokenizerKeyword).not_match() {
+        return ParseResult::NoMatch;
+    }
+    p.expect(LCurly);
+    let mut rules = Vec::new();
+    loop {
+        match token_rule(p) {
+            ParseResult::Match(m) => rules.push(m),
+            ParseResult::NoMatch => break,
+            ParseResult::Error => {}
         }
-        if p.token(RCurly).not_match() {
-            return ParseResult::Error;
-        }
-        ParseResult::Match(a)
+    }
+    p.expect(RCurly);
+
+    p.close_node(m, TreeKind::Tokenizer, validity, |meta| Tokenizer {
+        meta,
+        rules,
     })
 }
 
-pub enum AttributeValueNode {
+pub enum AttributeValueEnum {
     Number(StrSpan),
     Ident(StrSpan),
 }
 
-// Number | Ident
-fn attribute_value(p: &mut Parser) -> ParseResult<AttributeValueNode> {
-    p.pub_rule(TreeKind::AttributeValue, |p| {
-        let a = 'choice: {
-            let span = p.peek_span();
-            if p.token(Number).is_match() {
-                break 'choice AttributeValueNode::Number(span);
-            }
-            if p.token(Number).is_match() {
-                break 'choice AttributeValueNode::Ident(span);
-            }
-            return ParseResult::Error;
-        };
-        ParseResult::Match(a)
+pub struct AttributeValue {
+    meta: AstMeta,
+    value: AttributeValueEnum,
+}
+
+// (Number | Ident):value
+fn attribute_value(p: &mut Parser) -> ParseResult<AttributeValue> {
+    let m = p.open();
+    let mut validity = ParseValid::Valid;
+
+    let value = 'choice: {
+        let span = p.peek_span();
+        if p.token(Number).is_match() {
+            break 'choice AttributeValue::Number(span);
+        }
+        if p.token(Number).is_match() {
+            break 'choice AttributeValue::Ident(span);
+        }
+        return ParseResult::NoMatch;
+    };
+
+    p.close_node(m, TreeKind::AttributeValue, validity, |meta| {
+        AttributeValue { meta, value }
     })
 }
 
-pub struct AttributeExprNode {
+struct AttributeExpr {
+    meta: AstMeta,
     name: StrSpan,
-    value: Option<AttributeValueNode>
+    value: Option<AttributeValue>,
 }
 
 // Ident:name ( '(' AttributeValue:value ')' )?
-fn attribute_expr(p: &mut Parser) -> ParseResult<()> {
-    p.pub_rule(TreeKind::AttributeExpr, |p| {
-        if p.token(Ident).is_no_match() {
-            return ParseResult::NoMatch;
-        }
-        let a = 'optional: {
-            if p.token(LParen).is_no_match() {
-                break 'optional None;
-            }
-            let a = match attribute_value(p) {
-                ParseResult::Match(_) => todo!(),
-                ParseResult::NoMatch => todo!(),
-                ParseResult::Error => todo!(),
-            };
-        };
+fn attribute_expr(p: &mut Parser) -> ParseResult<AttributeExpr> {
+    let m = p.open();
+    let mut validity = ParseValid::Valid;
 
-    })
-    if p.token(LParen) == Ok(()) {
-        expect! {
-            err return ParseResult::Error;
-            p.nonterminal(AttributeValue),
-            p.token(RParen)
-        }
+    let mut name = None;
+    let mut value = None;
+
+    match p.token_span(Ident) {
+        ParseResult::Match(span) => name = Some(span),
+        ParseResult::NoMatch => return ParseResult::NoMatch,
+        ParseResult::Error => unreachable!(),
     }
-    ParseResult::Match(())
+
+    'optional: {
+        if p.token(LParen).is_no_match() {
+            break 'optional;
+        }
+
+        match attribute_value(p) {
+            ParseResult::Match(v) => value = Some(v),
+            _ => validity.recover(),
+        }
+
+        p.expect(RParen);
+    }
+
+    p.close_node(m, TreeKind::AttributeExpr, validity, |meta| AttributeExpr {
+        meta,
+        name: name.unwrap(),
+        value,
+    })
 }
 
-// '@' Ident ( '(' <separated_list Attribute ','> ')' )?
-parser_rule! {Attribute, attribute}
-fn attribute(p: &mut Parser) -> ParseResult<()> {
-    probe! {
-        p;
-        err return ParseResult::Error;
-        p.token(At)
+struct Attribute {
+    meta: AstMeta,
+    name: StrSpan,
+    values: Vec<AttributeExpr>,
+}
+
+// '@' Ident:name ( '(' <separated_list AttributeExpr ','>:values ')' )?
+fn attribute(p: &mut Parser) -> ParseResult<Attribute> {
+    let m = p.open();
+    let mut validity = ParseValid::Valid;
+
+    let mut name = None;
+    let mut values = Vec::new();
+
+    if p.token(At).is_no_match() {
+        return ParseResult::NoMatch;
     }
-    expect! {
-        err return ParseResult::Error;
-        p.token(Ident)
+
+    match p.expect_span(Ident) {
+        ParseResult::Match(a) => name = Some(a),
+        ParseResult::NoMatch => validity.abandon(),
+        ParseResult::Error => unreachable!(),
     }
-    if p.token(LParen) == Ok(()) {
+
+    'optional: {
+        if p.token(LParen).is_no_match() {
+            break 'optional;
+        }
+
         while !p.eof() {
-            match p.nonterminal(AttributeExpr) {
-                ParseResult::Match(()) => {}
+            match attribute_expr(p) {
+                ParseResult::Match(a) => values.push(a),
                 ParseResult::NoMatch => break,
-                ParseResult::Error => return ParseResult::Error,
+                ParseResult::Error => {}
             }
             match p.token(Comma) {
                 ParseResult::Match(()) => {}
                 ParseResult::NoMatch => break,
-                ParseResult::Error => return ParseResult::Error,
+                ParseResult::Error => unreachable!(),
             }
         }
-        expect! {
-            err return ParseResult::Error;
-            p.token(RParen)
+
+        p.expect(RParen);
+    }
+
+    p.close_node(m, TreeKind::Attribute, validity, |meta| Attribute {
+        meta,
+        name: name.unwrap(),
+        values,
+    })
+}
+
+pub enum AttributeEnum {
+    Literal(StrSpan),
+    RawLiteral(StrSpan),
+}
+
+struct TokenRule {
+    meta: AstMeta,
+    attributes: Vec<Attribute>,
+    name: StrSpan,
+    value: AttributeEnum,
+}
+
+// Attribute*:attributes Ident:name <commit> (Literal | RawLiteral):value
+fn token_rule(p: &mut Parser) -> ParseResult<TokenRule> {
+    let m = p.open();
+    let mut validity = ParseValid::Valid;
+
+    let mut attributes = Vec::new();
+    let mut name = None;
+    let mut value = None;
+
+    loop {
+        match attribute(p) {
+            ParseResult::Match(a) => attributes.push(a),
+            ParseResult::NoMatch => break,
+            ParseResult::Error => {}
         }
     }
-    ParseResult::Match(())
+
+    match p.token_span(Ident) {
+        ParseResult::Match(a) => name = Some(a),
+        ParseResult::NoMatch => return ParseResult::NoMatch,
+        ParseResult::Error => unreachable!(),
+    }
+
+    'choice: {
+        match p.token_span(Literal) {
+            ParseResult::Match(a) => {
+                value = Some(AttributeEnum::Literal(a));
+                break 'choice;
+            }
+            ParseResult::NoMatch => {}
+            ParseResult::Error => unreachable!(),
+        }
+
+        match p.token_span(RawLiteral) {
+            ParseResult::Match(a) => {
+                value = Some(AttributeEnum::RawLiteral(a));
+                break 'choice;
+            }
+            ParseResult::NoMatch => {}
+            ParseResult::Error => unreachable!(),
+        }
+
+        validity.abandon();
+    };
+
+    p.close_node(m, TreeKind::TokenRule, validity, |meta| TokenRule {
+        meta,
+        attributes,
+        name: name.unwrap(),
+        value: value.unwrap(),
+    })
 }
 
-// Attribute* Ident (Literal | RawLiteral) Literal?
-parser_rule! {TokenRule, token_rule}
-fn token_rule(p: &mut Parser) -> ParseResult<()> {
-    let r = RecoverUntil(&[At, Ident, RCurly]);
-    probe! {
-        p;
-        err return r.recover(p);
-        p.nonterminal_repetition_star(Attribute).optional(),
-        p.token(Ident)
-    }
-    choice! {
-        err return r.recover(p);
-        default return r.recover(p);
-        p.token(Literal),
-        p.token(RawLiteral)
-    }
-    expect! {
-        err return r.recover(p);
-        p.token(Literal).optional()
-    }
-    ParseResult::Match(())
+
+struct SynRule {
+    meta: AstMeta,
+    attributes: Vec<Attribute>,
+    name: StrSpan,
+    value: AttributeEnum,
 }
 
-// Attribute* 'rule' Ident Parameters? '{' SynExpr '}'
-parser_rule! {SynRule, syn_rule}
+// Attribute:attributes* 'rule' Ident:name Parameters:parameters? '{' SynExpr:expr '}'
 fn syn_rule(p: &mut Parser) -> ParseResult<()> {
+    let m = p.open();
+    let mut validity = ParseValid::Valid;
+
+    let mut attributes = Vec::new();
+    let mut name = None;
+    let mut value = None;
+
+    loop {
+        match attribute(p) {
+            ParseResult::Match(a) => attributes.push(a),
+            ParseResult::NoMatch => break,
+            ParseResult::Error => {}
+        }
+    }
+
+    match p.token_span(Ident) {
+        ParseResult::Match(a) => name = Some(a),
+        ParseResult::NoMatch => return ParseResult::NoMatch,
+        ParseResult::Error => unreachable!(),
+    }
+
+    'choice: {
+        match p.token_span(Literal) {
+            ParseResult::Match(a) => {
+                value = Some(AttributeEnum::Literal(a));
+                break 'choice;
+            }
+            ParseResult::NoMatch => {}
+            ParseResult::Error => unreachable!(),
+        }
+
+        match p.token_span(RawLiteral) {
+            ParseResult::Match(a) => {
+                value = Some(AttributeEnum::RawLiteral(a));
+                break 'choice;
+            }
+            ParseResult::NoMatch => {}
+            ParseResult::Error => unreachable!(),
+        }
+
+        validity.abandon();
+    };
+
+    p.close_node(m, TreeKind::TokenRule, validity, |meta| TokenRule {
+        meta,
+        attributes,
+        name: name.unwrap(),
+        value: value.unwrap(),
+    })
+
     let r = RecoverUntil(&[At, Ident, RCurly]);
     probe! {
         p;

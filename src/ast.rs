@@ -43,7 +43,6 @@ pub struct File {
     items: Vec<Item>,
 }
 
-#[profiling::function]
 pub fn file(tree: &Node) -> Option<File> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::File));
 
@@ -69,7 +68,6 @@ pub struct Tokenizer {
     rules: HandleVec<TokenRuleHandle, TokenRule>,
 }
 
-#[profiling::function]
 fn tokenizer(tree: &Node) -> Option<Tokenizer> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Tokenizer));
 
@@ -94,7 +92,6 @@ pub struct Attribute {
     name: StrSpan,
 }
 
-#[profiling::function]
 fn attribute(tree: &Node) -> Option<Attribute> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Attribute));
 
@@ -120,7 +117,6 @@ pub struct TokenRule {
     value: StrSpan,
 }
 
-#[profiling::function]
 fn token_rule(tree: &Node) -> Option<TokenRule> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::TokenRule));
 
@@ -147,7 +143,6 @@ pub struct Parameters {
     params: Vec<StrSpan>,
 }
 
-#[profiling::function]
 fn parameters(tree: &Node) -> Option<Parameters> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Parameters));
 
@@ -172,7 +167,6 @@ pub struct SynRule {
     expression: Expression,
 }
 
-#[profiling::function]
 fn syn_rule(tree: &Node) -> Option<SynRule> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::SynRule));
 
@@ -273,7 +267,6 @@ pub enum Expression {
     SeqExpr(SeqExpr),
 }
 
-#[profiling::function]
 fn expression(tree: &Node) -> Option<Expression> {
     let span = tree.span;
     match tree.kind {

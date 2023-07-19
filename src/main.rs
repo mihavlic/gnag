@@ -2,45 +2,7 @@ mod ast;
 // pub mod bump;
 pub mod handle;
 
-use std::{cell::Cell, io::Read, ops::Index, time::Duration};
-
-/// ```ignore
-/// tokenizer {
-///     @skip
-///     whitespace r"\s+"
-///     @contextual
-///     node 'node'
-///     eq '='
-///     number r"\d+"
-///     @verbatim hash_string r#"
-///         
-///     "#
-/// }
-///
-/// rule function {
-///   'fn' ident '(' fn_args ')' '->' type expr
-/// }
-/// 
-/// @pratt
-/// rule Expr {
-///     PrefixOp | BinaryOp | PostfixOp |
-///     Ident | Literal | '(' Expr ')' 
-/// }
-/// 
-/// rule PrefixOp {
-///     '!' Expr
-/// }
-/// 
-/// rule PostfixOp {
-///     Expr '(' <separated_list Expr ','> ')'
-/// }
-/// 
-/// rule BinaryOp {
-///     Expr '*' Expr |
-///     Expr '/' Expr |
-///     Expr @left ('+' | '-') Expr
-/// }
-/// ```
+use std::{cell::Cell, io::Read, ops::Index};
 
 /// Starting code from
 ///  https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html
@@ -85,7 +47,6 @@ pub enum TreeKind {
 }
 
 use bumpalo::Bump;
-use tracy_client::ProfiledAllocator;
 use TokenKind::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -424,7 +385,6 @@ pub struct BumpTreeBuilder<'a> {
 }
 
 impl<'a> TreeVisitor for BumpTreeBuilder<'a> {
-    #[profiling::function]
     fn token(&mut self, token: Token) {
         self.child_stack.push(Node {
             kind: NodeKind::Token(token.kind),
@@ -433,12 +393,10 @@ impl<'a> TreeVisitor for BumpTreeBuilder<'a> {
         });
     }
 
-    #[profiling::function]
     fn open_tree(&mut self, _: TreeSpan) {
         self.stack.push(self.child_stack.len());
     }
 
-    #[profiling::function]
     fn close_tree(&mut self, tree: TreeSpan) {
         let children_start = self.stack.pop().unwrap();
         let children = self
@@ -525,8 +483,6 @@ impl<'a> Parser<'a> {
             })
         };
 
-        // FIXME do not clone
-        // let mut errors = self.errors.iter().cloned().rev().peekable();
         let mut spans = self.spans.iter().rev();
 
         let root = spans.clone().next().unwrap();
@@ -762,7 +718,6 @@ impl<'a> RecoverMethod for StepRecoverUntil<'a> {
 
 // @always_valid
 // (Tokenizer | GrammarRule)*:files
-#[profiling::function]
 fn file(p: &mut Parser) -> bool {
     let r = StepRecoverUntil(&[TokenizerKeyword, RuleKeyword]);
     let m = p.open();
@@ -787,7 +742,6 @@ fn file(p: &mut Parser) -> bool {
 }
 
 // 'tokenizer' '{' TokenRule*:rules '}'
-#[profiling::function]
 fn tokenizer(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -804,7 +758,6 @@ fn tokenizer(p: &mut Parser) -> bool {
 }
 
 // (Number | Ident):value
-#[profiling::function]
 fn attribute_value(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -823,7 +776,6 @@ fn attribute_value(p: &mut Parser) -> bool {
 }
 
 // Ident:name ( '(' AttributeValue:value ')' )?
-#[profiling::function]
 fn attribute_expr(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -846,7 +798,6 @@ fn attribute_expr(p: &mut Parser) -> bool {
 }
 
 // '@' Ident:name ( '(' <separated_list AttributeExpr ','>:values ')' )?
-#[profiling::function]
 fn attribute(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -874,7 +825,6 @@ fn attribute(p: &mut Parser) -> bool {
 }
 
 // Attribute:attributes* Ident:name <commit> Literal:value
-#[profiling::function]
 fn token_rule(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -889,7 +839,6 @@ fn token_rule(p: &mut Parser) -> bool {
 }
 
 // Attribute* 'rule' Ident Parameters? '{' SynExpr '}'
-#[profiling::function]
 fn syn_rule(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -908,7 +857,6 @@ fn syn_rule(p: &mut Parser) -> bool {
 }
 
 // '(' <separated_list Ident ','> ')'
-#[profiling::function]
 fn parameters(p: &mut Parser) -> bool {
     if !p.token(LParen) {
         return false;
@@ -971,7 +919,6 @@ const _: u32 = 0;
 // binary bp
 //  '|'  2 1
 
-#[profiling::function]
 fn base_expr(p: &mut Parser) -> bool {
     let m = p.open();
     let Some(peek) = p.peek() else {
@@ -1008,7 +955,6 @@ fn base_expr(p: &mut Parser) -> bool {
     true
 }
 
-#[profiling::function]
 fn expr(p: &mut Parser, min_bp: u8) -> bool {
     let m = p.open();
 
@@ -1089,9 +1035,9 @@ pub fn parse<'a>(bump: &'a Bump, text: &str) -> (Node<'a>, Vec<ParseError>) {
     (builder.finish(), parser.errors)
 }
 
-#[global_allocator]
-static GLOBAL: ProfiledAllocator<std::alloc::System> =
-    ProfiledAllocator::new(std::alloc::System, 30);
+// #[global_allocator]
+// static GLOBAL: ProfiledAllocator<std::alloc::System> =
+//     ProfiledAllocator::new(std::alloc::System, 30);
 
 fn main() {
     // tracy_client::Client::start();
@@ -1111,19 +1057,16 @@ fn main() {
         std::process::exit(-1);
     }
 
-    let mut bump = Bump::new();
+    let bump = Bump::new();
 
     if true {
-        let input = input.repeat(1000);
-        let rep = 10;
+        let input = input.repeat(10000);
+
         let start = std::time::Instant::now();
-        for _ in 0..rep {
-            bump.reset();
-            std::hint::black_box(parse(&bump, &input));
-        }
+        std::hint::black_box(parse(&bump, &input));
         let elapsed = start.elapsed().as_secs_f64();
-        let size = input.len() * rep;
-        println!("{} MiB/s", size as f64 / (1024.0 * 1024.0 * elapsed));
+
+        println!("{} MiB/s", input.len() as f64 / (1024.0 * 1024.0 * elapsed));
     } else {
         let (cst, errors) = parse(&bump, &input);
         let mut buf = String::new();
@@ -1131,5 +1074,5 @@ fn main() {
         println!("{buf}");
     }
 
-    profiling::finish_frame!();
+    // profiling::finish_frame!();
 }

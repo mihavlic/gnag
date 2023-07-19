@@ -2,7 +2,7 @@ mod ast;
 // pub mod bump;
 pub mod handle;
 
-use std::{cell::Cell, io::Read, ops::Index};
+use std::{cell::Cell, io::Read, ops::Index, time::Duration};
 
 /// ```ignore
 /// tokenizer {
@@ -50,7 +50,7 @@ use std::{cell::Cell, io::Read, ops::Index};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[rustfmt::skip]
-enum TokenKind {
+pub enum TokenKind {
     Comment, Whitespace,
 
     Ident, Literal, Number,
@@ -84,6 +84,8 @@ pub enum TreeKind {
         PostName,
 }
 
+use bumpalo::Bump;
+use tracy_client::ProfiledAllocator;
 use TokenKind::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +98,13 @@ pub struct TokenSpan {
 pub struct StrSpan {
     pub start: u32,
     pub end: u32,
+}
+
+impl StrSpan {
+    #[inline]
+    pub fn as_str(self, src: &str) -> &str {
+        &src[self.start as usize..self.end as usize]
+    }
 }
 
 impl Index<StrSpan> for str {
@@ -122,32 +131,25 @@ impl StrSpan {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Token {
+pub struct Token {
     kind: TokenKind,
     span: StrSpan,
 }
 
-impl Token {
-    #[inline]
-    pub fn as_str(self, src: &str) -> &str {
-        &src[self.span.start as usize..self.span.end as usize]
-    }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NodeKind {
+    Tree(TreeKind),
+    Token(TokenKind),
 }
 
-#[derive(Clone, Debug)]
-enum Child {
-    Token(Token),
-    Tree(Tree),
-}
-
-#[derive(Clone, Debug)]
-pub struct Tree {
-    kind: TreeKind,
+#[derive(Clone, Copy, Debug)]
+pub struct Node<'a> {
+    kind: NodeKind,
     span: StrSpan,
-    children: Vec<Child>,
+    children: &'a [Node<'a>],
 }
 
-impl Tree {
+impl<'a> Node<'a> {
     fn print(
         &self,
         buf: &mut dyn std::fmt::Write,
@@ -155,22 +157,22 @@ impl Tree {
         errors: &mut std::slice::Iter<'_, ParseError>,
         level: usize,
     ) {
-        let indent = "  ".repeat(level);
-        _ = write!(buf, "{indent}{:?}", self.kind);
+        for _ in 0..level {
+            _ = buf.write_str("  ");
+        }
+        _ = write!(buf, "{:?}", self.kind);
+        if self.children.is_empty() {
+            _ = write!(buf, " {:?}", self.span.as_str(src));
+        }
         if let Some(peek) = errors.clone().next() {
             if self.span == peek.span {
                 errors.next();
-                _ = write!(buf, " '{}'", peek.err);
+                _ = write!(buf, " !!{}", peek.err);
             }
         }
         _ = write!(buf, "\n");
-        for child in &self.children {
-            match child {
-                Child::Token(token) => {
-                    _ = write!(buf, "{indent}  {:?} {:?}\n", token.kind, token.as_str(src));
-                }
-                Child::Tree(tree) => tree.print(buf, src, errors, level + 1),
-            }
+        for child in self.children {
+            child.print(buf, src, errors, level + 1);
         }
     }
 }
@@ -398,7 +400,7 @@ struct ParserCheckpoint {
 }
 
 #[derive(Clone, Copy)]
-struct TreeSpan {
+pub struct TreeSpan {
     kind: TreeKind,
     span: StrSpan,
 }
@@ -409,10 +411,61 @@ pub struct ParseError {
     err: String,
 }
 
-enum VisitEvent {
-    Token(Token),
-    OpenTree(TreeSpan),
-    CloseTree,
+pub trait TreeVisitor {
+    fn token(&mut self, token: Token);
+    fn open_tree(&mut self, tree: TreeSpan);
+    fn close_tree(&mut self, tree: TreeSpan);
+}
+
+pub struct BumpTreeBuilder<'a> {
+    bump: &'a Bump,
+    stack: Vec<usize>,
+    child_stack: Vec<Node<'a>>,
+}
+
+impl<'a> TreeVisitor for BumpTreeBuilder<'a> {
+    #[profiling::function]
+    fn token(&mut self, token: Token) {
+        self.child_stack.push(Node {
+            kind: NodeKind::Token(token.kind),
+            span: token.span,
+            children: &[],
+        });
+    }
+
+    #[profiling::function]
+    fn open_tree(&mut self, _: TreeSpan) {
+        self.stack.push(self.child_stack.len());
+    }
+
+    #[profiling::function]
+    fn close_tree(&mut self, tree: TreeSpan) {
+        let children_start = self.stack.pop().unwrap();
+        let children = self
+            .bump
+            .alloc_slice_copy(&self.child_stack[children_start..]);
+        children.reverse();
+
+        self.child_stack.truncate(children_start);
+        self.child_stack.push(Node {
+            kind: NodeKind::Tree(tree.kind),
+            span: tree.span,
+            children,
+        });
+    }
+}
+
+impl<'a> BumpTreeBuilder<'a> {
+    pub fn new(bump: &'a Bump) -> Self {
+        Self {
+            bump,
+            stack: Vec::new(),
+            child_stack: Vec::new(),
+        }
+    }
+    pub fn finish(mut self) -> Node<'a> {
+        self.child_stack.pop().unwrap()
+    }
 }
 
 pub struct Parser<'a> {
@@ -438,45 +491,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn build_tree(&self) -> Tree {
-        // we operate on reversed iterators so we can build the tree from the root down
-        // note that this will make siblings' order reversed, so we need to reverse them back at the end
-        // with a Vec::reverse
-
-        let mut stack: Vec<usize> = Vec::with_capacity(64);
-        let mut child_stack: Vec<Child> = Vec::with_capacity(64);
-
-        self.visit_tree(|event| match event {
-            VisitEvent::Token(token) => {
-                child_stack.push(Child::Token(token));
-            }
-            VisitEvent::OpenTree(tree) => {
-                child_stack.push(Child::Tree(Tree {
-                    kind: tree.kind,
-                    span: tree.span,
-                    children: Vec::new(),
-                }));
-                stack.push(child_stack.len());
-            }
-            VisitEvent::CloseTree => {
-                let a = stack.pop().unwrap();
-                let children = child_stack.drain(a..).collect();
-                let Some(Child::Tree(tree)) = child_stack.last_mut() else {
-                    panic!();
-                };
-
-                tree.children = children;
-                tree.children.reverse();
-            }
-        });
-
-        let Some(Child::Tree(mut tree)) = child_stack.pop() else {
-            panic!();
-        };
-        tree.children.reverse();
-        tree
-    }
-
     // We push tree spans (and their errors) when we close them, so we end up with a reversed topological order; the root will always be last.
     // Let there be tree:
     //  |-----root----|
@@ -486,7 +500,7 @@ impl<'a> Parser<'a> {
     // The spans will be like so:
     //  (label, start..end)
     //  [ (b, 9..f) (c, 2..6) (a, 0..8) (root, 0..f) ]
-    fn visit_tree(&self, mut fun: impl FnMut(VisitEvent)) {
+    fn visit_tree(&self, visitor: &mut impl TreeVisitor) {
         let mut merged_tokens = {
             let mut tokens = self.tokens.iter().rev().copied();
             let mut trivia = self.trivia.iter().rev().copied();
@@ -531,20 +545,11 @@ impl<'a> Parser<'a> {
             while pos == next_span.end {
                 let opened = spans.next().unwrap();
 
-                // // try to attach an error
-                // let mut err = None;
-                // if let Some(ParseError { err: _, span }) = errors.peek() {
-                //     if span.0 == opened_index {
-                //         let error = errors.next().unwrap();
-                //         err = Some(error.err);
-                //     }
-                // }
-
-                fun(VisitEvent::OpenTree(*opened));
+                visitor.open_tree(*opened);
 
                 debug_assert!(!opened.span.is_empty());
 
-                span_stack.push(opened);
+                span_stack.push(*opened);
                 current_span = next_span;
 
                 if let Some(next) = spans.clone().next() {
@@ -572,13 +577,13 @@ impl<'a> Parser<'a> {
             let limit = u32::max(current_span.start, next_span.end);
             while pos > limit {
                 let token = merged_tokens.next().unwrap();
-                fun(VisitEvent::Token(token));
+                visitor.token(token);
                 pos = token.span.start;
             }
 
             while pos == current_span.start {
-                span_stack.pop();
-                fun(VisitEvent::CloseTree);
+                let closed = span_stack.pop().unwrap();
+                visitor.close_tree(closed);
 
                 if let Some(parent) = span_stack.last() {
                     current_span = parent.span
@@ -757,6 +762,7 @@ impl<'a> RecoverMethod for StepRecoverUntil<'a> {
 
 // @always_valid
 // (Tokenizer | GrammarRule)*:files
+#[profiling::function]
 fn file(p: &mut Parser) -> bool {
     let r = StepRecoverUntil(&[TokenizerKeyword, RuleKeyword]);
     let m = p.open();
@@ -781,6 +787,7 @@ fn file(p: &mut Parser) -> bool {
 }
 
 // 'tokenizer' '{' TokenRule*:rules '}'
+#[profiling::function]
 fn tokenizer(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -797,6 +804,7 @@ fn tokenizer(p: &mut Parser) -> bool {
 }
 
 // (Number | Ident):value
+#[profiling::function]
 fn attribute_value(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -815,6 +823,7 @@ fn attribute_value(p: &mut Parser) -> bool {
 }
 
 // Ident:name ( '(' AttributeValue:value ')' )?
+#[profiling::function]
 fn attribute_expr(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -837,6 +846,7 @@ fn attribute_expr(p: &mut Parser) -> bool {
 }
 
 // '@' Ident:name ( '(' <separated_list AttributeExpr ','>:values ')' )?
+#[profiling::function]
 fn attribute(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -864,6 +874,7 @@ fn attribute(p: &mut Parser) -> bool {
 }
 
 // Attribute:attributes* Ident:name <commit> Literal:value
+#[profiling::function]
 fn token_rule(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -878,6 +889,7 @@ fn token_rule(p: &mut Parser) -> bool {
 }
 
 // Attribute* 'rule' Ident Parameters? '{' SynExpr '}'
+#[profiling::function]
 fn syn_rule(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -896,6 +908,7 @@ fn syn_rule(p: &mut Parser) -> bool {
 }
 
 // '(' <separated_list Ident ','> ')'
+#[profiling::function]
 fn parameters(p: &mut Parser) -> bool {
     if !p.token(LParen) {
         return false;
@@ -958,6 +971,7 @@ const _: u32 = 0;
 // binary bp
 //  '|'  2 1
 
+#[profiling::function]
 fn base_expr(p: &mut Parser) -> bool {
     let m = p.open();
     let Some(peek) = p.peek() else {
@@ -994,6 +1008,7 @@ fn base_expr(p: &mut Parser) -> bool {
     true
 }
 
+#[profiling::function]
 fn expr(p: &mut Parser, min_bp: u8) -> bool {
     let m = p.open();
 
@@ -1063,15 +1078,25 @@ fn expr(p: &mut Parser, min_bp: u8) -> bool {
     true
 }
 
-pub fn parse(text: &str) -> (Tree, Vec<ParseError>) {
+pub fn parse<'a>(bump: &'a Bump, text: &str) -> (Node<'a>, Vec<ParseError>) {
     let mut lexer = Lexer::new(text);
     let (tokens, trivia) = lex(&mut lexer);
     let mut parser = Parser::new(text, tokens, trivia);
     _ = file(&mut parser);
-    (parser.build_tree(), parser.errors)
+    let mut builder = BumpTreeBuilder::new(bump);
+    parser.visit_tree(&mut builder);
+
+    (builder.finish(), parser.errors)
 }
 
+#[global_allocator]
+static GLOBAL: ProfiledAllocator<std::alloc::System> =
+    ProfiledAllocator::new(std::alloc::System, 30);
+
 fn main() {
+    // tracy_client::Client::start();
+    // profiling::register_thread!("Main Thread");
+
     let input = if let Some(path) = std::env::args().nth(1) {
         std::fs::read_to_string(path).unwrap()
     } else {
@@ -1086,20 +1111,25 @@ fn main() {
         std::process::exit(-1);
     }
 
+    let mut bump = Bump::new();
+
     if true {
         let input = input.repeat(1000);
-        let rep = 1;
+        let rep = 10;
         let start = std::time::Instant::now();
         for _ in 0..rep {
-            std::hint::black_box(parse(&input));
+            bump.reset();
+            std::hint::black_box(parse(&bump, &input));
         }
         let elapsed = start.elapsed().as_secs_f64();
         let size = input.len() * rep;
         println!("{} MiB/s", size as f64 / (1024.0 * 1024.0 * elapsed));
     } else {
-        let (cst, errors) = parse(&input);
+        let (cst, errors) = parse(&bump, &input);
         let mut buf = String::new();
         cst.print(&mut buf, &input, &mut errors.iter(), 0);
         println!("{buf}");
     }
+
+    profiling::finish_frame!();
 }

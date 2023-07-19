@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use crate::{handle::HandleVec, simple_handle, Child, StrSpan, TokenKind, Tree, TreeKind};
+use crate::{handle::HandleVec, simple_handle, Node, NodeKind, StrSpan, TokenKind, TreeKind};
 
 simple_handle! {
     pub TokenHandle,
@@ -43,24 +43,16 @@ pub struct File {
     items: Vec<Item>,
 }
 
-pub fn file(tree: &Tree) -> Option<File> {
-    assert_eq!(tree.kind, TreeKind::File);
+#[profiling::function]
+pub fn file(tree: &Node) -> Option<File> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::File));
 
     let mut items = Vec::new();
 
-    for c in &tree.children {
-        match c {
-            Child::Tree(
-                tree @ Tree {
-                    kind,
-                    span,
-                    children,
-                },
-            ) => match kind {
-                TreeKind::Tokenizer => items.extend(tokenizer(tree).map(Item::Tokenizer)),
-                TreeKind::SynRule => items.extend(syn_rule(tree).map(Item::SynRule)),
-                _ => {}
-            },
+    for c in tree.children {
+        match c.kind {
+            NodeKind::Tree(TreeKind::Tokenizer) => items.extend(tokenizer(c).map(Item::Tokenizer)),
+            NodeKind::Tree(TreeKind::SynRule) => items.extend(syn_rule(c).map(Item::SynRule)),
             _ => {}
         }
     }
@@ -77,17 +69,15 @@ pub struct Tokenizer {
     rules: HandleVec<TokenRuleHandle, TokenRule>,
 }
 
-fn tokenizer(tree: &Tree) -> Option<Tokenizer> {
-    assert_eq!(tree.kind, TreeKind::Tokenizer);
+#[profiling::function]
+fn tokenizer(tree: &Node) -> Option<Tokenizer> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Tokenizer));
 
     let mut rules = HandleVec::new();
 
-    for c in &tree.children {
-        match c {
-            Child::Tree(tree) => match tree.kind {
-                TreeKind::TokenRule => rules.extend(token_rule(tree)),
-                _ => {}
-            },
+    for c in tree.children {
+        match c.kind {
+            NodeKind::Tree(TreeKind::TokenRule) => rules.extend(token_rule(tree)),
             _ => {}
         }
     }
@@ -104,17 +94,15 @@ pub struct Attribute {
     name: StrSpan,
 }
 
-fn attribute(tree: &Tree) -> Option<Attribute> {
-    assert_eq!(tree.kind, TreeKind::Attribute);
+#[profiling::function]
+fn attribute(tree: &Node) -> Option<Attribute> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Attribute));
 
     let mut name = None;
 
-    for c in &tree.children {
-        match c {
-            Child::Token(token) => match token.kind {
-                TokenKind::Ident => name = Some(token.span),
-                _ => {}
-            },
+    for c in tree.children {
+        match c.kind {
+            NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
             _ => {}
         }
     }
@@ -132,19 +120,17 @@ pub struct TokenRule {
     value: StrSpan,
 }
 
-fn token_rule(tree: &Tree) -> Option<TokenRule> {
-    assert_eq!(tree.kind, TreeKind::TokenRule);
+#[profiling::function]
+fn token_rule(tree: &Node) -> Option<TokenRule> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::TokenRule));
 
     let mut name = None;
     let mut value = None;
 
-    for c in &tree.children {
-        match c {
-            Child::Token(token) => match token.kind {
-                TokenKind::Ident => name = Some(token.span),
-                TokenKind::Literal => value = Some(token.span),
-                _ => {}
-            },
+    for c in tree.children {
+        match c.kind {
+            NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
+            NodeKind::Token(TokenKind::Literal) => value = Some(c.span),
             _ => {}
         }
     }
@@ -161,17 +147,15 @@ pub struct Parameters {
     params: Vec<StrSpan>,
 }
 
-fn parameters(tree: &Tree) -> Option<Parameters> {
-    assert_eq!(tree.kind, TreeKind::Parameters);
+#[profiling::function]
+fn parameters(tree: &Node) -> Option<Parameters> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Parameters));
 
     let mut params = Vec::new();
 
-    for c in &tree.children {
-        match c {
-            Child::Token(token) => match token.kind {
-                TokenKind::Ident => params.push(token.span),
-                _ => {}
-            },
+    for c in tree.children {
+        match c.kind {
+            NodeKind::Token(TokenKind::Ident) => params.push(c.span),
             _ => {}
         }
     }
@@ -188,17 +172,18 @@ pub struct SynRule {
     expression: Expression,
 }
 
-fn syn_rule(tree: &Tree) -> Option<SynRule> {
-    assert_eq!(tree.kind, TreeKind::SynRule);
+#[profiling::function]
+fn syn_rule(tree: &Node) -> Option<SynRule> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::SynRule));
 
     let mut attributes = Vec::new();
     let mut name = None;
     let mut expr = None;
     let mut params = None;
 
-    for c in &tree.children {
-        match c {
-            Child::Tree(tree) => match tree.kind {
+    for c in tree.children {
+        match c.kind {
+            NodeKind::Tree(
                 TreeKind::PreExpr
                 | TreeKind::AtomExpr
                 | TreeKind::ParenExpr
@@ -206,19 +191,16 @@ fn syn_rule(tree: &Tree) -> Option<SynRule> {
                 | TreeKind::BinExpr
                 | TreeKind::SeqExpr
                 | TreeKind::PostExpr
-                | TreeKind::PostName => {
-                    if let Some(e) = expression(tree) {
-                        expr = Some(e);
-                    }
+                | TreeKind::PostName,
+            ) => {
+                if let Some(e) = expression(tree) {
+                    expr = Some(e);
                 }
-                TreeKind::Attribute => attributes.extend(attribute(tree)),
-                TreeKind::Parameters => params = parameters(tree),
-                _ => {}
-            },
-            Child::Token(token) => match token.kind {
-                TokenKind::Ident => name = Some(token.span),
-                _ => {}
-            },
+            }
+            NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(tree)),
+            NodeKind::Tree(TreeKind::Parameters) => params = parameters(tree),
+            _ => {}
+            NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
         }
     }
 
@@ -291,37 +273,28 @@ pub enum Expression {
     SeqExpr(SeqExpr),
 }
 
-fn expression(tree: &Tree) -> Option<Expression> {
+#[profiling::function]
+fn expression(tree: &Node) -> Option<Expression> {
     let span = tree.span;
     match tree.kind {
-        TreeKind::AtomExpr => {
-            for c in &tree.children {
-                match c {
-                    Child::Token(crate::Token {
-                        kind: TokenKind::Ident,
-                        span,
-                    }) => return Some(Expression::Ident(*span)),
-                    Child::Token(crate::Token {
-                        kind: TokenKind::Literal,
-                        span,
-                    }) => return Some(Expression::Literal(*span)),
+        NodeKind::Tree(TreeKind::AtomExpr) => {
+            for c in tree.children {
+                match c.kind {
+                    NodeKind::Token(TokenKind::Ident) => return Some(Expression::Ident(c.span)),
+                    NodeKind::Token(TokenKind::Literal) => {
+                        return Some(Expression::Literal(c.span))
+                    }
                     _ => {}
                 }
             }
         }
-        TreeKind::PreExpr => {
+        NodeKind::Tree(TreeKind::PreExpr) => {
             let mut attributes = Vec::new();
             let mut expr = None;
-            for c in &tree.children {
-                match c {
-                    Child::Tree(
-                        tree @ crate::Tree {
-                            kind: TreeKind::Attribute,
-                            span,
-                            children,
-                        },
-                    ) => attributes.extend(attribute(tree)),
-                    Child::Tree(tree) => {
+            for c in tree.children {
+                match c.kind {
+                    NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(tree)),
+                    NodeKind::Tree(_) => {
                         if let Some(e) = expression(tree) {
                             expr = Some(e);
                         }
@@ -335,11 +308,11 @@ fn expression(tree: &Tree) -> Option<Expression> {
                 expr: Box::new(expr?),
             }));
         }
-        TreeKind::ParenExpr => {
+        NodeKind::Tree(TreeKind::ParenExpr) => {
             let mut expr = None;
-            for c in &tree.children {
-                match c {
-                    Child::Tree(tree) => {
+            for c in tree.children {
+                match c.kind {
+                    NodeKind::Tree(_) => {
                         if let Some(e) = expression(tree) {
                             expr = Some(e);
                         }
@@ -352,16 +325,13 @@ fn expression(tree: &Tree) -> Option<Expression> {
                 expr: Box::new(expr?),
             }));
         }
-        TreeKind::CallExpr => {
+        NodeKind::Tree(TreeKind::CallExpr) => {
             let mut name = None;
             let mut args = None;
-            for c in &tree.children {
-                match c {
-                    Child::Token(crate::Token {
-                        kind: TokenKind::Ident,
-                        span,
-                    }) => name = Some(*span),
-                    Child::Tree(tree) => {
+            for c in tree.children {
+                match c.kind {
+                    NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
+                    NodeKind::Tree(_) => {
                         if let Some(e) = expression(tree) {
                             args = Some(e);
                         }
@@ -375,16 +345,13 @@ fn expression(tree: &Tree) -> Option<Expression> {
                 args: Box::new(args?),
             }));
         }
-        TreeKind::PostName => {
+        NodeKind::Tree(TreeKind::PostName) => {
             let mut name = None;
             let mut expr = None;
-            for c in &tree.children {
-                match c {
-                    Child::Token(crate::Token {
-                        kind: TokenKind::Ident,
-                        span,
-                    }) => name = Some(*span),
-                    Child::Tree(tree) => {
+            for c in tree.children {
+                match c.kind {
+                    NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
+                    NodeKind::Tree(_) => {
                         if let Some(e) = expression(tree) {
                             expr = Some(e);
                         }
@@ -398,24 +365,15 @@ fn expression(tree: &Tree) -> Option<Expression> {
                 expr: Box::new(expr?),
             }));
         }
-        TreeKind::PostExpr => {
+        NodeKind::Tree(TreeKind::PostExpr) => {
             let mut kind = None;
             let mut expr = None;
-            for c in &tree.children {
-                match c {
-                    Child::Token(crate::Token {
-                        kind: TokenKind::Question,
-                        span,
-                    }) => kind = Some(PostExprKind::Question),
-                    Child::Token(crate::Token {
-                        kind: TokenKind::Star,
-                        span,
-                    }) => kind = Some(PostExprKind::Star),
-                    Child::Token(crate::Token {
-                        kind: TokenKind::Plus,
-                        span,
-                    }) => kind = Some(PostExprKind::Plus),
-                    Child::Tree(tree) => {
+            for c in tree.children {
+                match c.kind {
+                    NodeKind::Token(TokenKind::Question) => kind = Some(PostExprKind::Question),
+                    NodeKind::Token(TokenKind::Star) => kind = Some(PostExprKind::Star),
+                    NodeKind::Token(TokenKind::Plus) => kind = Some(PostExprKind::Plus),
+                    NodeKind::Tree(_) => {
                         if let Some(e) = expression(tree) {
                             expr = Some(e);
                         }
@@ -429,13 +387,13 @@ fn expression(tree: &Tree) -> Option<Expression> {
                 expr: Box::new(expr?),
             }));
         }
-        TreeKind::BinExpr => {
+        NodeKind::Tree(TreeKind::BinExpr) => {
             let mut expr1 = None;
             let mut expr2 = None;
-            for c in &tree.children {
-                match c {
-                    Child::Tree(tree) => {
-                        if let Some(e) = expression(tree) {
+            for c in tree.children {
+                match c.kind {
+                    NodeKind::Tree(_) => {
+                        if let Some(e) = expression(c) {
                             if expr1.is_none() {
                                 expr1 = Some(e);
                             } else {
@@ -452,12 +410,12 @@ fn expression(tree: &Tree) -> Option<Expression> {
                 right: Box::new(expr2?),
             }));
         }
-        TreeKind::SeqExpr => {
+        NodeKind::Tree(TreeKind::SeqExpr) => {
             let mut exprs = Vec::new();
-            for c in &tree.children {
-                match c {
-                    Child::Tree(tree) => {
-                        if let Some(e) = expression(tree) {
+            for c in tree.children {
+                match c.kind {
+                    NodeKind::Tree(_) => {
+                        if let Some(e) = expression(c) {
                             exprs.push(e);
                         }
                     }

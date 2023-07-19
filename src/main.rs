@@ -2,7 +2,7 @@ mod ast;
 // pub mod bump;
 pub mod handle;
 
-use std::{cell::Cell, io::Read, ops::Index};
+use std::{io::Read, ops::Index};
 
 /// Starting code from
 ///  https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html
@@ -211,17 +211,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn choice<T>(&mut self, funs: &[fn(&mut Lexer) -> Option<T>]) -> Option<T> {
-        let pos = self.pos;
-        for fun in funs {
-            match fun(self) {
-                None => self.restore_pos(pos),
-                some => return some,
-            }
-        }
-        None
-    }
-
     fn sequence(&mut self, sequence: &str) -> bool {
         if self.str[self.pos as usize..].starts_with(sequence) {
             self.pos += sequence.len() as u32;
@@ -237,102 +226,102 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
     let mut trivia = Vec::new();
     while !l.is_empty() {
         let start = l.pos();
-        let kind = l
-            .choice(&[
-                |l| {
-                    if !l.consume_while(char::is_whitespace).is_empty() {
-                        Some(Whitespace)
-                    } else {
-                        None
-                    }
-                },
-                |l| match l.next().unwrap() {
-                    '@' => Some(At),
-                    ',' => Some(Comma),
-                    '|' => Some(Pipe),
-                    ':' => Some(Colon),
-                    '?' => Some(Question),
-                    '+' => Some(Plus),
-                    '*' => Some(Star),
-                    '(' => Some(LParen),
-                    ')' => Some(RParen),
-                    '{' => Some(LCurly),
-                    '}' => Some(RCurly),
-                    '[' => Some(LBracket),
-                    ']' => Some(RBracket),
-                    '<' => Some(LAngle),
-                    '>' => Some(RAngle),
-                    _ => None,
-                },
-                |l| {
-                    if l.sequence("//") {
-                        l.consume_while(|c| c != '\n');
-                        Some(Comment)
-                    } else {
-                        None
-                    }
-                },
-                |l| {
-                    let mut raw = false;
-                    if l.peek().unwrap() == 'r' {
-                        raw = true;
-                        l.next();
-                    }
+        let kind = 'choice: {
+            let pos = l.pos();
+            {
+                if !l.consume_while(char::is_whitespace).is_empty() {
+                    break 'choice Whitespace;
+                }
+            }
+            l.restore_pos(pos);
+            {
+                match l.next().unwrap() {
+                    '@' => break 'choice At,
+                    ',' => break 'choice Comma,
+                    '|' => break 'choice Pipe,
+                    ':' => break 'choice Colon,
+                    '?' => break 'choice Question,
+                    '+' => break 'choice Plus,
+                    '*' => break 'choice Star,
+                    '(' => break 'choice LParen,
+                    ')' => break 'choice RParen,
+                    '{' => break 'choice LCurly,
+                    '}' => break 'choice RCurly,
+                    '[' => break 'choice LBracket,
+                    ']' => break 'choice RBracket,
+                    '<' => break 'choice LAngle,
+                    '>' => break 'choice RAngle,
+                    _ => {}
+                }
+            }
+            l.restore_pos(pos);
+            {
+                if l.sequence("//") {
+                    l.consume_while(|c| c != '\n');
+                    break 'choice Comment;
+                }
+            }
+            l.restore_pos(pos);
+            'skip: {
+                let mut raw = false;
+                if l.peek().unwrap() == 'r' {
+                    raw = true;
+                    l.next();
+                }
 
-                    let mut balance = 0;
-                    while let Some(c) = l.next() {
-                        match c {
-                            '#' => balance += 1,
-                            '\'' => break,
-                            _ => return None,
+                let mut balance = 0;
+                while let Some(c) = l.next() {
+                    match c {
+                        '#' => balance += 1,
+                        '\'' => break,
+                        _ => break 'skip,
+                    }
+                }
+
+                while let Some(c) = l.next() {
+                    match c {
+                        '\\' if raw => {
+                            l.next();
                         }
-                    }
-
-                    while let Some(c) = l.next() {
-                        match c {
-                            '\\' if raw => {
-                                l.next();
-                            }
-                            '\'' => {
-                                let mut balance = balance;
-                                loop {
-                                    if balance == 0 {
-                                        return Some(Literal);
-                                    }
-                                    if let Some('#') = l.next() {
-                                        balance -= 1;
-                                    } else {
-                                        break;
-                                    }
+                        '\'' => {
+                            let mut balance = balance;
+                            loop {
+                                if balance == 0 {
+                                    break 'choice Literal;
+                                }
+                                if let Some('#') = l.next() {
+                                    balance -= 1;
+                                } else {
+                                    break;
                                 }
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
-
-                    None
-                },
-                |l| {
-                    let span =
-                        l.consume_while(|c| matches!(c, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'));
-                    if span.is_empty() {
-                        return None;
-                    }
-                    match &l[span] {
-                        "rule" => Some(RuleKeyword),
-                        "tokenizer" => Some(TokenizerKeyword),
-                        _ => Some(Ident),
-                    }
-                },
-                |l| {
-                    let span = l.consume_while(|c| !c.is_ascii_whitespace());
-                    if span.is_empty() {
-                        l.next();
-                    }
-                    Some(ErrorToken)
-                },
-            ])
-            .unwrap();
+                }
+            }
+            l.restore_pos(pos);
+            'skip: {
+                let span =
+                    l.consume_while(|c| matches!(c, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'));
+                if span.is_empty() {
+                    break 'skip;
+                }
+                match &l[span] {
+                    "rule" => break 'choice RuleKeyword,
+                    "tokenizer" => break 'choice TokenizerKeyword,
+                    _ => break 'choice Ident,
+                }
+            }
+            l.restore_pos(pos);
+            {
+                let span = l.consume_while(|c| !c.is_ascii_whitespace());
+                if span.is_empty() {
+                    l.next();
+                }
+                ErrorToken
+            }
+        };
 
         let span = l.span_since(start);
         assert!(!span.is_empty());
@@ -355,7 +344,6 @@ struct SpanIndex(u32);
 #[derive(Clone, Copy)]
 struct ParserCheckpoint {
     pos: u32,
-    fuel: u32,
     spans_len: u32,
     errors_len: u32,
 }
@@ -430,7 +418,6 @@ pub struct Parser<'a> {
     tokens: Vec<Token>,
     trivia: Vec<Token>,
     pos: u32,
-    fuel: Cell<u32>,
     spans: Vec<TreeSpan>,
     errors: Vec<ParseError>,
     src: &'a str,
@@ -442,7 +429,6 @@ impl<'a> Parser<'a> {
             tokens,
             trivia,
             pos: 0,
-            fuel: Cell::new(256),
             spans: Vec::new(),
             errors: Vec::new(),
             src,
@@ -553,7 +539,6 @@ impl<'a> Parser<'a> {
     fn checkpoint(&self) -> ParserCheckpoint {
         ParserCheckpoint {
             pos: self.pos,
-            fuel: self.fuel.get(),
             spans_len: self.spans.len().try_into().unwrap(),
             errors_len: self.errors.len().try_into().unwrap(),
         }
@@ -562,13 +547,11 @@ impl<'a> Parser<'a> {
     fn restore(&mut self, checkpoint: ParserCheckpoint) {
         let ParserCheckpoint {
             pos,
-            fuel,
             spans_len,
             errors_len,
         } = checkpoint;
 
         self.pos = pos;
-        self.fuel.set(fuel);
 
         assert!(spans_len as usize <= self.spans.len());
         self.spans.truncate(spans_len as usize);
@@ -619,13 +602,11 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) {
         assert!(!self.eof());
-        self.fuel.set(256);
         self.pos += 1;
     }
 
     fn try_advance(&mut self) {
         if !self.eof() {
-            self.fuel.set(256);
             self.pos += 1;
         }
     }
@@ -644,10 +625,6 @@ impl<'a> Parser<'a> {
     }
 
     fn nth_impl(&self, lookahead: u32) -> Option<&Token> {
-        if self.fuel.get() == 0 {
-            panic!("parser is stuck")
-        }
-        self.fuel.set(self.fuel.get() - 1);
         self.tokens.get((self.pos + lookahead) as usize)
     }
 
@@ -1062,11 +1039,12 @@ fn main() {
     if true {
         let input = input.repeat(10000);
 
-        let start = std::time::Instant::now();
-        std::hint::black_box(parse(&bump, &input));
-        let elapsed = start.elapsed().as_secs_f64();
-
-        println!("{} MiB/s", input.len() as f64 / (1024.0 * 1024.0 * elapsed));
+        let mut lexer = Lexer::new(&input);
+        let (tokens, trivia) = bench("lex", input.len(), || lex(&mut lexer));
+        let mut parser = Parser::new(&input, tokens, trivia);
+        bench("parse", input.len(), || file(&mut parser));
+        let mut builder = BumpTreeBuilder::new(&bump);
+        bench("build", input.len(), || parser.visit_tree(&mut builder));
     } else {
         let (cst, errors) = parse(&bump, &input);
         let mut buf = String::new();
@@ -1075,4 +1053,16 @@ fn main() {
     }
 
     // profiling::finish_frame!();
+}
+
+fn bench<T>(name: &str, len_bytes: usize, fun: impl FnOnce() -> T) -> T {
+    let start = std::time::Instant::now();
+    let res = std::hint::black_box(fun());
+    let elapsed = start.elapsed().as_secs_f64();
+
+    println!(
+        "{name} {} MiB/s",
+        len_bytes as f64 / (1024.0 * 1024.0 * elapsed)
+    );
+    res
 }

@@ -228,9 +228,8 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
     let mut tokens = Vec::new();
     let mut trivia = Vec::new();
     while !l.is_empty() {
-        let start = l.pos();
+        let pos = l.pos();
         let kind = 'choice: {
-            let pos = l.pos();
             {
                 if !l.consume_while(|c| c.is_ascii_whitespace()).is_empty() {
                     break 'choice Whitespace;
@@ -308,6 +307,7 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                 if l.sequence(b"rule") {
                     break 'choice RuleKeyword;
                 }
+                l.restore_pos(pos);
                 if l.sequence(b"tokenizer") {
                     break 'choice RuleKeyword;
                 }
@@ -331,7 +331,7 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
             }
         };
 
-        let span = l.span_since(start);
+        let span = l.span_since(pos);
         assert!(!span.is_empty());
 
         if kind == Whitespace || kind == Comment {
@@ -497,7 +497,12 @@ impl<'a> Parser<'a> {
 
                 visitor.open_tree(*opened);
 
-                debug_assert!(!opened.span.is_empty());
+                debug_assert!(
+                    !opened.span.is_empty(),
+                    "{:?} {:?}",
+                    opened.kind,
+                    opened.span
+                );
 
                 span_stack.push(*opened);
                 current_span = next_span;
@@ -1045,10 +1050,12 @@ fn main() {
     let bump = Bump::new();
 
     if true {
-        let input = input.repeat(10000);
+        // let input = input.repeat(10000);
+        println!("{}", &input[21..25]);
 
         let mut lexer = Lexer::new(input.as_bytes());
         let (tokens, trivia) = bench("lex", input.len(), || lex(&mut lexer));
+        println!("{tokens:#?}\n{trivia:#?}");
         let mut parser = Parser::new(&input, tokens, trivia);
         bench("parse", input.len(), || file(&mut parser));
         let mut builder = BumpTreeBuilder::new(&bump);

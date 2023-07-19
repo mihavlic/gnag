@@ -171,7 +171,7 @@ impl BumpAlloc {
         }
     }
 
-    pub fn alloc_slice_replace<T: Default>(&self, vals: &mut [T]) -> BumpSlice<T> {
+    pub fn alloc_slice_take<T: Default>(&self, vals: &mut [T]) -> BumpSlice<T> {
         let inner = &mut self.inner;
         // safety: we never return the pointer, we instead convert it to an offset relative to the allocation
         let ptr = unsafe { inner.alloc(Layout::array::<T>(vals.len()).unwrap()) };

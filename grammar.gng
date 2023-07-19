@@ -1,0 +1,131 @@
+// comment!
+tokenizer {
+    @skip Whitespace '\s+'
+    @skip Comment '//.*$'
+    @proc String 
+        r##'{
+            const SINGLE_QUOTE: char = 39 as char;
+
+            let mut raw = false;
+            if l.peek().unwrap() == 'r' {
+                raw = true;
+                l.next();
+            }
+
+            let mut balance = 0;
+            while let Some(c) = l.next() {
+                match c {
+                    '#' => balance += 1,
+                    SINGLE_QUOTE => break,
+                    _ => return None,
+                }
+            }
+
+            while let Some(c) = l.next() {
+                match c {
+                    '\\' if raw => {
+                        l.next();
+                    }
+                    SINGLE_QUOTE => {
+                        let mut balance = balance;
+                        loop {
+                            if balance == 0 {
+                                return Some(Literal);
+                            }
+                            if let Some('#') = l.next() {
+                                balance -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            None
+        }'##
+    TokenizerKeyword 'tokenizer'
+    RuleKeyword 'rule'
+    Ident '\w+'
+    LCurly '{'
+    RCurly '}'
+    LParen '('
+    RParen ')'
+    LAngle '<'
+    RAngle '>'
+    Question '?'
+    Pipe '|'
+    Plus '+'
+    At '@'
+    Colon ':'
+    Comma ','
+    @error
+    ErrorToken '\S+'
+}
+
+rule File {
+    Item*
+}
+
+rule Item {
+    Tokenizer | SynRule
+}
+
+rule AttributeExpr {
+    Ident ( '(' AttributeValue ')' )?
+}
+
+rule Attribute {
+    '@' Ident ( '(' <separated_list AttributeExpr ','> ')' )?
+}
+
+rule Tokenizer {
+    'tokenizer' '{' TokenRule* '}'
+}
+
+rule TokenRule {
+    Attribute* Ident String
+}
+
+rule SynRule {
+    Attribute* 'rule' Ident Parameters? '{' SynExpr '}'
+}
+
+rule Parameters {
+    '(' <separated_list Ident ','> ')'
+}
+
+@pratt
+rule Expr {
+    CallExpr | ParenExpr | PreExpr | PostExpr | PostName | SeqExpr | BinExpr
+}
+
+rule CallExpr {
+    '<' Ident Expr? '>'
+}
+
+rule ParenExpr {
+    '(' Expr ')'
+}
+
+rule PreExpr {
+    Attribute+ Expr
+}
+
+rule PostExpr {
+    Expr '?' |
+    Expr '+'
+}
+
+rule PostName {
+    Expr ':' Ident
+}
+
+rule SeqExpr {
+    Expr Expr+
+}
+
+rule BinExpr {
+    Expr '|' Expr
+}

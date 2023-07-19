@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     marker::PhantomData,
     ops::{Index, IndexMut},
 };
@@ -72,6 +73,12 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
     }
 }
 
+impl<H, Ty> Extend<Ty> for HandleVec<H, Ty> {
+    fn extend<T: IntoIterator<Item = Ty>>(&mut self, iter: T) {
+        self.0.extend(iter)
+    }
+}
+
 impl<H: TypedHandle, T> Index<H> for HandleVec<H, T> {
     type Output = T;
     fn index(&self, index: H) -> &Self::Output {
@@ -82,5 +89,11 @@ impl<H: TypedHandle, T> Index<H> for HandleVec<H, T> {
 impl<H: TypedHandle, T> IndexMut<H> for HandleVec<H, T> {
     fn index_mut(&mut self, index: H) -> &mut Self::Output {
         &mut self.0[index.index()]
+    }
+}
+
+impl<H, T: Debug> Debug for HandleVec<H, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.iter()).finish()
     }
 }

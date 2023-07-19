@@ -75,13 +75,6 @@ impl Index<StrSpan> for str {
     }
 }
 
-impl<'a> Index<StrSpan> for Lexer<'a> {
-    type Output = str;
-    fn index(&self, index: StrSpan) -> &Self::Output {
-        &self.str[index.start as usize..index.end as usize]
-    }
-}
-
 impl StrSpan {
     pub fn is_empty(self) -> bool {
         self.end <= self.start
@@ -138,13 +131,13 @@ impl<'a> Node<'a> {
     }
 }
 
-pub struct Lexer<'str> {
-    str: &'str str,
+pub struct Lexer<'a> {
+    str: &'a [u8],
     pos: u32,
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(str: &'a str) -> Self {
+    pub fn new(str: &'a [u8]) -> Self {
         Self { str, pos: 0 }
     }
 
@@ -168,35 +161,45 @@ impl<'a> Lexer<'a> {
         self.pos as usize == self.str.len()
     }
 
-    pub fn next(&mut self) -> Option<char> {
+    pub fn next(&mut self) -> Option<u8> {
         let pos = self.pos as usize;
         if pos < self.str.len() {
-            let c = self.str[pos..].chars().next().unwrap();
-            // TODO improve this
-            self.pos += c.len_utf8() as u32;
-            Some(c)
+            let byte = self.str[pos];
+            self.pos += 1;
+            Some(byte)
         } else {
             None
         }
     }
 
-    pub fn peek(&self) -> Option<char> {
+    // pub fn next_char(&mut self) -> Option<char> {
+    //     let pos = self.pos as usize;
+    //     if pos < self.str.len() {
+    //         let mut bytes = [0; 4];
+    //         for (i, b) in self.str[self.pos as usize..].iter().enumerate() {
+    //             bytes[i] = *b;
+    //             if i == 3 {
+    //                 break;
+    //             }
+    //         }
+
+    //         char::from_u32(u32::from_le_bytes(bytes))
+    //     } else {
+    //         None
+    //     }
+    // }
+
+    pub fn peek(&self) -> Option<u8> {
         let pos = self.pos as usize;
         if pos < self.str.len() {
-            let c = self.str[pos..].chars().next().unwrap();
-            Some(c)
+            let byte = self.str[pos];
+            Some(byte)
         } else {
             None
         }
     }
 
-    pub fn previous(&self) -> Option<char> {
-        let pos = self.pos as usize;
-        let mut rev = self.str[..pos].chars().rev();
-        rev.next()
-    }
-
-    fn consume_while(&mut self, predicate: impl std::ops::Fn(char) -> bool) -> StrSpan {
+    fn consume_while(&mut self, predicate: impl std::ops::Fn(u8) -> bool) -> StrSpan {
         let start = self.pos();
         while let Some(c) = self.peek() {
             if predicate(c) {
@@ -211,7 +214,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn sequence(&mut self, sequence: &str) -> bool {
+    fn sequence(&mut self, sequence: &[u8]) -> bool {
         if self.str[self.pos as usize..].starts_with(sequence) {
             self.pos += sequence.len() as u32;
             true
@@ -229,42 +232,42 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
         let kind = 'choice: {
             let pos = l.pos();
             {
-                if !l.consume_while(char::is_whitespace).is_empty() {
+                if !l.consume_while(|c| c.is_ascii_whitespace()).is_empty() {
                     break 'choice Whitespace;
                 }
             }
             l.restore_pos(pos);
             {
                 match l.next().unwrap() {
-                    '@' => break 'choice At,
-                    ',' => break 'choice Comma,
-                    '|' => break 'choice Pipe,
-                    ':' => break 'choice Colon,
-                    '?' => break 'choice Question,
-                    '+' => break 'choice Plus,
-                    '*' => break 'choice Star,
-                    '(' => break 'choice LParen,
-                    ')' => break 'choice RParen,
-                    '{' => break 'choice LCurly,
-                    '}' => break 'choice RCurly,
-                    '[' => break 'choice LBracket,
-                    ']' => break 'choice RBracket,
-                    '<' => break 'choice LAngle,
-                    '>' => break 'choice RAngle,
+                    b'@' => break 'choice At,
+                    b',' => break 'choice Comma,
+                    b'|' => break 'choice Pipe,
+                    b':' => break 'choice Colon,
+                    b'?' => break 'choice Question,
+                    b'+' => break 'choice Plus,
+                    b'*' => break 'choice Star,
+                    b'(' => break 'choice LParen,
+                    b')' => break 'choice RParen,
+                    b'{' => break 'choice LCurly,
+                    b'}' => break 'choice RCurly,
+                    b'[' => break 'choice LBracket,
+                    b']' => break 'choice RBracket,
+                    b'<' => break 'choice LAngle,
+                    b'>' => break 'choice RAngle,
                     _ => {}
                 }
             }
             l.restore_pos(pos);
             {
-                if l.sequence("//") {
-                    l.consume_while(|c| c != '\n');
+                if l.sequence(b"//") {
+                    l.consume_while(|c| c != b'\n');
                     break 'choice Comment;
                 }
             }
             l.restore_pos(pos);
             'skip: {
                 let mut raw = false;
-                if l.peek().unwrap() == 'r' {
+                if l.peek().unwrap() == b'r' {
                     raw = true;
                     l.next();
                 }
@@ -272,24 +275,24 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                 let mut balance = 0;
                 while let Some(c) = l.next() {
                     match c {
-                        '#' => balance += 1,
-                        '\'' => break,
+                        b'#' => balance += 1,
+                        b'\'' => break,
                         _ => break 'skip,
                     }
                 }
 
                 while let Some(c) = l.next() {
                     match c {
-                        '\\' if raw => {
+                        b'\\' if raw => {
                             l.next();
                         }
-                        '\'' => {
+                        b'\'' => {
                             let mut balance = balance;
                             loop {
                                 if balance == 0 {
                                     break 'choice Literal;
                                 }
-                                if let Some('#') = l.next() {
+                                if let Some(b'#') = l.next() {
                                     balance -= 1;
                                 } else {
                                     break;
@@ -301,16 +304,21 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                 }
             }
             l.restore_pos(pos);
-            'skip: {
-                let span =
-                    l.consume_while(|c| matches!(c, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'));
-                if span.is_empty() {
-                    break 'skip;
+            {
+                if l.sequence(b"rule") {
+                    break 'choice RuleKeyword;
                 }
-                match &l[span] {
-                    "rule" => break 'choice RuleKeyword,
-                    "tokenizer" => break 'choice TokenizerKeyword,
-                    _ => break 'choice Ident,
+                if l.sequence(b"tokenizer") {
+                    break 'choice RuleKeyword;
+                }
+            }
+            l.restore_pos(pos);
+            {
+                if !l
+                    .consume_while(|c| matches!(c, b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'))
+                    .is_empty()
+                {
+                    break 'choice Ident;
                 }
             }
             l.restore_pos(pos);
@@ -1002,7 +1010,7 @@ fn expr(p: &mut Parser, min_bp: u8) -> bool {
 }
 
 pub fn parse<'a>(bump: &'a Bump, text: &str) -> (Node<'a>, Vec<ParseError>) {
-    let mut lexer = Lexer::new(text);
+    let mut lexer = Lexer::new(text.as_bytes());
     let (tokens, trivia) = lex(&mut lexer);
     let mut parser = Parser::new(text, tokens, trivia);
     _ = file(&mut parser);
@@ -1039,7 +1047,7 @@ fn main() {
     if true {
         let input = input.repeat(10000);
 
-        let mut lexer = Lexer::new(&input);
+        let mut lexer = Lexer::new(input.as_bytes());
         let (tokens, trivia) = bench("lex", input.len(), || lex(&mut lexer));
         let mut parser = Parser::new(&input, tokens, trivia);
         bench("parse", input.len(), || file(&mut parser));

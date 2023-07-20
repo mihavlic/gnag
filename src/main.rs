@@ -172,23 +172,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // pub fn next_char(&mut self) -> Option<char> {
-    //     let pos = self.pos as usize;
-    //     if pos < self.str.len() {
-    //         let mut bytes = [0; 4];
-    //         for (i, b) in self.str[self.pos as usize..].iter().enumerate() {
-    //             bytes[i] = *b;
-    //             if i == 3 {
-    //                 break;
-    //             }
-    //         }
-
-    //         char::from_u32(u32::from_le_bytes(bytes))
-    //     } else {
-    //         None
-    //     }
-    // }
-
     pub fn peek(&self) -> Option<u8> {
         let pos = self.pos as usize;
         if pos < self.str.len() {
@@ -237,6 +220,13 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
             }
             l.restore_pos(pos);
             {
+                if l.sequence(b"//") {
+                    l.consume_while(|c| c != b'\n');
+                    break 'choice Comment;
+                }
+            }
+            l.restore_pos(pos);
+            {
                 match l.next().unwrap() {
                     b'@' => break 'choice At,
                     b',' => break 'choice Comma,
@@ -254,13 +244,6 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                     b'<' => break 'choice LAngle,
                     b'>' => break 'choice RAngle,
                     _ => {}
-                }
-            }
-            l.restore_pos(pos);
-            {
-                if l.sequence(b"//") {
-                    l.consume_while(|c| c != b'\n');
-                    break 'choice Comment;
                 }
             }
             l.restore_pos(pos);
@@ -309,7 +292,7 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                 }
                 l.restore_pos(pos);
                 if l.sequence(b"tokenizer") {
-                    break 'choice RuleKeyword;
+                    break 'choice TokenizerKeyword;
                 }
             }
             l.restore_pos(pos);
@@ -356,13 +339,13 @@ struct ParserCheckpoint {
     errors_len: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct TreeSpan {
     kind: TreeKind,
     span: StrSpan,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ParseError {
     span: StrSpan,
     err: String,
@@ -590,6 +573,7 @@ impl<'a> Parser<'a> {
             kind,
             span: StrSpan { start: m.0, end },
         };
+        debug_assert!(!tree.span.is_empty(), "Span is empty {tree:?}");
         self.spans.push(tree);
         tree.span
     }
@@ -611,6 +595,18 @@ impl<'a> Parser<'a> {
         let err = err.to_string();
         let span = self.close(m, kind);
         self.errors.push(ParseError { span, err });
+    }
+
+    fn error(&mut self, err: impl ToString) {
+        let err = err.to_string();
+        let end = self.tokens.get(self.pos as usize).map_or(0, |s| s.span.end);
+        self.errors.push(ParseError {
+            span: StrSpan {
+                start: end,
+                end: end,
+            },
+            err,
+        });
     }
 
     fn advance(&mut self) {
@@ -669,9 +665,7 @@ impl<'a> Parser<'a> {
             self.advance();
             true
         } else {
-            // zero-size scope
-            let m = self.open();
-            self.close_with_err(m, format!("Expected '{kind:?}'"));
+            self.error(format!("Expected '{kind:?}'"));
             false
         }
     }
@@ -1050,16 +1044,18 @@ fn main() {
     let bump = Bump::new();
 
     if true {
-        // let input = input.repeat(10000);
-        println!("{}", &input[21..25]);
+        let input = input.repeat(10000);
 
-        let mut lexer = Lexer::new(input.as_bytes());
-        let (tokens, trivia) = bench("lex", input.len(), || lex(&mut lexer));
-        println!("{tokens:#?}\n{trivia:#?}");
-        let mut parser = Parser::new(&input, tokens, trivia);
-        bench("parse", input.len(), || file(&mut parser));
-        let mut builder = BumpTreeBuilder::new(&bump);
-        bench("build", input.len(), || parser.visit_tree(&mut builder));
+        bench("whole", input.len(), || {
+            let mut lexer = Lexer::new(input.as_bytes());
+            let (tokens, trivia) = bench("lex", input.len(), || lex(&mut lexer));
+            // println!("{tokens:#?}\n{trivia:#?}");
+            let mut parser = Parser::new(&input, tokens, trivia);
+            bench("parse", input.len(), || file(&mut parser));
+            // println!("Spans {:#?}\nErrors {:#?}", &parser.spans, &parser.errors);
+            let mut builder = BumpTreeBuilder::new(&bump);
+            bench("build", input.len(), || parser.visit_tree(&mut builder));
+        });
     } else {
         let (cst, errors) = parse(&bump, &input);
         let mut buf = String::new();

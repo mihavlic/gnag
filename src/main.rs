@@ -1,4 +1,4 @@
-// mod ast;
+mod ast;
 // pub mod bump;
 pub mod handle;
 
@@ -11,7 +11,7 @@ use std::{
 ///  https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html
 ///  - https://github.com/matklad/resilient-ll-parsing/blob/master/src/lib.rs
 ///  https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
-///  - https://github.com/matklad/minipratt/blob/master/src/bin/pratt.rs 
+///  - https://github.com/matklad/minipratt/blob/master/src/bin/pratt.rs
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[rustfmt::skip]
@@ -106,6 +106,12 @@ pub struct Node {
 }
 
 impl Node {
+    fn children<'a>(&self, arena: &'a [Node]) -> &'a [Node] {
+        &arena[self.children.start as usize..self.children.end as usize]
+    }
+}
+
+impl Node {
     fn print(
         &self,
         buf: &mut dyn std::fmt::Write,
@@ -117,7 +123,10 @@ impl Node {
         for _ in 0..level {
             _ = buf.write_str("  ");
         }
-        _ = write!(buf, "{:?}", self.kind);
+        match self.kind {
+            NodeKind::Tree(a) => _ = write!(buf, "{:?}", a),
+            NodeKind::Token(a) => _ = write!(buf, "{:?}", a),
+        }
         if self.children.is_empty() {
             _ = write!(buf, " {:?}", self.span.as_str(src));
         }
@@ -128,7 +137,7 @@ impl Node {
             }
         }
         _ = write!(buf, "\n");
-        for child in &nodes[self.children.start as usize..self.children.end as usize] {
+        for child in self.children(nodes) {
             child.print(buf, src, nodes, errors, level + 1);
         }
     }
@@ -408,17 +417,17 @@ impl<'a> Parser<'a> {
             let StrSpan { start, end } = span.span;
 
             // we split the token pushing into two branches depending on whether the next span
-            // is closing over already pushed elements or
+            // is closing over already pushed elements or is just starting
             //
             // this specialization actually makes it faster (maybe only on very large files?)
             let start_idx = if pos <= start {
                 // the cursor has yet to enter the span
-                let mut start_idx = None;
+                let mut start_idx = stack.len();
                 while pos < end {
                     let token = merged_tokens.next().unwrap();
                     pos = token.span.end;
                     if token.span.start == start {
-                        start_idx = Some(stack.len());
+                        start_idx = stack.len();
                     }
                     stack.push(Node {
                         kind: NodeKind::Token(token.kind),
@@ -427,7 +436,7 @@ impl<'a> Parser<'a> {
                     });
                 }
 
-                start_idx.unwrap()
+                start_idx
             } else {
                 // the cursor is already in the span, need to find the start
                 let start_idx = stack
@@ -973,7 +982,7 @@ fn main() {
 
     let mut arena = Vec::new();
 
-    if true {
+    if false {
         let input = input.repeat(10000);
 
         bench("whole", input.len(), || {

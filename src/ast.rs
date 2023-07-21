@@ -43,15 +43,19 @@ pub struct File {
     items: Vec<Item>,
 }
 
-pub fn file(tree: &Node) -> Option<File> {
+pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::File));
 
     let mut items = Vec::new();
 
-    for c in tree.children {
+    for c in tree.children(arena) {
         match c.kind {
-            NodeKind::Tree(TreeKind::Tokenizer) => items.extend(tokenizer(c).map(Item::Tokenizer)),
-            NodeKind::Tree(TreeKind::SynRule) => items.extend(syn_rule(c).map(Item::SynRule)),
+            NodeKind::Tree(TreeKind::Tokenizer) => {
+                items.extend(tokenizer(c, arena).map(Item::Tokenizer))
+            }
+            NodeKind::Tree(TreeKind::SynRule) => {
+                items.extend(syn_rule(c, arena).map(Item::SynRule))
+            }
             _ => {}
         }
     }
@@ -68,14 +72,14 @@ pub struct Tokenizer {
     rules: HandleVec<TokenRuleHandle, TokenRule>,
 }
 
-fn tokenizer(tree: &Node) -> Option<Tokenizer> {
+fn tokenizer(tree: &Node, arena: &[Node]) -> Option<Tokenizer> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Tokenizer));
 
     let mut rules = HandleVec::new();
 
-    for c in tree.children {
+    for c in tree.children(arena) {
         match c.kind {
-            NodeKind::Tree(TreeKind::TokenRule) => rules.extend(token_rule(tree)),
+            NodeKind::Tree(TreeKind::TokenRule) => rules.extend(token_rule(tree, arena)),
             _ => {}
         }
     }
@@ -92,12 +96,12 @@ pub struct Attribute {
     name: StrSpan,
 }
 
-fn attribute(tree: &Node) -> Option<Attribute> {
+fn attribute(tree: &Node, arena: &[Node]) -> Option<Attribute> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Attribute));
 
     let mut name = None;
 
-    for c in tree.children {
+    for c in tree.children(arena) {
         match c.kind {
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
             _ => {}
@@ -117,13 +121,13 @@ pub struct TokenRule {
     value: StrSpan,
 }
 
-fn token_rule(tree: &Node) -> Option<TokenRule> {
+fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::TokenRule));
 
     let mut name = None;
     let mut value = None;
 
-    for c in tree.children {
+    for c in tree.children(arena) {
         match c.kind {
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
             NodeKind::Token(TokenKind::Literal) => value = Some(c.span),
@@ -143,12 +147,12 @@ pub struct Parameters {
     params: Vec<StrSpan>,
 }
 
-fn parameters(tree: &Node) -> Option<Parameters> {
+fn parameters(tree: &Node, arena: &[Node]) -> Option<Parameters> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Parameters));
 
     let mut params = Vec::new();
 
-    for c in tree.children {
+    for c in tree.children(arena) {
         match c.kind {
             NodeKind::Token(TokenKind::Ident) => params.push(c.span),
             _ => {}
@@ -167,7 +171,7 @@ pub struct SynRule {
     expression: Expression,
 }
 
-fn syn_rule(tree: &Node) -> Option<SynRule> {
+fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::SynRule));
 
     let mut attributes = Vec::new();
@@ -175,7 +179,7 @@ fn syn_rule(tree: &Node) -> Option<SynRule> {
     let mut expr = None;
     let mut params = None;
 
-    for c in tree.children {
+    for c in tree.children(arena) {
         match c.kind {
             NodeKind::Tree(
                 TreeKind::PreExpr
@@ -187,12 +191,12 @@ fn syn_rule(tree: &Node) -> Option<SynRule> {
                 | TreeKind::PostExpr
                 | TreeKind::PostName,
             ) => {
-                if let Some(e) = expression(tree) {
+                if let Some(e) = expression(tree, arena) {
                     expr = Some(e);
                 }
             }
-            NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(tree)),
-            NodeKind::Tree(TreeKind::Parameters) => params = parameters(tree),
+            NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(tree, arena)),
+            NodeKind::Tree(TreeKind::Parameters) => params = parameters(tree, arena),
             _ => {}
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
         }
@@ -267,11 +271,11 @@ pub enum Expression {
     SeqExpr(SeqExpr),
 }
 
-fn expression(tree: &Node) -> Option<Expression> {
+fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
     let span = tree.span;
     match tree.kind {
         NodeKind::Tree(TreeKind::AtomExpr) => {
-            for c in tree.children {
+            for c in tree.children(arena) {
                 match c.kind {
                     NodeKind::Token(TokenKind::Ident) => return Some(Expression::Ident(c.span)),
                     NodeKind::Token(TokenKind::Literal) => {
@@ -284,11 +288,13 @@ fn expression(tree: &Node) -> Option<Expression> {
         NodeKind::Tree(TreeKind::PreExpr) => {
             let mut attributes = Vec::new();
             let mut expr = None;
-            for c in tree.children {
+            for c in tree.children(arena) {
                 match c.kind {
-                    NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(tree)),
+                    NodeKind::Tree(TreeKind::Attribute) => {
+                        attributes.extend(attribute(tree, arena))
+                    }
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree) {
+                        if let Some(e) = expression(tree, arena) {
                             expr = Some(e);
                         }
                     }
@@ -303,10 +309,10 @@ fn expression(tree: &Node) -> Option<Expression> {
         }
         NodeKind::Tree(TreeKind::ParenExpr) => {
             let mut expr = None;
-            for c in tree.children {
+            for c in tree.children(arena) {
                 match c.kind {
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree) {
+                        if let Some(e) = expression(tree, arena) {
                             expr = Some(e);
                         }
                     }
@@ -321,11 +327,11 @@ fn expression(tree: &Node) -> Option<Expression> {
         NodeKind::Tree(TreeKind::CallExpr) => {
             let mut name = None;
             let mut args = None;
-            for c in tree.children {
+            for c in tree.children(arena) {
                 match c.kind {
                     NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree) {
+                        if let Some(e) = expression(tree, arena) {
                             args = Some(e);
                         }
                     }
@@ -341,11 +347,11 @@ fn expression(tree: &Node) -> Option<Expression> {
         NodeKind::Tree(TreeKind::PostName) => {
             let mut name = None;
             let mut expr = None;
-            for c in tree.children {
+            for c in tree.children(arena) {
                 match c.kind {
                     NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree) {
+                        if let Some(e) = expression(tree, arena) {
                             expr = Some(e);
                         }
                     }
@@ -361,13 +367,13 @@ fn expression(tree: &Node) -> Option<Expression> {
         NodeKind::Tree(TreeKind::PostExpr) => {
             let mut kind = None;
             let mut expr = None;
-            for c in tree.children {
+            for c in tree.children(arena) {
                 match c.kind {
                     NodeKind::Token(TokenKind::Question) => kind = Some(PostExprKind::Question),
                     NodeKind::Token(TokenKind::Star) => kind = Some(PostExprKind::Star),
                     NodeKind::Token(TokenKind::Plus) => kind = Some(PostExprKind::Plus),
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree) {
+                        if let Some(e) = expression(tree, arena) {
                             expr = Some(e);
                         }
                     }
@@ -383,10 +389,10 @@ fn expression(tree: &Node) -> Option<Expression> {
         NodeKind::Tree(TreeKind::BinExpr) => {
             let mut expr1 = None;
             let mut expr2 = None;
-            for c in tree.children {
+            for c in tree.children(arena) {
                 match c.kind {
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(c) {
+                        if let Some(e) = expression(c, arena) {
                             if expr1.is_none() {
                                 expr1 = Some(e);
                             } else {
@@ -405,10 +411,10 @@ fn expression(tree: &Node) -> Option<Expression> {
         }
         NodeKind::Tree(TreeKind::SeqExpr) => {
             let mut exprs = Vec::new();
-            for c in tree.children {
+            for c in tree.children(arena) {
                 match c.kind {
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(c) {
+                        if let Some(e) = expression(c, arena) {
                             exprs.push(e);
                         }
                     }

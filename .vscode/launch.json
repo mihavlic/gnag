@@ -20,7 +20,7 @@
                 }
             },
             "args": [
-                "grammar.gng"
+                "test.gng"
             ],
             "cwd": "${workspaceFolder}"
         },

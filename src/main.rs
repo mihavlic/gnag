@@ -1,8 +1,11 @@
-mod ast;
+// mod ast;
 // pub mod bump;
 pub mod handle;
 
-use std::{io::Read, ops::Index};
+use std::{
+    io::Read,
+    ops::{Index, Range},
+};
 
 /// Starting code from
 ///  https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html
@@ -46,7 +49,6 @@ pub enum TreeKind {
         PostName,
 }
 
-use bumpalo::Bump;
 use TokenKind::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -96,18 +98,19 @@ pub enum NodeKind {
     Token(TokenKind),
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Node<'a> {
+#[derive(Clone, Debug)]
+pub struct Node {
     kind: NodeKind,
     span: StrSpan,
-    children: &'a [Node<'a>],
+    children: Range<u32>,
 }
 
-impl<'a> Node<'a> {
+impl Node {
     fn print(
         &self,
         buf: &mut dyn std::fmt::Write,
         src: &str,
+        nodes: &[Node],
         errors: &mut std::slice::Iter<'_, ParseError>,
         level: usize,
     ) {
@@ -125,8 +128,8 @@ impl<'a> Node<'a> {
             }
         }
         _ = write!(buf, "\n");
-        for child in self.children {
-            child.print(buf, src, errors, level + 1);
+        for child in &nodes[self.children.start as usize..self.children.end as usize] {
+            child.print(buf, src, nodes, errors, level + 1);
         }
     }
 }
@@ -212,105 +215,93 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
     let mut trivia = Vec::new();
     while !l.is_empty() {
         let pos = l.pos();
-        let kind = 'choice: {
-            {
-                if !l.consume_while(|c| c.is_ascii_whitespace()).is_empty() {
-                    break 'choice Whitespace;
-                }
+        let kind = match l.next().unwrap() {
+            b'\t' | b'\n' | b'\x0C' | b'\r' | b' ' => {
+                l.restore_pos(pos);
+                l.consume_while(|c| c.is_ascii_whitespace());
+                Whitespace
             }
-            l.restore_pos(pos);
-            {
-                if l.sequence(b"//") {
-                    l.consume_while(|c| c != b'\n');
-                    break 'choice Comment;
-                }
+            b'/' if l.sequence(b"//") => {
+                l.restore_pos(pos);
+                l.consume_while(|c| c != b'\n');
+                Comment
             }
-            l.restore_pos(pos);
-            {
-                match l.next().unwrap() {
-                    b'@' => break 'choice At,
-                    b',' => break 'choice Comma,
-                    b'|' => break 'choice Pipe,
-                    b':' => break 'choice Colon,
-                    b'?' => break 'choice Question,
-                    b'+' => break 'choice Plus,
-                    b'*' => break 'choice Star,
-                    b'(' => break 'choice LParen,
-                    b')' => break 'choice RParen,
-                    b'{' => break 'choice LCurly,
-                    b'}' => break 'choice RCurly,
-                    b'[' => break 'choice LBracket,
-                    b']' => break 'choice RBracket,
-                    b'<' => break 'choice LAngle,
-                    b'>' => break 'choice RAngle,
-                    _ => {}
-                }
-            }
-            l.restore_pos(pos);
-            'skip: {
-                let mut raw = false;
-                if l.peek().unwrap() == b'r' {
-                    raw = true;
-                    l.next();
-                }
-
-                let mut balance = 0;
-                while let Some(c) = l.next() {
-                    match c {
-                        b'#' => balance += 1,
-                        b'\'' => break,
-                        _ => break 'skip,
-                    }
-                }
-
-                while let Some(c) = l.next() {
-                    match c {
-                        b'\\' if raw => {
-                            l.next();
-                        }
-                        b'\'' => {
-                            let mut balance = balance;
-                            loop {
-                                if balance == 0 {
-                                    break 'choice Literal;
-                                }
-                                if let Some(b'#') = l.next() {
-                                    balance -= 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            l.restore_pos(pos);
-            {
+            b'@' => At,
+            b',' => Comma,
+            b'|' => Pipe,
+            b':' => Colon,
+            b'?' => Question,
+            b'+' => Plus,
+            b'*' => Star,
+            b'(' => LParen,
+            b')' => RParen,
+            b'{' => LCurly,
+            b'}' => RCurly,
+            b'[' => LBracket,
+            b']' => RBracket,
+            b'<' => LAngle,
+            b'>' => RAngle,
+            _ => 'choice: {
+                l.restore_pos(pos);
                 if l.sequence(b"rule") {
                     break 'choice RuleKeyword;
                 }
-                l.restore_pos(pos);
                 if l.sequence(b"tokenizer") {
                     break 'choice TokenizerKeyword;
                 }
-            }
-            l.restore_pos(pos);
-            {
+                'skip: {
+                    let mut raw = false;
+                    if l.peek().unwrap() == b'r' {
+                        raw = true;
+                        l.next();
+                    }
+
+                    let mut balance = 0;
+                    while let Some(c) = l.next() {
+                        match c {
+                            b'#' => balance += 1,
+                            b'\'' => break,
+                            _ => break 'skip,
+                        }
+                    }
+
+                    while let Some(c) = l.next() {
+                        match c {
+                            b'\\' if raw => {
+                                l.next();
+                            }
+                            b'\'' => {
+                                let mut balance = balance;
+                                loop {
+                                    if balance == 0 {
+                                        break 'choice Literal;
+                                    }
+                                    if let Some(b'#') = l.next() {
+                                        balance -= 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                l.restore_pos(pos);
                 if !l
                     .consume_while(|c| matches!(c, b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'))
                     .is_empty()
                 {
                     break 'choice Ident;
                 }
-            }
-            l.restore_pos(pos);
-            {
-                let span = l.consume_while(|c| !c.is_ascii_whitespace());
-                if span.is_empty() {
-                    l.next();
+                l.restore_pos(pos);
+                {
+                    let span = l.consume_while(|c| !c.is_ascii_whitespace());
+                    if span.is_empty() {
+                        l.next();
+                    }
+                    ErrorToken
                 }
-                ErrorToken
             }
         };
 
@@ -351,60 +342,6 @@ pub struct ParseError {
     err: String,
 }
 
-pub trait TreeVisitor {
-    fn token(&mut self, token: Token);
-    fn open_tree(&mut self, tree: TreeSpan);
-    fn close_tree(&mut self, tree: TreeSpan);
-}
-
-pub struct BumpTreeBuilder<'a> {
-    bump: &'a Bump,
-    stack: Vec<usize>,
-    child_stack: Vec<Node<'a>>,
-}
-
-impl<'a> TreeVisitor for BumpTreeBuilder<'a> {
-    fn token(&mut self, token: Token) {
-        self.child_stack.push(Node {
-            kind: NodeKind::Token(token.kind),
-            span: token.span,
-            children: &[],
-        });
-    }
-
-    fn open_tree(&mut self, _: TreeSpan) {
-        self.stack.push(self.child_stack.len());
-    }
-
-    fn close_tree(&mut self, tree: TreeSpan) {
-        let children_start = self.stack.pop().unwrap();
-        let children = self
-            .bump
-            .alloc_slice_copy(&self.child_stack[children_start..]);
-        children.reverse();
-
-        self.child_stack.truncate(children_start);
-        self.child_stack.push(Node {
-            kind: NodeKind::Tree(tree.kind),
-            span: tree.span,
-            children,
-        });
-    }
-}
-
-impl<'a> BumpTreeBuilder<'a> {
-    pub fn new(bump: &'a Bump) -> Self {
-        Self {
-            bump,
-            stack: Vec::new(),
-            child_stack: Vec::new(),
-        }
-    }
-    pub fn finish(mut self) -> Node<'a> {
-        self.child_stack.pop().unwrap()
-    }
-}
-
 pub struct Parser<'a> {
     tokens: Vec<Token>,
     trivia: Vec<Token>,
@@ -435,21 +372,23 @@ impl<'a> Parser<'a> {
     // The spans will be like so:
     //  (label, start..end)
     //  [ (b, 9..f) (c, 2..6) (a, 0..8) (root, 0..f) ]
-    fn visit_tree(&self, visitor: &mut impl TreeVisitor) {
+    fn build_tree(&self, arena: &mut Vec<Node>) -> Node {
+        arena.reserve(self.spans.len() + self.tokens.len() + self.trivia.len());
+
         let mut merged_tokens = {
-            let mut tokens = self.tokens.iter().rev().copied();
-            let mut trivia = self.trivia.iter().rev().copied();
+            let mut tokens = self.tokens.iter().copied();
+            let mut trivia = self.trivia.iter().copied();
             let mut len = self.tokens.len() + self.trivia.len();
 
             std::iter::from_fn(move || {
                 if len > 0 {
                     len -= 1;
 
-                    let token_start = tokens.clone().next().map_or(-1, |a| a.span.start as i64);
-                    let trivia_start = trivia.clone().next().map_or(-1, |a| a.span.start as i64);
+                    let token_start = tokens.clone().next().map_or(u32::MAX, |a| a.span.start);
+                    let trivia_start = trivia.clone().next().map_or(u32::MAX, |a| a.span.start);
 
                     debug_assert_ne!(token_start, trivia_start);
-                    if token_start > trivia_start {
+                    if token_start < trivia_start {
                         Some(tokens.next().unwrap())
                     } else {
                         Some(trivia.next().unwrap())
@@ -460,76 +399,68 @@ impl<'a> Parser<'a> {
             })
         };
 
-        let mut spans = self.spans.iter().rev();
+        let mut stack: Vec<Node> = Vec::new();
 
-        let root = spans.clone().next().unwrap();
+        let mut pos = 0;
+        for span in &self.spans {
+            debug_assert!(!span.span.is_empty());
 
-        // check that the root contains all of the tokens
-        assert_eq!(root.span.start, 0);
-        assert_eq!(root.span.end as usize, self.src.len());
+            let StrSpan { start, end } = span.span;
 
-        let mut span_stack = Vec::with_capacity(64);
-
-        let mut current_span = root.span;
-        let mut next_span = root.span;
-        let mut pos = self.src.len() as u32;
-
-        while pos > 0 {
-            while pos == next_span.end {
-                let opened = spans.next().unwrap();
-
-                visitor.open_tree(*opened);
-
-                debug_assert!(
-                    !opened.span.is_empty(),
-                    "{:?} {:?}",
-                    opened.kind,
-                    opened.span
-                );
-
-                span_stack.push(*opened);
-                current_span = next_span;
-
-                if let Some(next) = spans.clone().next() {
-                    #[cfg(debug_assertions)]
-                    {
-                        let StrSpan { start, end } = next.span;
-                        // check against this situation:
-                        //  parent    |-------|
-                        //  child   |-----|
-                        if start >= start {
-                            debug_assert!(end <= end);
-                        } else {
-                            debug_assert!(end <= start);
-                        }
+            // we split the token pushing into two branches depending on whether the next span
+            // is closing over already pushed elements or
+            //
+            // this specialization actually makes it faster (maybe only on very large files?)
+            let start_idx = if pos <= start {
+                // the cursor has yet to enter the span
+                let mut start_idx = None;
+                while pos < end {
+                    let token = merged_tokens.next().unwrap();
+                    pos = token.span.end;
+                    if token.span.start == start {
+                        start_idx = Some(stack.len());
                     }
-                    next_span = next.span;
-                } else {
-                    next_span = StrSpan {
-                        start: u32::MAX,
-                        end: 0,
-                    };
+                    stack.push(Node {
+                        kind: NodeKind::Token(token.kind),
+                        span: token.span,
+                        children: 0..0,
+                    });
                 }
-            }
 
-            let limit = u32::max(current_span.start, next_span.end);
-            while pos > limit {
-                let token = merged_tokens.next().unwrap();
-                visitor.token(token);
-                pos = token.span.start;
-            }
+                start_idx.unwrap()
+            } else {
+                // the cursor is already in the span, need to find the start
+                let start_idx = stack
+                    .binary_search_by_key(&start, |s| s.span.start)
+                    .unwrap();
 
-            while pos == current_span.start {
-                let closed = span_stack.pop().unwrap();
-                visitor.close_tree(closed);
-
-                if let Some(parent) = span_stack.last() {
-                    current_span = parent.span
-                } else {
-                    break;
+                while pos < end {
+                    let token = merged_tokens.next().unwrap();
+                    pos = token.span.end;
+                    stack.push(Node {
+                        kind: NodeKind::Token(token.kind),
+                        span: token.span,
+                        children: 0..0,
+                    });
                 }
-            }
+
+                start_idx
+            };
+
+            let start = arena.len() as u32;
+            arena.extend_from_slice(&stack[start_idx..]);
+            let end = arena.len() as u32;
+
+            stack.truncate(start_idx);
+            stack.push(Node {
+                kind: NodeKind::Tree(span.kind),
+                span: span.span,
+                children: start..end,
+            });
         }
+
+        assert_eq!(stack.len(), 1);
+        stack.pop().unwrap()
     }
 
     fn checkpoint(&self) -> ParserCheckpoint {
@@ -1008,15 +939,14 @@ fn expr(p: &mut Parser, min_bp: u8) -> bool {
     true
 }
 
-pub fn parse<'a>(bump: &'a Bump, text: &str) -> (Node<'a>, Vec<ParseError>) {
+pub fn parse<'a>(arena: &mut Vec<Node>, text: &str) -> (Node, Vec<ParseError>) {
     let mut lexer = Lexer::new(text.as_bytes());
     let (tokens, trivia) = lex(&mut lexer);
     let mut parser = Parser::new(text, tokens, trivia);
     _ = file(&mut parser);
-    let mut builder = BumpTreeBuilder::new(bump);
-    parser.visit_tree(&mut builder);
+    let root = parser.build_tree(arena);
 
-    (builder.finish(), parser.errors)
+    (root, parser.errors)
 }
 
 // #[global_allocator]
@@ -1041,7 +971,7 @@ fn main() {
         std::process::exit(-1);
     }
 
-    let bump = Bump::new();
+    let mut arena = Vec::new();
 
     if true {
         let input = input.repeat(10000);
@@ -1053,13 +983,12 @@ fn main() {
             let mut parser = Parser::new(&input, tokens, trivia);
             bench("parse", input.len(), || file(&mut parser));
             // println!("Spans {:#?}\nErrors {:#?}", &parser.spans, &parser.errors);
-            let mut builder = BumpTreeBuilder::new(&bump);
-            bench("build", input.len(), || parser.visit_tree(&mut builder));
+            bench("build", input.len(), || parser.build_tree(&mut arena));
         });
     } else {
-        let (cst, errors) = parse(&bump, &input);
+        let (cst, errors) = parse(&mut arena, &input);
         let mut buf = String::new();
-        cst.print(&mut buf, &input, &mut errors.iter(), 0);
+        cst.print(&mut buf, &input, &arena, &mut errors.iter(), 0);
         println!("{buf}");
     }
 
@@ -1072,8 +1001,8 @@ fn bench<T>(name: &str, len_bytes: usize, fun: impl FnOnce() -> T) -> T {
     let elapsed = start.elapsed().as_secs_f64();
 
     println!(
-        "{name} {} MiB/s",
-        len_bytes as f64 / (1024.0 * 1024.0 * elapsed)
+        "{name:8} {:.2} ms/MiB",
+        (elapsed * 1000.0 * 1024.0 * 1024.0) / len_bytes as f64
     );
     res
 }

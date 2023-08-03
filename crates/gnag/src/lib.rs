@@ -3,10 +3,7 @@ pub mod convert;
 pub mod file;
 pub mod handle;
 
-use std::{
-    io::Read,
-    ops::{Index, Range},
-};
+use std::ops::{Index, Range};
 
 /// Starting code from
 ///  https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html
@@ -51,8 +48,6 @@ pub enum TreeKind {
 }
 
 use TokenKind::*;
-
-use crate::convert::ConvertCtx;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TokenSpan {
@@ -115,7 +110,7 @@ impl Node {
 }
 
 impl Node {
-    fn print(
+    pub fn print(
         &self,
         buf: &mut dyn std::fmt::Write,
         src: &str,
@@ -197,7 +192,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn consume(&mut self, value: u8) -> bool {
+    pub fn consume(&mut self, value: u8) -> bool {
         if self.peek() == Some(value) {
             self.next();
             true
@@ -206,7 +201,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn consume_while(&mut self, predicate: impl std::ops::Fn(u8) -> bool) -> StrSpan {
+    pub fn consume_while(&mut self, predicate: impl std::ops::Fn(u8) -> bool) -> StrSpan {
         let start = self.pos();
         while let Some(c) = self.peek() {
             if predicate(c) {
@@ -221,7 +216,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn sequence(&mut self, sequence: &[u8]) -> bool {
+    pub fn sequence(&mut self, sequence: &[u8]) -> bool {
         if self.str[self.pos as usize..].starts_with(sequence) {
             self.pos += sequence.len() as u32;
             true
@@ -231,7 +226,7 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
+pub fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
     let mut tokens = Vec::new();
     let mut trivia = Vec::new();
     while !l.is_empty() {
@@ -353,13 +348,13 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct SpanStart(u32);
+pub struct SpanStart(u32);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SpanIndex(u32);
 
 #[derive(Clone, Copy)]
-struct ParserCheckpoint {
+pub struct ParserCheckpoint {
     pos: u32,
     spans_len: u32,
     errors_len: u32,
@@ -382,12 +377,12 @@ pub struct Parser<'a> {
     trivia: Vec<Token>,
     pos: u32,
     spans: Vec<TreeSpan>,
-    errors: Vec<ParseError>,
+    pub errors: Vec<ParseError>,
     src: &'a str,
 }
 
 impl<'a> Parser<'a> {
-    fn new(src: &str, tokens: Vec<Token>, trivia: Vec<Token>) -> Parser {
+    pub fn new(src: &str, tokens: Vec<Token>, trivia: Vec<Token>) -> Parser {
         Parser {
             tokens,
             trivia,
@@ -407,7 +402,7 @@ impl<'a> Parser<'a> {
     // The spans will be like so:
     //  (label, start..end)
     //  [ (b, 9..f) (c, 2..6) (a, 0..8) (root, 0..f) ]
-    fn build_tree(&self, arena: &mut Vec<Node>) -> Node {
+    pub fn build_tree(&self, arena: &mut Vec<Node>) -> Node {
         arena.reserve(self.spans.len() + self.tokens.len() + self.trivia.len());
 
         let mut merged_tokens = {
@@ -498,7 +493,7 @@ impl<'a> Parser<'a> {
         stack.pop().unwrap()
     }
 
-    fn checkpoint(&self) -> ParserCheckpoint {
+    pub fn checkpoint(&self) -> ParserCheckpoint {
         ParserCheckpoint {
             pos: self.pos,
             spans_len: self.spans.len().try_into().unwrap(),
@@ -506,7 +501,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn restore(&mut self, checkpoint: ParserCheckpoint) {
+    pub fn restore(&mut self, checkpoint: ParserCheckpoint) {
         let ParserCheckpoint {
             pos,
             spans_len,
@@ -522,7 +517,7 @@ impl<'a> Parser<'a> {
         self.errors.truncate(errors_len as usize);
     }
 
-    fn open(&mut self) -> SpanStart {
+    pub fn open(&mut self) -> SpanStart {
         let start = self
             .tokens
             .get(self.pos as usize)
@@ -530,7 +525,7 @@ impl<'a> Parser<'a> {
         SpanStart(start)
     }
 
-    fn close(&mut self, m: SpanStart, kind: TreeKind) -> StrSpan {
+    pub fn close(&mut self, m: SpanStart, kind: TreeKind) -> StrSpan {
         let end = self
             .tokens
             .get(self.pos.saturating_sub(1) as usize)
@@ -544,7 +539,7 @@ impl<'a> Parser<'a> {
         tree.span
     }
 
-    fn close_toplevel(&mut self, _m: SpanStart, kind: TreeKind) -> StrSpan {
+    pub fn close_toplevel(&mut self, _m: SpanStart, kind: TreeKind) -> StrSpan {
         let tree = TreeSpan {
             kind,
             span: StrSpan {
@@ -556,14 +551,14 @@ impl<'a> Parser<'a> {
         tree.span
     }
 
-    fn close_with_err(&mut self, m: SpanStart, err: impl ToString) {
+    pub fn close_with_err(&mut self, m: SpanStart, err: impl ToString) {
         let kind = TreeKind::ErrorTree;
         let err = err.to_string();
         let span = self.close(m, kind);
         self.errors.push(ParseError { span, err });
     }
 
-    fn error(&mut self, err: impl ToString) {
+    pub fn error(&mut self, err: impl ToString) {
         let err = err.to_string();
         let end = self.tokens.get(self.pos as usize).map_or(0, |s| s.span.end);
         self.errors.push(ParseError {
@@ -575,41 +570,41 @@ impl<'a> Parser<'a> {
         });
     }
 
-    fn advance(&mut self) {
+    pub fn advance(&mut self) {
         assert!(!self.eof());
         self.pos += 1;
     }
 
-    fn try_advance(&mut self) {
+    pub fn try_advance(&mut self) {
         if !self.eof() {
             self.pos += 1;
         }
     }
 
     #[inline]
-    fn eof(&self) -> bool {
+    pub fn eof(&self) -> bool {
         self.pos as usize == self.tokens.len()
     }
 
-    fn peek(&self) -> Option<TokenKind> {
+    pub fn peek(&self) -> Option<TokenKind> {
         self.nth(0)
     }
 
-    fn nth(&self, lookahead: u32) -> Option<TokenKind> {
+    pub fn nth(&self, lookahead: u32) -> Option<TokenKind> {
         self.nth_impl(lookahead).map(|it| it.kind)
     }
 
-    fn nth_impl(&self, lookahead: u32) -> Option<&Token> {
+    pub fn nth_impl(&self, lookahead: u32) -> Option<&Token> {
         self.tokens.get((self.pos + lookahead) as usize)
     }
 
     #[inline]
-    fn at(&self, kind: TokenKind) -> bool {
+    pub fn at(&self, kind: TokenKind) -> bool {
         self.nth(0) == Some(kind)
     }
 
     #[inline]
-    fn at_any(&self, kinds: &[TokenKind]) -> bool {
+    pub fn at_any(&self, kinds: &[TokenKind]) -> bool {
         if let Some(any) = self.nth(0) {
             kinds.contains(&any)
         } else {
@@ -617,7 +612,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn token(&mut self, kind: TokenKind) -> bool {
+    pub fn token(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.advance();
             true
@@ -626,7 +621,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect(&mut self, kind: TokenKind) -> bool {
+    pub fn expect(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.advance();
             true
@@ -668,7 +663,7 @@ impl<'a> RecoverMethod for StepRecoverUntil<'a> {
 
 // @always_valid
 // (Tokenizer | GrammarRule)*:files
-fn file(p: &mut Parser) -> bool {
+pub fn file(p: &mut Parser) -> bool {
     let r = StepRecoverUntil(&[TokenizerKeyword, RuleKeyword]);
     let m = p.open();
     while !p.eof() {
@@ -979,68 +974,6 @@ fn expr(p: &mut Parser, min_bp: u8) -> bool {
     true
 }
 
-pub fn parse<'a>(arena: &mut Vec<Node>, text: &str) -> (Node, Vec<ParseError>) {
-    let mut lexer = Lexer::new(text.as_bytes());
-    let (tokens, trivia) = lex(&mut lexer);
-    let mut parser = Parser::new(text, tokens, trivia);
-    _ = file(&mut parser);
-    let root = parser.build_tree(arena);
-
-    (root, parser.errors)
-}
-
-// #[global_allocator]
-// static GLOBAL: ProfiledAllocator<std::alloc::System> =
-//     ProfiledAllocator::new(std::alloc::System, 30);
-
-fn main() {
-    // tracy_client::Client::start();
-    // profiling::register_thread!("Main Thread");
-
-    let input = if let Some(path) = std::env::args().nth(1) {
-        std::fs::read_to_string(path).unwrap()
-    } else {
-        let mut input = String::new();
-        let mut stdin = std::io::stdin().lock();
-        _ = stdin.read_to_string(&mut input);
-        input
-    };
-
-    if input.is_empty() {
-        println!("No input provided");
-        std::process::exit(-1);
-    }
-
-    let mut arena = Vec::new();
-
-    if false {
-        let input = input.repeat(10000);
-
-        bench("whole", input.len(), || {
-            let mut lexer = Lexer::new(input.as_bytes());
-            let (tokens, trivia) = bench("lex", input.len(), || lex(&mut lexer));
-            // println!("{tokens:#?}\n{trivia:#?}");
-            let mut parser = Parser::new(&input, tokens, trivia);
-            bench("parse", input.len(), || file(&mut parser));
-            // println!("Spans {:#?}\nErrors {:#?}", &parser.spans, &parser.errors);
-            bench("build", input.len(), || parser.build_tree(&mut arena));
-        });
-    } else {
-        let (cst, errors) = parse(&mut arena, &input);
-
-        let mut buf = String::new();
-        cst.print(&mut buf, &input, &arena, &mut errors.iter(), 0);
-        println!("{buf}");
-
-        let cx = ConvertCtx::new(&input);
-        let file = file::File::new(&cx, &cst, &arena);
-        dbg!(file.ir_rules);
-        cx.report_errors("grammar.gng", &mut std::io::stdout().lock());
-    }
-
-    // profiling::finish_frame!();
-}
-
 pub struct LineMapping {
     lines: Vec<(u32, bool)>,
 }
@@ -1156,16 +1089,4 @@ fn test_line_lookup() {
     test(7, (1, 1));
     test(8, (2, 0));
     test(9, (3, 0));
-}
-
-fn bench<T>(name: &str, len_bytes: usize, fun: impl FnOnce() -> T) -> T {
-    let start = std::time::Instant::now();
-    let res = std::hint::black_box(fun());
-    let elapsed = start.elapsed().as_secs_f64();
-
-    println!(
-        "{name:8} {:.2} ms/MiB",
-        (elapsed * 1000.0 * 1024.0 * 1024.0) / len_bytes as f64
-    );
-    res
 }

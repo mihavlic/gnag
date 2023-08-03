@@ -2,52 +2,50 @@
 tokenizer {
     @skip Whitespace '\s+'
     @skip Comment '//.*$'
-    @proc String 
-        r##'{
-            const SINGLE_QUOTE: char = 39 as char;
+    @proc String {
+        let mut raw = false;
+        if l.peek().unwrap() == b'r' {
+            raw = true;
+            l.next();
+        }
 
-            let mut raw = false;
-            if l.peek().unwrap() == 'r' {
-                raw = true;
-                l.next();
+        let mut balance = 0;
+        loop {
+            match l.next() {
+                Some(b'#') => balance += 1,
+                Some(b'\'') => break,
+                _ => return None,
             }
+        }
 
-            let mut balance = 0;
-            while let Some(c) = l.next() {
-                match c {
-                    '#' => balance += 1,
-                    SINGLE_QUOTE => break,
-                    _ => return None,
+        loop {
+            match l.next() {
+                None => return None,
+                Some(b'\\') if !raw => {
+                    l.next();
                 }
-            }
-
-            while let Some(c) = l.next() {
-                match c {
-                    '\\' if raw => {
-                        l.next();
-                    }
-                    SINGLE_QUOTE => {
-                        let mut balance = balance;
-                        loop {
-                            if balance == 0 {
-                                return Some(Literal);
-                            }
-                            if let Some('#') = l.next() {
-                                balance -= 1;
-                            } else {
-                                break;
-                            }
+                Some(b'\'') => {
+                    let mut balance = balance;
+                    loop {
+                        if balance == 0 {
+                            return Literal;
+                        }
+                        if let Some(b'#') = l.next() {
+                            balance -= 1;
+                        } else {
+                            break;
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
-
-            None
-        }'##
+        }
+    }
+    InlineKeyword 'inline'
     TokenizerKeyword 'tokenizer'
     RuleKeyword 'rule'
     Ident '\w+'
+    Number '[0-9]+'
     LCurly '{'
     RCurly '}'
     LParen '('
@@ -73,7 +71,7 @@ rule Item {
 }
 
 rule AttributeExpr {
-    Ident ( '(' AttributeValue ')' )?
+    Ident ( '(' String | Ident | Number ')' )?
 }
 
 rule Attribute {
@@ -84,12 +82,32 @@ rule Tokenizer {
     'tokenizer' '{' TokenRule* '}'
 }
 
+inline rule delimited(bra, ket, inside) {
+    bra (inside | <not ket>)* ket
+}
+
+rule ParenDelimited {
+    <delimited '(' ')' DelimitedExpr>
+}
+
+rule BraceDelimited {
+    <delimited '{' '}' DelimitedExpr>
+}
+
+rule BracketDelimited {
+    <delimited '[' ']' DelimitedExpr>
+}
+
+inline rule DelimitedExpr {
+    ParenDelimited | BraceDelimited | BracketDelimited
+}
+
 rule TokenRule {
-    Attribute* Ident String
+    Attribute* Ident (String | BraceDelimited)
 }
 
 rule SynRule {
-    Attribute* 'rule' Ident Parameters? '{' SynExpr '}'
+    Attribute* 'inline'?  'rule' Ident Parameters? '{' Expr '}'
 }
 
 rule Parameters {
@@ -126,6 +144,6 @@ rule SeqExpr {
     Expr Expr+
 }
 
-rule BinExpr {
+inline rule BinExpr(a, b) {
     Expr '|' Expr
 }

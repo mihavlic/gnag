@@ -27,6 +27,26 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug executable 'gnag' full grammar",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=gnag",
+                    "--package=gnag"
+                ],
+                "filter": {
+                    "name": "gnag",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "grammar.gng"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug unit tests in executable 'gnag'",
             "cargo": {
                 "args": [

@@ -1,1 +1,4 @@
-tokenizer {}
+rule PostExpr {
+    Expr '?' |
+    Expr '+'
+}

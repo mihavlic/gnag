@@ -1,35 +1,10 @@
 #![allow(unused)]
 
-use crate::{handle::HandleVec, simple_handle, Node, NodeKind, StrSpan, TokenKind, TreeKind};
+use std::borrow::Cow;
 
-simple_handle! {
-    pub TokenHandle,
-    pub RuleHandle,
-    pub TokenizerHandle,
-    pub TokenRuleHandle,
-    pub SynRuleHandle
-}
-
-enum RuleExpr {
-    // base nodes
-    Terminal(TokenHandle),
-    Rule(RuleHandle),
-    // structuring nodes
-    Sequence(Vec<RuleExpr>),
-    Choice(Vec<RuleExpr>),
-    // repetition
-    ZeroOrMore(Vec<RuleExpr>),
-    OneOrMore(Vec<RuleExpr>),
-    Maybe(Vec<RuleExpr>),
-    // builtins
-    Any,
-    Not(TokenHandle),
-    SeparatedList {
-        element: Box<RuleExpr>,
-        separator: Box<RuleExpr>,
-    },
-    ZeroSpace,
-}
+use crate::{
+    handle::HandleVec, simple_handle, Lexer, Node, NodeKind, StrSpan, TokenKind, TreeKind,
+};
 
 #[derive(Debug)]
 pub enum Item {
@@ -39,8 +14,8 @@ pub enum Item {
 
 #[derive(Debug)]
 pub struct File {
-    span: StrSpan,
-    items: Vec<Item>,
+    pub span: StrSpan,
+    pub items: Vec<Item>,
 }
 
 pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
@@ -68,18 +43,18 @@ pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
 
 #[derive(Debug)]
 pub struct Tokenizer {
-    span: StrSpan,
-    rules: HandleVec<TokenRuleHandle, TokenRule>,
+    pub span: StrSpan,
+    pub rules: Vec<TokenRule>,
 }
 
 fn tokenizer(tree: &Node, arena: &[Node]) -> Option<Tokenizer> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Tokenizer));
 
-    let mut rules = HandleVec::new();
+    let mut rules = Vec::new();
 
     for c in tree.children(arena) {
         match c.kind {
-            NodeKind::Tree(TreeKind::TokenRule) => rules.extend(token_rule(tree, arena)),
+            NodeKind::Tree(TreeKind::TokenRule) => rules.extend(token_rule(c, arena)),
             _ => {}
         }
     }
@@ -92,8 +67,8 @@ fn tokenizer(tree: &Node, arena: &[Node]) -> Option<Tokenizer> {
 
 #[derive(Debug)]
 pub struct Attribute {
-    span: StrSpan,
-    name: StrSpan,
+    pub span: StrSpan,
+    pub name: StrSpan,
 }
 
 fn attribute(tree: &Node, arena: &[Node]) -> Option<Attribute> {
@@ -116,9 +91,10 @@ fn attribute(tree: &Node, arena: &[Node]) -> Option<Attribute> {
 
 #[derive(Debug)]
 pub struct TokenRule {
-    span: StrSpan,
-    name: StrSpan,
-    value: StrSpan,
+    pub span: StrSpan,
+    pub name: StrSpan,
+    pub attributes: Vec<Attribute>,
+    pub value: StrSpan,
 }
 
 fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
@@ -126,9 +102,11 @@ fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
 
     let mut name = None;
     let mut value = None;
+    let mut attrs = Vec::new();
 
     for c in tree.children(arena) {
         match c.kind {
+            NodeKind::Tree(TreeKind::Attribute) => attrs.extend(attribute(c, arena)),
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
             NodeKind::Token(TokenKind::Literal) => value = Some(c.span),
             _ => {}
@@ -138,13 +116,14 @@ fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
     Some(TokenRule {
         span: tree.span,
         name: name?,
+        attributes: attrs,
         value: value?,
     })
 }
 
 #[derive(Debug)]
 pub struct Parameters {
-    params: Vec<StrSpan>,
+    pub params: Vec<StrSpan>,
 }
 
 fn parameters(tree: &Node, arena: &[Node]) -> Option<Parameters> {
@@ -164,11 +143,12 @@ fn parameters(tree: &Node, arena: &[Node]) -> Option<Parameters> {
 
 #[derive(Debug)]
 pub struct SynRule {
-    span: StrSpan,
-    name: StrSpan,
-    parameters: Option<Parameters>,
-    attributes: Vec<Attribute>,
-    expression: Expression,
+    pub span: StrSpan,
+    pub name: StrSpan,
+    pub inline: bool,
+    pub paramaters: Option<Parameters>,
+    pub attributes: Vec<Attribute>,
+    pub expression: Expression,
 }
 
 fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
@@ -178,6 +158,7 @@ fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
     let mut name = None;
     let mut expr = None;
     let mut params = None;
+    let mut inline = false;
 
     for c in tree.children(arena) {
         match c.kind {
@@ -191,21 +172,23 @@ fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
                 | TreeKind::PostExpr
                 | TreeKind::PostName,
             ) => {
-                if let Some(e) = expression(tree, arena) {
+                if let Some(e) = expression(c, arena) {
                     expr = Some(e);
                 }
             }
-            NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(tree, arena)),
-            NodeKind::Tree(TreeKind::Parameters) => params = parameters(tree, arena),
-            _ => {}
+            NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(c, arena)),
+            NodeKind::Tree(TreeKind::Parameters) => params = parameters(c, arena),
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
+            NodeKind::Token(TokenKind::InlineKeyword) => inline = true,
+            _ => {}
         }
     }
 
     Some(SynRule {
         span: tree.span,
         name: name?,
-        parameters: params,
+        inline,
+        paramaters: params,
         attributes,
         expression: expr?,
     })
@@ -213,26 +196,26 @@ fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
 
 #[derive(Debug)]
 pub struct PreExpr {
-    span: StrSpan,
-    attributes: Vec<Attribute>,
-    expr: Box<Expression>,
+    pub span: StrSpan,
+    pub attributes: Vec<Attribute>,
+    pub expr: Box<Expression>,
 }
 #[derive(Debug)]
 pub struct ParenExpr {
-    span: StrSpan,
-    expr: Box<Expression>,
+    pub span: StrSpan,
+    pub expr: Box<Expression>,
 }
 #[derive(Debug)]
 pub struct CallExpr {
-    span: StrSpan,
-    name: StrSpan,
-    args: Box<Expression>,
+    pub span: StrSpan,
+    pub name: StrSpan,
+    pub args: Option<Box<Expression>>,
 }
 #[derive(Debug)]
 pub struct PostName {
-    span: StrSpan,
-    expr: Box<Expression>,
-    name: StrSpan,
+    pub span: StrSpan,
+    pub expr: Box<Expression>,
+    pub name: StrSpan,
 }
 #[derive(Debug)]
 pub enum PostExprKind {
@@ -242,20 +225,20 @@ pub enum PostExprKind {
 }
 #[derive(Debug)]
 pub struct PostExpr {
-    span: StrSpan,
-    expr: Box<Expression>,
-    kind: PostExprKind,
+    pub span: StrSpan,
+    pub expr: Box<Expression>,
+    pub kind: PostExprKind,
 }
 #[derive(Debug)]
 pub struct BinExpr {
-    span: StrSpan,
-    left: Box<Expression>,
-    right: Box<Expression>,
+    pub span: StrSpan,
+    pub left: Box<Expression>,
+    pub right: Box<Expression>,
 }
 #[derive(Debug)]
 pub struct SeqExpr {
-    span: StrSpan,
-    exprs: Vec<Expression>,
+    pub span: StrSpan,
+    pub exprs: Vec<Expression>,
 }
 
 #[derive(Debug)]
@@ -290,11 +273,9 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
             let mut expr = None;
             for c in tree.children(arena) {
                 match c.kind {
-                    NodeKind::Tree(TreeKind::Attribute) => {
-                        attributes.extend(attribute(tree, arena))
-                    }
+                    NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(c, arena)),
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree, arena) {
+                        if let Some(e) = expression(c, arena) {
                             expr = Some(e);
                         }
                     }
@@ -312,7 +293,7 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
             for c in tree.children(arena) {
                 match c.kind {
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree, arena) {
+                        if let Some(e) = expression(c, arena) {
                             expr = Some(e);
                         }
                     }
@@ -331,7 +312,7 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
                 match c.kind {
                     NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree, arena) {
+                        if let Some(e) = expression(c, arena) {
                             args = Some(e);
                         }
                     }
@@ -341,7 +322,7 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
             return Some(Expression::CallExpr(CallExpr {
                 span,
                 name: name?,
-                args: Box::new(args?),
+                args: args.map(Box::new),
             }));
         }
         NodeKind::Tree(TreeKind::PostName) => {
@@ -351,7 +332,7 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
                 match c.kind {
                     NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree, arena) {
+                        if let Some(e) = expression(c, arena) {
                             expr = Some(e);
                         }
                     }
@@ -373,7 +354,7 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
                     NodeKind::Token(TokenKind::Star) => kind = Some(PostExprKind::Star),
                     NodeKind::Token(TokenKind::Plus) => kind = Some(PostExprKind::Plus),
                     NodeKind::Tree(_) => {
-                        if let Some(e) = expression(tree, arena) {
+                        if let Some(e) = expression(c, arena) {
                             expr = Some(e);
                         }
                     }
@@ -427,4 +408,98 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
     }
 
     None
+}
+
+pub fn unescape_str_literal(src: &str) -> Option<Cow<str>> {
+    assert!(!src.is_empty());
+
+    let mut l = Lexer::new(src.as_bytes());
+
+    let mut raw = false;
+    if l.peek().unwrap() == b'r' {
+        raw = true;
+        l.next();
+    }
+
+    let mut balance = 0;
+    loop {
+        match l.next() {
+            Some(b'#') => balance += 1,
+            Some(b'\'') => break,
+            _ => return None,
+        }
+    }
+
+    let mut start = l.pos();
+    let mut end = start;
+    let mut string = String::new();
+
+    'done: loop {
+        match l.next() {
+            None => return None,
+            Some(b'\\') if !raw => {
+                let mut catchup = l.span_since(start);
+                // do not push the starting \
+                catchup.end -= 1;
+
+                let escaped = match l.next().unwrap() {
+                    b'\\' => Some('\\'),
+                    b'n' => Some('\n'),
+                    b't' => Some('\t'),
+                    b'0' => Some('\0'),
+                    _ => None,
+                };
+
+                if let Some(escaped) = escaped {
+                    let str = catchup.as_str(src);
+                    string.push_str(str);
+                    string.push(escaped);
+
+                    start = l.pos();
+                }
+            }
+            Some(b'\'') => {
+                // do not include the ending '
+                end = l.pos() - 1;
+                let mut balance = balance;
+                loop {
+                    if balance == 0 {
+                        break 'done;
+                    }
+                    if let Some(b'#') = l.next() {
+                        balance -= 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let span = StrSpan { start, end };
+    let str = span.as_str(src);
+
+    if string.is_empty() {
+        Some(str.into())
+    } else {
+        string.push_str(str);
+        Some(string.into())
+    }
+}
+
+#[rustfmt::skip]
+#[test]
+fn test_read_maybe_escaped_string() {
+    let src = r"###'hi\nthis\tis your mother👍'###";
+    let out =      "hi\nthis\tis your mother👍";
+
+    let span = StrSpan {
+        start: 0,
+        end: src.len() as u32,
+    };
+
+    let res = unescape_str_literal(src).unwrap();
+    assert!(matches!(res, Cow::Owned(_)));
+    assert_eq!(&*res, out);
 }

@@ -1,4 +1,6 @@
 mod ast;
+pub mod convert;
+pub mod file;
 pub mod handle;
 
 use std::{
@@ -21,7 +23,7 @@ pub enum TokenKind {
     ErrorToken,
   
     LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
-    TokenizerKeyword, RuleKeyword,
+    InlineKeyword, TokenizerKeyword, RuleKeyword,
     At, Comma, Pipe, Colon, Question, Plus, Star
 }
 
@@ -50,13 +52,15 @@ pub enum TreeKind {
 
 use TokenKind::*;
 
+use crate::convert::ConvertCtx;
+
 #[derive(Clone, Copy, Debug)]
 pub struct TokenSpan {
     pub start: u32,
     pub end: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct StrSpan {
     pub start: u32,
     pub end: u32,
@@ -193,6 +197,15 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    fn consume(&mut self, value: u8) -> bool {
+        if self.peek() == Some(value) {
+            self.next();
+            true
+        } else {
+            false
+        }
+    }
+
     fn consume_while(&mut self, predicate: impl std::ops::Fn(u8) -> bool) -> StrSpan {
         let start = self.pos();
         while let Some(c) = self.peek() {
@@ -229,7 +242,8 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                 l.consume_while(|c| c.is_ascii_whitespace());
                 Whitespace
             }
-            b'/' if l.sequence(b"//") => {
+            b'/' if l.peek() == Some(b'/') => {
+                l.next();
                 l.restore_pos(pos);
                 l.consume_while(|c| c != b'\n');
                 Comment
@@ -251,6 +265,9 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
             b'>' => RAngle,
             _ => 'choice: {
                 l.restore_pos(pos);
+                if l.sequence(b"inline") {
+                    break 'choice InlineKeyword;
+                }
                 if l.sequence(b"rule") {
                     break 'choice RuleKeyword;
                 }
@@ -265,24 +282,32 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                     }
 
                     let mut balance = 0;
-                    while let Some(c) = l.next() {
-                        match c {
-                            b'#' => balance += 1,
-                            b'\'' => break,
+                    loop {
+                        match l.next() {
+                            Some(b'#') => balance += 1,
+                            Some(b'\'') => break,
                             _ => break 'skip,
                         }
                     }
 
-                    while let Some(c) = l.next() {
-                        match c {
-                            b'\\' if raw => {
+                    'done: loop {
+                        match l.next() {
+                            None => break 'skip,
+                            Some(b'\\') if !raw => {
                                 l.next();
+                                // let _ = match l.next() {
+                                //     Some(b'\\') => '\\',
+                                //     Some(b'n') => '\n',
+                                //     Some(b't') => '\t',
+                                //     Some(b'0') => '\0',
+                                //     _ => break 'skip,
+                                // };
                             }
-                            b'\'' => {
+                            Some(b'\'') => {
                                 let mut balance = balance;
                                 loop {
                                     if balance == 0 {
-                                        break 'choice Literal;
+                                        break 'done;
                                     }
                                     if let Some(b'#') = l.next() {
                                         balance -= 1;
@@ -294,6 +319,8 @@ fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                             _ => {}
                         }
                     }
+
+                    break 'choice Literal;
                 }
                 l.restore_pos(pos);
                 if !l
@@ -766,6 +793,7 @@ fn syn_rule(p: &mut Parser) -> bool {
     let m = p.open();
 
     while attribute(p) {}
+    p.token(InlineKeyword);
     if !p.token(RuleKeyword) {
         return false;
     }
@@ -781,11 +809,13 @@ fn syn_rule(p: &mut Parser) -> bool {
 
 // '(' <separated_list Ident ','> ')'
 fn parameters(p: &mut Parser) -> bool {
+    let m = p.open();
+
     if !p.token(LParen) {
         return false;
     }
     loop {
-        if !attribute_expr(p) {
+        if !p.token(Ident) {
             break;
         }
         if !p.token(Comma) {
@@ -793,6 +823,8 @@ fn parameters(p: &mut Parser) -> bool {
         }
     }
     p.expect(RParen);
+
+    p.close(m, TreeKind::Parameters);
     true
 }
 
@@ -995,12 +1027,135 @@ fn main() {
         });
     } else {
         let (cst, errors) = parse(&mut arena, &input);
+
         let mut buf = String::new();
         cst.print(&mut buf, &input, &arena, &mut errors.iter(), 0);
         println!("{buf}");
+
+        let cx = ConvertCtx::new(&input);
+        let file = file::File::new(&cx, &cst, &arena);
+        dbg!(file.ir_rules);
+        cx.report_errors("grammar.gng", &mut std::io::stdout().lock());
     }
 
     // profiling::finish_frame!();
+}
+
+pub struct LineMapping {
+    lines: Vec<(u32, bool)>,
+}
+
+pub enum NewlineStyle {
+    Lf,
+    CrLf,
+}
+
+impl LineMapping {
+    pub fn new(src: &str, style: NewlineStyle) -> Self {
+        assert!(src.len() <= u32::MAX as usize);
+        let mut lines = Vec::new();
+
+        let mut prev_end = 0;
+        let mut saw_unicode = false;
+        let mut bytes = src.bytes().enumerate();
+
+        match style {
+            // utf8 bytes are either encoding an ascii character or are >=128
+            // so we can search for ascii characters by interpreting the string as bytes
+            // and not getting any false positives
+            NewlineStyle::Lf => {
+                while let Some((i, b)) = bytes.next() {
+                    if b == b'\n' {
+                        lines.push((prev_end, saw_unicode));
+                        prev_end = i as u32 + 1;
+                        saw_unicode = false;
+                    } else if b >= 128 {
+                        saw_unicode = true;
+                    }
+                }
+            }
+            NewlineStyle::CrLf => {
+                while let Some((_, b)) = bytes.next() {
+                    if b == b'\r' {
+                        if let Some((i, b'\n')) = bytes.clone().next() {
+                            //  we specifically omit call to next()
+                            //  because the code will work without it and will probably be faster
+                            // bytes.next()
+                            lines.push((prev_end, saw_unicode));
+                            prev_end = i as u32 + 1;
+                            saw_unicode = false;
+                        }
+                    } else if b >= 128 {
+                        saw_unicode = true;
+                    }
+                }
+            }
+        }
+
+        lines.push((prev_end, saw_unicode));
+
+        Self { lines }
+    }
+    /// Returns Line and Column offset, counting starts from zero, unicode aware
+    pub fn lookup(&self, src: &[u8], byte_offset: u32) -> (u32, u32) {
+        assert!((byte_offset as usize) < src.len());
+
+        let index = self.lines.binary_search_by_key(&byte_offset, |a| a.0);
+        let line = match index {
+            Ok(a) => a,
+            Err(a) => a - 1,
+        };
+        let (entry_start, is_unicode) = self.lines[line];
+        debug_assert!(entry_start <= byte_offset);
+
+        let column = if is_unicode {
+            let byte = src[byte_offset as usize];
+            // https://en.wikipedia.org/wiki/UTF-8#Encoding
+            debug_assert!(byte.leading_ones() != 1, "Offset is inside a codepoint");
+
+            let mut bytes = src[entry_start as usize..].iter().copied();
+            let mut offset = entry_start;
+            let mut local_unicode_offset = 0;
+
+            loop {
+                if offset == byte_offset {
+                    break local_unicode_offset;
+                }
+                let Some(b) = bytes.next() else {
+                    unreachable!()
+                };
+                let len = b.leading_ones();
+                offset += len.max(1);
+                local_unicode_offset += 1;
+                // collect the _extra_ bytes
+                for _ in 1..len {
+                    bytes.next();
+                }
+            }
+        } else {
+            byte_offset - entry_start
+        };
+
+        (line as u32, column as u32)
+    }
+}
+
+#[test]
+fn test_line_lookup() {
+    let str = "abcd\nì\n\nế";
+    let mapping = LineMapping::new(str, NewlineStyle::Lf);
+
+    let test = |offset: u32, expected: (u32, u32)| {
+        let res = mapping.lookup(str.as_bytes(), offset);
+        assert_eq!(expected, res);
+    };
+
+    test(0, (0, 0));
+    test(4, (0, 4));
+    test(5, (1, 0));
+    test(7, (1, 1));
+    test(8, (2, 0));
+    test(9, (3, 0));
 }
 
 fn bench<T>(name: &str, len_bytes: usize, fun: impl FnOnce() -> T) -> T {

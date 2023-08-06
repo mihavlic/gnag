@@ -15,6 +15,3 @@ path = "bin/print.rs"
 # features = ["profile-with-tracy"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[profile.release]
-debug = 2

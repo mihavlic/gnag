@@ -1,11 +1,11 @@
 {
     "name": "gnag-lsp",
-    "description": "A language server for Typst",
+    "description": "A language server for Gnag",
     "repository": {
         "type": "git",
         "url": "https://github.com/nvarner/gnag-lsp"
     },
-    "displayName": "Typst LSP",
+    "displayName": "Gnag LSP",
     "icon": "icons/gnag.png",
     "author": "Nathan Varner",
     "publisher": "nvarner",
@@ -18,11 +18,11 @@
     "contributes": {
         "configuration": {
             "type": "object",
-            "title": "Typst LSP",
+            "title": "Gnag LSP",
             "properties": {
                 "gnag-lsp.exportPdf": {
                     "title": "Export PDF",
-                    "description": "The extension can export PDFs of your Typst files. This setting controls whether this feature is enabled and how often it runs.",
+                    "description": "The extension can export PDFs of your Gnag files. This setting controls whether this feature is enabled and how often it runs.",
                     "type": "string",
                     "default": "onSave",
                     "enum": [
@@ -95,7 +95,7 @@
                     ".typ"
                 ],
                 "aliases": [
-                    "Typst"
+                    "Gnag"
                 ],
                 "icon": {
                     "light": "./icons/gnag-small.png",
@@ -251,18 +251,18 @@
             {
                 "command": "gnag-lsp.exportCurrentPdf",
                 "title": "Export the currently open file as PDF",
-                "category": "Typst"
+                "category": "Gnag"
             },
             {
                 "command": "gnag-lsp.showPdf",
                 "title": "Show the compiled PDF of the currently opened gnag file",
-                "category": "Typst",
+                "category": "Gnag",
                 "icon": "$(open-preview)"
             },
             {
                 "command": "gnag-lsp.clearCache",
                 "title": "Clear all cached resources",
-                "category": "Typst"
+                "category": "Gnag"
             }
         ],
         "menus": {

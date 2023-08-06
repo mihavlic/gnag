@@ -32,7 +32,7 @@ export function activate(context: ExtensionContext): Promise<void> {
         initializationOptions: config,
     };
 
-    client = new LanguageClient("gnag-lsp", "Typst Language Server", serverOptions, clientOptions);
+    client = new LanguageClient("gnag-lsp", "Gnag Language Server", serverOptions, clientOptions);
 
     context.subscriptions.push(
         commands.registerCommand("gnag-lsp.exportCurrentPdf", commandExportCurrentPdf)

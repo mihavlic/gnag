@@ -20,7 +20,7 @@ import {
 let client: LanguageClient | undefined = undefined;
 
 export function activate(context: ExtensionContext): Promise<void> {
-    const config = workspace.getConfiguration("typst-lsp");
+    const config = workspace.getConfiguration("gnag-lsp");
     const serverCommand = getServer(config);
     const serverOptions: ServerOptions = {
         run: { command: serverCommand, options: { env: { RUST_BACKTRACE: "1" } } },
@@ -28,17 +28,17 @@ export function activate(context: ExtensionContext): Promise<void> {
     };
 
     const clientOptions: LanguageClientOptions = {
-        documentSelector: [{ scheme: "file", language: "typst" }],
+        documentSelector: [{ scheme: "file", language: "gnag" }],
         initializationOptions: config,
     };
 
-    client = new LanguageClient("typst-lsp", "Typst Language Server", serverOptions, clientOptions);
+    client = new LanguageClient("gnag-lsp", "Typst Language Server", serverOptions, clientOptions);
 
     context.subscriptions.push(
-        commands.registerCommand("typst-lsp.exportCurrentPdf", commandExportCurrentPdf)
+        commands.registerCommand("gnag-lsp.exportCurrentPdf", commandExportCurrentPdf)
     );
-    context.subscriptions.push(commands.registerCommand("typst-lsp.showPdf", commandShowPdf));
-    context.subscriptions.push(commands.registerCommand("typst-lsp.clearCache", commandClearCache));
+    context.subscriptions.push(commands.registerCommand("gnag-lsp.showPdf", commandShowPdf));
+    context.subscriptions.push(commands.registerCommand("gnag-lsp.clearCache", commandClearCache));
 
     return client.start();
 }
@@ -54,7 +54,7 @@ function getServer(conf: WorkspaceConfiguration): string {
     }
     const windows = process.platform === "win32";
     const suffix = windows ? ".exe" : "";
-    const binaryName = "typst-lsp" + suffix;
+    const binaryName = "gnag-lsp" + suffix;
 
     const bundledPath = path.resolve(__dirname, binaryName);
 
@@ -83,7 +83,7 @@ async function commandExportCurrentPdf(): Promise<void> {
     const uri = activeEditor.document.uri.toString();
 
     await client?.sendRequest("workspace/executeCommand", {
-        command: "typst-lsp.doPdfExport",
+        command: "gnag-lsp.doPdfExport",
         arguments: [uri],
     });
 }
@@ -125,7 +125,7 @@ async function commandClearCache(): Promise<void> {
     const uri = activeEditor.document.uri.toString();
 
     await client?.sendRequest("workspace/executeCommand", {
-        command: "typst-lsp.doClearCache",
+        command: "gnag-lsp.doClearCache",
         arguments: [uri],
     });
 }

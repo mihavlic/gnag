@@ -1,5 +1,5 @@
 {
-    "name": "typst",
+    "name": "gnag",
     "patterns": [
         {
             "include": "#markup"
@@ -9,12 +9,12 @@
         "comments": {
             "patterns": [
                 {
-                    "name": "comment.block.typst",
+                    "name": "comment.block.gnag",
                     "begin": "/\\*",
                     "end": "\\*/",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.comment.typst"
+                            "name": "punctuation.definition.comment.gnag"
                         }
                     },
                     "patterns": [
@@ -24,12 +24,12 @@
                     ]
                 },
                 {
-                    "name": "comment.line.double-slash.typst",
+                    "name": "comment.line.double-slash.gnag",
                     "begin": "(?<!:)//",
                     "end": "\n",
                     "beginCaptures": {
                         "0": {
-                            "name": "punctuation.definition.comment.typst"
+                            "name": "punctuation.definition.comment.gnag"
                         }
                     },
                     "patterns": [
@@ -53,44 +53,44 @@
                     "include": "#common"
                 },
                 {
-                    "name": "constant.character.escape.content.typst",
+                    "name": "constant.character.escape.content.gnag",
                     "match": "\\\\([\\\\/\\[\\]{}#*_=~`$-.]|u\\{[0-9a-zA-Z]*\\}?)"
                 },
                 {
-                    "name": "punctuation.definition.linebreak.typst",
+                    "name": "punctuation.definition.linebreak.gnag",
                     "match": "\\\\"
                 },
                 {
-                    "name": "punctuation.definition.nonbreaking-space.typst",
+                    "name": "punctuation.definition.nonbreaking-space.gnag",
                     "match": "~"
                 },
                 {
-                    "name": "punctuation.definition.shy.typst",
+                    "name": "punctuation.definition.shy.gnag",
                     "match": "-\\?"
                 },
                 {
-                    "name": "punctuation.definition.em-dash.typst",
+                    "name": "punctuation.definition.em-dash.gnag",
                     "match": "---"
                 },
                 {
-                    "name": "punctuation.definition.en-dash.typst",
+                    "name": "punctuation.definition.en-dash.gnag",
                     "match": "--"
                 },
                 {
-                    "name": "punctuation.definition.ellipsis.typst",
+                    "name": "punctuation.definition.ellipsis.gnag",
                     "match": "\\.\\.\\."
                 },
                 {
-                    "name": "constant.symbol.typst",
+                    "name": "constant.symbol.gnag",
                     "match": ":([a-zA-Z0-9]+:)+"
                 },
                 {
-                    "name": "markup.bold.typst",
+                    "name": "markup.bold.gnag",
                     "begin": "(^\\*|\\*$|((?<=\\W|_)\\*)|(\\*(?=\\W|_)))",
                     "end": "(^\\*|\\*$|((?<=\\W|_)\\*)|(\\*(?=\\W|_)))|\n|(?=\\])",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.bold.typst"
+                            "name": "punctuation.definition.bold.gnag"
                         }
                     },
                     "patterns": [
@@ -100,12 +100,12 @@
                     ]
                 },
                 {
-                    "name": "markup.italic.typst",
+                    "name": "markup.italic.gnag",
                     "begin": "(^_|_$|((?<=\\W|_)_)|(_(?=\\W|_)))",
                     "end": "(^_|_$|((?<=\\W|_)_)|(_(?=\\W|_)))|\n|(?=\\])",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.italic.typst"
+                            "name": "punctuation.definition.italic.gnag"
                         }
                     },
                     "patterns": [
@@ -115,47 +115,47 @@
                     ]
                 },
                 {
-                    "name": "markup.underline.link.typst",
+                    "name": "markup.underline.link.gnag",
                     "match": "https?://[0-9a-zA-Z~/%#&=',;\\.\\+\\?]*"
                 },
                 {
-                    "name": "markup.raw.block.typst",
+                    "name": "markup.raw.block.gnag",
                     "begin": "`{3,}",
                     "end": "\\0",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.raw.typst"
+                            "name": "punctuation.definition.raw.gnag"
                         }
                     }
                 },
                 {
-                    "name": "markup.raw.inline.typst",
+                    "name": "markup.raw.inline.gnag",
                     "begin": "`",
                     "end": "`",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.raw.typst"
+                            "name": "punctuation.definition.raw.gnag"
                         }
                     }
                 },
                 {
-                    "name": "string.other.math.typst",
+                    "name": "string.other.math.gnag",
                     "begin": "\\$",
                     "end": "\\$",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.string.math.typst"
+                            "name": "punctuation.definition.string.math.gnag"
                         }
                     }
                 },
                 {
-                    "name": "markup.heading.typst",
-                    "contentName": "entity.name.section.typst",
+                    "name": "markup.heading.gnag",
+                    "contentName": "entity.name.section.gnag",
                     "begin": "^\\s*=+\\s+",
                     "end": "\n|(?=<)",
                     "beginCaptures": {
                         "0": {
-                            "name": "punctuation.definition.heading.typst"
+                            "name": "punctuation.definition.heading.gnag"
                         }
                     },
                     "patterns": [
@@ -165,39 +165,39 @@
                     ]
                 },
                 {
-                    "name": "punctuation.definition.list.unnumbered.typst",
+                    "name": "punctuation.definition.list.unnumbered.gnag",
                     "match": "^\\s*-\\s+"
                 },
                 {
-                    "name": "punctuation.definition.list.numbered.typst",
+                    "name": "punctuation.definition.list.numbered.gnag",
                     "match": "^\\s*([0-9]*\\.|\\+)\\s+"
                 },
                 {
                     "match": "^\\s*(/)\\s+([^:]*:)",
                     "captures": {
                         "1": {
-                            "name": "punctuation.definition.list.description.typst"
+                            "name": "punctuation.definition.list.description.gnag"
                         },
                         "2": {
-                            "name": "markup.list.term.typst"
+                            "name": "markup.list.term.gnag"
                         }
                     }
                 },
                 {
-                    "name": "entity.other.label.typst",
+                    "name": "entity.other.label.gnag",
                     "match": "<[[:alpha:]_][[:alnum:]_-]*>",
                     "captures": {
                         "1": {
-                            "name": "punctuation.definition.label.typst"
+                            "name": "punctuation.definition.label.gnag"
                         }
                     }
                 },
                 {
-                    "name": "entity.other.reference.typst",
+                    "name": "entity.other.reference.gnag",
                     "match": "(@)[[:alpha:]_][[:alnum:]_-]*",
                     "captures": {
                         "1": {
-                            "name": "punctuation.definition.reference.typst"
+                            "name": "punctuation.definition.reference.gnag"
                         }
                     }
                 },
@@ -206,15 +206,15 @@
                     "end": "\n|(;)|(?=])",
                     "beginCaptures": {
                         "0": {
-                            "name": "keyword.other.typst"
+                            "name": "keyword.other.gnag"
                         },
                         "1": {
-                            "name": "punctuation.definition.keyword.typst"
+                            "name": "punctuation.definition.keyword.gnag"
                         }
                     },
                     "endCaptures": {
                         "1": {
-                            "name": "punctuation.terminator.statement.typst"
+                            "name": "punctuation.terminator.statement.gnag"
                         }
                     },
                     "patterns": [
@@ -224,11 +224,11 @@
                     ]
                 },
                 {
-                    "name": "keyword.other.typst",
+                    "name": "keyword.other.gnag",
                     "match": "(#)(as|in)\\b",
                     "captures": {
                         "1": {
-                            "name": "punctuation.definition.keyword.typst"
+                            "name": "punctuation.definition.keyword.gnag"
                         }
                     }
                 },
@@ -237,10 +237,10 @@
                     "end": "\n|(?=])|(?<=}|])",
                     "beginCaptures": {
                         "0": {
-                            "name": "keyword.control.conditional.typst"
+                            "name": "keyword.control.conditional.gnag"
                         },
                         "2": {
-                            "name": "punctuation.definition.keyword.typst"
+                            "name": "punctuation.definition.keyword.gnag"
                         }
                     },
                     "patterns": [
@@ -254,10 +254,10 @@
                     "end": "\n|(?=])|(?<=}|])",
                     "beginCaptures": {
                         "0": {
-                            "name": "keyword.control.loop.typst"
+                            "name": "keyword.control.loop.gnag"
                         },
                         "1": {
-                            "name": "punctuation.definition.keyword.typst"
+                            "name": "punctuation.definition.keyword.gnag"
                         }
                     },
                     "patterns": [
@@ -267,11 +267,11 @@
                     ]
                 },
                 {
-                    "name": "keyword.control.loop.typst",
+                    "name": "keyword.control.loop.gnag",
                     "match": "(#)(break|continue)\\b",
                     "captures": {
                         "1": {
-                            "name": "punctuation.definition.keyword.typst"
+                            "name": "punctuation.definition.keyword.gnag"
                         }
                     }
                 },
@@ -280,15 +280,15 @@
                     "end": "\n|(;)|(?=])",
                     "beginCaptures": {
                         "0": {
-                            "name": "keyword.control.import.typst"
+                            "name": "keyword.control.import.gnag"
                         },
                         "1": {
-                            "name": "punctuation.definition.keyword.typst"
+                            "name": "punctuation.definition.keyword.gnag"
                         }
                     },
                     "endCaptures": {
                         "1": {
-                            "name": "punctuation.terminator.statement.typst"
+                            "name": "punctuation.terminator.statement.gnag"
                         }
                     },
                     "patterns": [
@@ -298,21 +298,21 @@
                     ]
                 },
                 {
-                    "name": "keyword.control.flow.typst",
+                    "name": "keyword.control.flow.gnag",
                     "match": "(#)(return)\\b",
                     "captures": {
                         "1": {
-                            "name": "punctuation.definition.keyword.typst"
+                            "name": "punctuation.definition.keyword.gnag"
                         }
                     }
                 },
                 {
                     "comment": "Function name",
-                    "name": "entity.name.function.typst",
+                    "name": "entity.name.function.gnag",
                     "match": "((#)[[:alpha:]_][[:alnum:]_-]*!?)(?=\\[|\\()",
                     "captures": {
                         "2": {
-                            "name": "punctuation.definition.function.typst"
+                            "name": "punctuation.definition.function.gnag"
                         }
                     }
                 },
@@ -322,7 +322,7 @@
                     "end": "\\)",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.group.typst"
+                            "name": "punctuation.definition.group.gnag"
                         }
                     },
                     "patterns": [
@@ -332,16 +332,16 @@
                     ]
                 },
                 {
-                    "name": "entity.other.interpolated.typst",
+                    "name": "entity.other.interpolated.gnag",
                     "match": "(#)[[:alpha:]_][.[:alnum:]_-]*",
                     "captures": {
                         "1": {
-                            "name": "punctuation.definition.variable.typst"
+                            "name": "punctuation.definition.variable.gnag"
                         }
                     }
                 },
                 {
-                    "name": "meta.block.content.typst",
+                    "name": "meta.block.content.gnag",
                     "begin": "#",
                     "end": "\\s",
                     "patterns": [
@@ -358,12 +358,12 @@
                     "include": "#common"
                 },
                 {
-                    "name": "meta.block.code.typst",
+                    "name": "meta.block.code.gnag",
                     "begin": "{",
                     "end": "}",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.block.code.typst"
+                            "name": "punctuation.definition.block.code.gnag"
                         }
                     },
                     "patterns": [
@@ -373,12 +373,12 @@
                     ]
                 },
                 {
-                    "name": "meta.block.content.typst",
+                    "name": "meta.block.content.gnag",
                     "begin": "\\[",
                     "end": "\\]",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.block.content.typst"
+                            "name": "punctuation.definition.block.content.gnag"
                         }
                     },
                     "patterns": [
@@ -388,61 +388,61 @@
                     ]
                 },
                 {
-                    "name": "comment.line.double-slash.typst",
+                    "name": "comment.line.double-slash.gnag",
                     "begin": "//",
                     "end": "\n",
                     "beginCaptures": {
                         "0": {
-                            "name": "punctuation.definition.comment.typst"
+                            "name": "punctuation.definition.comment.gnag"
                         }
                     }
                 },
                 {
-                    "name": "punctuation.separator.colon.typst",
+                    "name": "punctuation.separator.colon.gnag",
                     "match": ":"
                 },
                 {
-                    "name": "punctuation.separator.comma.typst",
+                    "name": "punctuation.separator.comma.gnag",
                     "match": ","
                 },
                 {
-                    "name": "keyword.operator.typst",
+                    "name": "keyword.operator.gnag",
                     "match": "=>|\\.\\."
                 },
                 {
-                    "name": "keyword.operator.relational.typst",
+                    "name": "keyword.operator.relational.gnag",
                     "match": "==|!=|<=|<|>=|>"
                 },
                 {
-                    "name": "keyword.operator.assignment.typst",
+                    "name": "keyword.operator.assignment.gnag",
                     "match": "\\+=|-=|\\*=|/=|="
                 },
                 {
-                    "name": "keyword.operator.arithmetic.typst",
+                    "name": "keyword.operator.arithmetic.gnag",
                     "match": "\\+|\\*|/|(?<![[:alpha:]_][[:alnum:]_-]*)-(?![:alnum:]_-]*[[:alpha:]_])"
                 },
                 {
-                    "name": "keyword.operator.word.typst",
+                    "name": "keyword.operator.word.gnag",
                     "match": "\\b(and|or|not)\\b"
                 },
                 {
-                    "name": "keyword.other.typst",
+                    "name": "keyword.other.gnag",
                     "match": "\\b(let|as|in|set|show)\\b"
                 },
                 {
-                    "name": "keyword.control.conditional.typst",
+                    "name": "keyword.control.conditional.gnag",
                     "match": "\\b(if|else)\\b"
                 },
                 {
-                    "name": "keyword.control.loop.typst",
+                    "name": "keyword.control.loop.gnag",
                     "match": "\\b(for|while|break|continue)\\b"
                 },
                 {
-                    "name": "keyword.control.import.typst",
+                    "name": "keyword.control.import.gnag",
                     "match": "\\b(import|include|export)\\b"
                 },
                 {
-                    "name": "keyword.control.flow.typst",
+                    "name": "keyword.control.flow.gnag",
                     "match": "\\b(return)\\b"
                 },
                 {
@@ -450,12 +450,12 @@
                 },
                 {
                     "comment": "Function name",
-                    "name": "entity.name.function.typst",
+                    "name": "entity.name.function.gnag",
                     "match": "\\b[[:alpha:]_][[:alnum:]_-]*!?(?=\\[|\\()"
                 },
                 {
                     "comment": "Function name",
-                    "name": "entity.name.function.typst",
+                    "name": "entity.name.function.gnag",
                     "match": "(?<=\\bshow\\s*)\\b[[:alpha:]_][[:alnum:]_-]*(?=\\s*[:.])"
                 },
                 {
@@ -464,7 +464,7 @@
                     "end": "\\)",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.group.typst"
+                            "name": "punctuation.definition.group.gnag"
                         }
                     },
                     "patterns": [
@@ -474,16 +474,16 @@
                     ]
                 },
                 {
-                    "name": "variable.other.typst",
+                    "name": "variable.other.gnag",
                     "match": "\\b[[:alpha:]_][[:alnum:]_-]*\\b"
                 },
                 {
-                    "name": "meta.group.typst",
+                    "name": "meta.group.gnag",
                     "begin": "\\(",
                     "end": "\\)|(?=;)",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.group.typst"
+                            "name": "punctuation.definition.group.gnag"
                         }
                     },
                     "patterns": [
@@ -497,64 +497,64 @@
         "constants": {
             "patterns": [
                 {
-                    "name": "constant.language.none.typst",
+                    "name": "constant.language.none.gnag",
                     "match": "\\bnone\\b"
                 },
                 {
-                    "name": "constant.language.auto.typst",
+                    "name": "constant.language.auto.gnag",
                     "match": "\\bauto\\b"
                 },
                 {
-                    "name": "constant.language.boolean.typst",
+                    "name": "constant.language.boolean.gnag",
                     "match": "\\b(true|false)\\b"
                 },
                 {
-                    "name": "constant.numeric.length.typst",
+                    "name": "constant.numeric.length.gnag",
                     "match": "\\b(\\d*)?\\.?\\d+([eE][+-]?\\d+)?(mm|pt|cm|in|em)\\b"
                 },
                 {
-                    "name": "constant.numeric.angle.typst",
+                    "name": "constant.numeric.angle.gnag",
                     "match": "\\b(\\d*)?\\.?\\d+([eE][+-]?\\d+)?(rad|deg)\\b"
                 },
                 {
-                    "name": "constant.numeric.percentage.typst",
+                    "name": "constant.numeric.percentage.gnag",
                     "match": "\\b(\\d*)?\\.?\\d+([eE][+-]?\\d+)?%"
                 },
                 {
-                    "name": "constant.numeric.fr.typst",
+                    "name": "constant.numeric.fr.gnag",
                     "match": "\\b(\\d*)?\\.?\\d+([eE][+-]?\\d+)?fr"
                 },
                 {
-                    "name": "constant.numeric.integer.typst",
+                    "name": "constant.numeric.integer.gnag",
                     "match": "\\b\\d+\\b"
                 },
                 {
-                    "name": "constant.numeric.float.typst",
+                    "name": "constant.numeric.float.gnag",
                     "match": "\\b(\\d*)?\\.?\\d+([eE][+-]?\\d+)?\\b"
                 },
                 {
-                    "name": "string.quoted.double.typst",
+                    "name": "string.quoted.double.gnag",
                     "begin": "\"",
                     "end": "\"",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.string.typst"
+                            "name": "punctuation.definition.string.gnag"
                         }
                     },
                     "patterns": [
                         {
-                            "name": "constant.character.escape.string.typst",
+                            "name": "constant.character.escape.string.gnag",
                             "match": "\\\\([\\\\\"nrt]|u\\{?[0-9a-zA-Z]*\\}?)"
                         }
                     ]
                 },
                 {
-                    "name": "string.other.math.typst",
+                    "name": "string.other.math.gnag",
                     "begin": "\\$",
                     "end": "\\$",
                     "captures": {
                         "0": {
-                            "name": "punctuation.definition.string.math.typst"
+                            "name": "punctuation.definition.string.math.gnag"
                         }
                     }
                 }
@@ -563,7 +563,7 @@
         "arguments": {
             "patterns": [
                 {
-                    "name": "variable.parameter.typst",
+                    "name": "variable.parameter.gnag",
                     "match": "\\b[[:alpha:]_][[:alnum:]_-]*(?=:)"
                 },
                 {
@@ -572,5 +572,5 @@
             ]
         }
     },
-    "scopeName": "source.typst"
+    "scopeName": "source.gnag"
 }

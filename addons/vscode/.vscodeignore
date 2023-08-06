@@ -1,9 +1,9 @@
 **
 !language-configuration.json
-!typst.tmLanguage.json
+!gnag.tmLanguage.json
 !out/extension.js
-!out/typst-lsp
-!out/typst-lsp.exe
+!out/gnag-lsp
+!out/gnag-lsp.exe
 !package.json
 !package-lock.json
 !icons/**

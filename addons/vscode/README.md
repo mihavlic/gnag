@@ -25,11 +25,11 @@ A VS Code extension for Typst.
 
 ## Technical
 
-The extension uses [Typst LSP](https://github.com/nvarner/typst-lsp) on the
+The extension uses [Typst LSP](https://github.com/nvarner/gnag-lsp) on the
 backend.
 
-Both `language-configuration.json` and `typst.tmLanguage.json` are from
-Typst. See [the source here](https://github.com/typst/typst/tree/main/tools/support).
+Both `language-configuration.json` and `gnag.tmLanguage.json` are from
+Typst. See [the source here](https://github.com/gnag/gnag/tree/main/tools/support).
 
-The syntax highlighting that was previously provided by `typst.tmLanguage.json`
+The syntax highlighting that was previously provided by `gnag.tmLanguage.json`
 is being phased out in favor of LSP Semantic Tokens.

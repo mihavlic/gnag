@@ -35,10 +35,8 @@ export function activate(context: ExtensionContext): Promise<void> {
     client = new LanguageClient("gnag-lsp", "Gnag Language Server", serverOptions, clientOptions);
 
     context.subscriptions.push(
-        commands.registerCommand("gnag-lsp.exportCurrentPdf", commandExportCurrentPdf)
+        commands.registerCommand("gnag-lsp.restartServer", () => client?.restart())
     );
-    context.subscriptions.push(commands.registerCommand("gnag-lsp.showPdf", commandShowPdf));
-    context.subscriptions.push(commands.registerCommand("gnag-lsp.clearCache", commandClearCache));
 
     return client.start();
 }
@@ -72,60 +70,4 @@ function fileExists(path: string): boolean {
     } catch (error) {
         return false;
     }
-}
-
-async function commandExportCurrentPdf(): Promise<void> {
-    const activeEditor = window.activeTextEditor;
-    if (activeEditor === undefined) {
-        return;
-    }
-
-    const uri = activeEditor.document.uri.toString();
-
-    await client?.sendRequest("workspace/executeCommand", {
-        command: "gnag-lsp.doPdfExport",
-        arguments: [uri],
-    });
-}
-
-/**
- * Implements the functionality for the 'Show PDF' button shown in the editor title
- * if a `.typ` file is opened.
- *
- */
-async function commandShowPdf(): Promise<void> {
-    const activeEditor = window.activeTextEditor;
-    if (activeEditor === undefined) {
-        return;
-    }
-
-    const uri = activeEditor.document.uri;
-    // change the file extension to `.pdf` as we want to open the pdf file
-    // and not the currently opened `.typ` file.
-    const n = uri.toString().lastIndexOf(".");
-    const pdf_uri = Uri.parse(uri.toString().slice(0, n) + ".pdf");
-
-    try {
-        await workspace.fs.stat(pdf_uri);
-    } catch {
-        // only create pdf if it does not exist yet
-        await commandExportCurrentPdf();
-    } finally {
-        // here we can be sure that the pdf exists
-        await commands.executeCommand("vscode.open", pdf_uri, ViewColumn.Beside);
-    }
-}
-
-async function commandClearCache(): Promise<void> {
-    const activeEditor = window.activeTextEditor;
-    if (activeEditor === undefined) {
-        return;
-    }
-
-    const uri = activeEditor.document.uri.toString();
-
-    await client?.sendRequest("workspace/executeCommand", {
-        command: "gnag-lsp.doClearCache",
-        arguments: [uri],
-    });
 }

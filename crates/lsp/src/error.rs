@@ -44,7 +44,7 @@ impl fmt::Display for ExtractError {
                 write!(f, "Method mismatch")
             }
             ExtractError::JsonError(e) => {
-                write!(f, "Invalid request\n{e}",)
+                write!(f, "Invalid request\n{e}")
             }
         }
     }

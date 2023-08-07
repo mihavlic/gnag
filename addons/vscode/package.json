@@ -3,48 +3,30 @@
     "description": "A language server for Gnag",
     "repository": {
         "type": "git",
-        "url": "https://github.com/nvarner/gnag-lsp"
+        "url": "https://github.com/mihavlic/gnag"
     },
     "displayName": "Gnag LSP",
     "icon": "icons/gnag.png",
-    "author": "Nathan Varner",
-    "publisher": "nvarner",
+    "author": "Michal Havlíček",
+    "publisher": "mihavlic",
     "license": "Apache-2.0 OR MIT",
-    "version": "0.7.2",
+    "version": "0.0.1",
     "engines": {
         "vscode": "^1.71.0"
     },
     "main": "./out/extension.js",
     "contributes": {
+        "commands": [
+            {
+                "command": "gnag-lsp.restartServer",
+                "title": "Restart server",
+                "category": "gnag-lsp"
+            }
+        ],
         "configuration": {
             "type": "object",
             "title": "Gnag LSP",
             "properties": {
-                "gnag-lsp.exportPdf": {
-                    "title": "Export PDF",
-                    "description": "The extension can export PDFs of your Gnag files. This setting controls whether this feature is enabled and how often it runs.",
-                    "type": "string",
-                    "default": "onSave",
-                    "enum": [
-                        "never",
-                        "onSave",
-                        "onType"
-                    ],
-                    "enumDescriptions": [
-                        "Never export PDFs, you will manually run gnag.",
-                        "Export PDFs when you save a file.",
-                        "Export PDFs as you type in a file."
-                    ]
-                },
-                "gnag-lsp.rootPath": {
-                    "title": "Root path",
-                    "description": "Configure the root for absolute paths in gnag",
-                    "type": [
-                        "string",
-                        "null"
-                    ],
-                    "default": null
-                },
                 "gnag-lsp.semanticTokens": {
                     "title": "Semantic tokens mode",
                     "description": "Enable or disable semantic tokens (LSP syntax highlighting)",
@@ -67,23 +49,12 @@
                         "null"
                     ],
                     "default": null
-                },
-                "gnag-lsp.trace.server": {
-                    "scope": "window",
-                    "type": "string",
-                    "enum": [
-                        "off",
-                        "messages",
-                        "verbose"
-                    ],
-                    "default": "off",
-                    "description": "Traces the communication between VS Code and the language server."
                 }
             }
         },
         "configurationDefaults": {
             "[gnag]": {
-                "editor.wordWrap": "on",
+                "editor.wordWrap": "off",
                 "editor.semanticHighlighting.enabled": true
             }
         },
@@ -92,7 +63,7 @@
                 "id": "gnag",
                 "configuration": "./language-configuration.json",
                 "extensions": [
-                    ".typ"
+                    ".gng"
                 ],
                 "aliases": [
                     "Gnag"
@@ -105,10 +76,6 @@
         ],
         "semanticTokenTypes": [
             {
-                "id": "bool",
-                "description": "A boolean literal"
-            },
-            {
                 "id": "punct",
                 "description": "Punctuation in code"
             },
@@ -117,40 +84,8 @@
                 "description": "Escape sequence"
             },
             {
-                "id": "link",
-                "description": "Hyperlink"
-            },
-            {
                 "id": "raw",
                 "description": "Raw text"
-            },
-            {
-                "id": "label",
-                "description": "Label"
-            },
-            {
-                "id": "ref",
-                "description": "Reference to a label"
-            },
-            {
-                "id": "heading",
-                "description": "Heading"
-            },
-            {
-                "id": "marker",
-                "description": "List, enum, or term list marker"
-            },
-            {
-                "id": "term",
-                "description": "Term in a term list"
-            },
-            {
-                "id": "delim",
-                "description": "Delimiter of a different type of markup"
-            },
-            {
-                "id": "pol",
-                "description": "Interpolated variable"
             },
             {
                 "id": "error",
@@ -161,134 +96,12 @@
                 "description": "Text"
             }
         ],
-        "semanticTokenModifiers": [
-            {
-                "id": "math",
-                "description": "Math mode markup"
-            },
-            {
-                "id": "strong",
-                "description": "Strong (usually bolded) text"
-            },
-            {
-                "id": "emph",
-                "description": "Emphasized (usually italicized) text"
-            }
-        ],
-        "semanticTokenScopes": [
-            {
-                "language": "gnag",
-                "scopes": {
-                    "*.strong.emph": [
-                        "markup.bold.gnag markup.italic.gnag"
-                    ],
-                    "*.strong": [
-                        "markup.bold.gnag"
-                    ],
-                    "*.emph": [
-                        "markup.italic.gnag"
-                    ],
-                    "*.math": [
-                        "markup.math.gnag"
-                    ],
-                    "bool": [
-                        "constant.language.boolean.gnag"
-                    ],
-                    "punct": [
-                        "punctuation.gnag",
-                        "punctuation.definition.gnag"
-                    ],
-                    "escape": [
-                        "constant.character.escape.gnag",
-                        "keyword.operator.gnag",
-                        "punctuation.definition.gnag"
-                    ],
-                    "link": [
-                        "markup.underline.link.gnag"
-                    ],
-                    "raw": [
-                        "markup.inline.raw.gnag",
-                        "markup.raw.inline.gnag"
-                    ],
-                    "delim.math": [
-                        "punctuation.definition.math.gnag",
-                        "punctuation.definition.string.end.math.gnag",
-                        "string.quoted.other.gnag"
-                    ],
-                    "operator.math": [
-                        "keyword.operator.math.gnag"
-                    ],
-                    "heading": [
-                        "markup.heading.gnag"
-                    ],
-                    "marker": [
-                        "markup.list.gnag punctuation.definition.list.begin.gnag",
-                        "markup.list.gnag",
-                        "punctuation.definition.list.begin.gnag"
-                    ],
-                    "term": [
-                        "markup.list.term.gnag",
-                        "markup.bold.term.gnag"
-                    ],
-                    "label": [
-                        "entity.name.label.gnag"
-                    ],
-                    "ref": [
-                        "markup.other.reference.gnag",
-                        "entity.name.label.gnag"
-                    ],
-                    "pol": [
-                        "meta.interpolation.gnag",
-                        "variable.gnag"
-                    ],
-                    "error": [
-                        "invalid.gnag"
-                    ]
-                }
-            }
-        ],
-        "commands": [
-            {
-                "command": "gnag-lsp.exportCurrentPdf",
-                "title": "Export the currently open file as PDF",
-                "category": "Gnag"
-            },
-            {
-                "command": "gnag-lsp.showPdf",
-                "title": "Show the compiled PDF of the currently opened gnag file",
-                "category": "Gnag",
-                "icon": "$(open-preview)"
-            },
-            {
-                "command": "gnag-lsp.clearCache",
-                "title": "Clear all cached resources",
-                "category": "Gnag"
-            }
-        ],
-        "menus": {
-            "commandPalette": [
-                {
-                    "command": "gnag-lsp.exportCurrentPdf",
-                    "when": "editorLangId == gnag"
-                },
-                {
-                    "command": "gnag-lsp.clearCache",
-                    "when": "editorLangId == gnag"
-                }
-            ],
-            "editor/title": [
-                {
-                    "command": "gnag-lsp.showPdf",
-                    "group": "navigation",
-                    "when": "editorLangId == gnag"
-                }
-            ]
-        }
+        "semanticTokenModifiers": [],
+        "semanticTokenScopes": [],
+        "menus": {}
     },
     "activationEvents": [
-        "onLanguage:gnag",
-        "onCommand:gnag-lsp.exportCurrentPdf",
-        "onCommand:gnag-lsp.clearCache"
+        "onLanguage:gnag"
     ],
     "scripts": {
         "build-base": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node16",

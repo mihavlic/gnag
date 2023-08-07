@@ -12,8 +12,10 @@ use crate::{
 };
 
 pub struct Connection {
-    pub receiver: mpsc::Receiver<io::Result<Message>>,
-    pub sender: mpsc::Sender<Message>,
+    receiver: mpsc::Receiver<io::Result<Message>>,
+    sender: mpsc::Sender<Message>,
+    receive_handler: Option<fn(&io::Result<Message>)>,
+    send_handler: Option<fn(&Message)>,
 }
 
 pub struct IoThreads {
@@ -29,6 +31,23 @@ impl IoThreads {
 }
 
 impl Connection {
+    pub fn new(
+        receiver: mpsc::Receiver<io::Result<Message>>,
+        sender: mpsc::Sender<Message>,
+    ) -> Connection {
+        Self {
+            receiver,
+            sender,
+            receive_handler: None,
+            send_handler: None,
+        }
+    }
+    pub fn set_receive_inspect(&mut self, fun: fn(&io::Result<Message>)) {
+        self.receive_handler = Some(fun);
+    }
+    pub fn set_send_inspect(&mut self, fun: fn(&Message)) {
+        self.send_handler = Some(fun);
+    }
     pub fn stdio() -> (Connection, IoThreads) {
         // the type of `io::stdin().lock()` is !Send so we can't use ['Self::custom()']
         Self::custom_loop(
@@ -66,16 +85,13 @@ impl Connection {
             sender: sender_join,
         };
 
-        let connection = Connection {
-            receiver: receiver,
-            sender: sender,
-        };
+        let connection = Connection::new(receiver, sender);
 
         (connection, io)
     }
     pub fn initialize_start(&self) -> Result<(RequestId, serde_json::Value), ProtocolError> {
         loop {
-            match self.receiver.recv()? {
+            match self.receive()? {
                 Ok(Message::Request(req)) if req.is_initialize() => {
                     return Ok((req.id, req.params));
                 }
@@ -112,7 +128,7 @@ impl Connection {
     ) -> Result<(), ProtocolError> {
         let resp = Response::new_ok(initialize_id, initialize_result);
         self.send(resp)?;
-        match self.receiver.recv()? {
+        match self.receive()? {
             Ok(Message::Notification(n)) if n.is_initialized() => Ok(()),
             Ok(msg) => Err(ProtocolError(format!(
                 r#"expected initialized notification, got: {msg:?}"#
@@ -140,7 +156,7 @@ impl Connection {
     pub fn shutdown_and_exit(&self, id: RequestId) -> Result<(), ProtocolError> {
         let resp = Response::new_ok(id, ());
         self.send(resp)?;
-        match &self.receiver.recv_timeout(Duration::from_secs(10))? {
+        match &self.receive_timeout(Duration::from_secs(10))? {
             Ok(Message::Notification(n)) if n.is_exit() => (),
             Ok(msg) => {
                 return Err(ProtocolError(format!(
@@ -156,7 +172,54 @@ impl Connection {
         Ok(())
     }
     pub fn send<T: Into<Message>>(&self, message: T) -> Result<(), mpsc::SendError<Message>> {
-        self.sender.send(message.into())
+        let message = message.into();
+        if let Some(fun) = self.send_handler {
+            fun(&message);
+        }
+        self.sender.send(message)
+    }
+
+    pub fn receive(&self) -> Result<io::Result<Message>, mpsc::RecvError> {
+        let res = self.receiver.recv();
+        if let Some(fun) = self.receive_handler {
+            if let Ok(message) = &res {
+                fun(message);
+            }
+        }
+        res
+    }
+    pub fn receive_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<io::Result<Message>, mpsc::RecvTimeoutError> {
+        let res = self.receiver.recv_timeout(timeout);
+        if let Some(fun) = self.receive_handler {
+            if let Ok(message) = &res {
+                fun(message);
+            }
+        }
+        res
+    }
+    pub fn try_receive(&self) -> Result<io::Result<Message>, mpsc::TryRecvError> {
+        let res = self.receiver.try_recv();
+        if let Some(fun) = self.receive_handler {
+            if let Ok(message) = &res {
+                fun(message);
+            }
+        }
+        res
+    }
+    pub fn receive_iter(&self) -> ReceiveIter<'_> {
+        ReceiveIter(self)
+    }
+}
+
+pub struct ReceiveIter<'a>(&'a Connection);
+impl<'a> Iterator for ReceiveIter<'a> {
+    type Item = io::Result<Message>;
+    fn next(&mut self) -> Option<Self::Item> {
+        // the iterator contract is preserved, once recv() returns None, it can never send anything else
+        self.0.receive().ok()
     }
 }
 
@@ -175,8 +238,9 @@ fn receiver_loop(receiver: &mut dyn io::BufRead, sender: mpsc::Sender<io::Result
 }
 
 pub fn sender_loop(sender: &mut dyn io::Write, receiver: mpsc::Receiver<Message>) {
+    let mut scratch = Vec::new();
     while let Ok(message) = receiver.recv() {
-        match message._write(sender) {
+        match message._write(sender, &mut scratch) {
             Ok(()) => {}
             Err(e) => {
                 if e.kind() == io::ErrorKind::UnexpectedEof {

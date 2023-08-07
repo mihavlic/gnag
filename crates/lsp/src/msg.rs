@@ -174,21 +174,25 @@ impl Message {
         let msg = serde_json::from_slice(scratch)?;
         Ok(msg)
     }
-    pub fn write(self, writer: &mut impl Write) -> io::Result<()> {
-        self._write(writer)
+    pub fn write(self, writer: &mut impl Write, scratch: &mut Vec<u8>) -> io::Result<()> {
+        self._write(writer, scratch)
     }
-    pub fn _write(self, writer: &mut dyn Write) -> io::Result<()> {
+    pub fn _write(self, writer: &mut dyn Write, mut scratch: &mut Vec<u8>) -> io::Result<()> {
         #[derive(Serialize)]
         struct JsonRpc {
             jsonrpc: &'static str,
             #[serde(flatten)]
             msg: Message,
         }
-        let text = serde_json::to_string(&JsonRpc {
-            jsonrpc: "2.0",
-            msg: self,
-        })?;
-        write_msg_text(writer, &text)
+        scratch.clear();
+        serde_json::to_writer(
+            &mut scratch,
+            &JsonRpc {
+                jsonrpc: "2.0",
+                msg: self,
+            },
+        )?;
+        write_msg_text(writer, scratch)
     }
 }
 
@@ -373,9 +377,9 @@ fn read_msg_text(reader: &mut dyn BufRead, buf: &mut Vec<u8>) -> io::Result<()> 
     Ok(())
 }
 
-fn write_msg_text(out: &mut dyn Write, msg: &str) -> io::Result<()> {
+fn write_msg_text(out: &mut dyn Write, msg: &[u8]) -> io::Result<()> {
     write!(out, "Content-Length: {}\r\n\r\n", msg.len())?;
-    out.write_all(msg.as_bytes())?;
+    out.write_all(msg)?;
     out.flush()?;
     Ok(())
 }

@@ -44,7 +44,7 @@ fn main() {
         let cx = ConvertCtx::new(&input);
         let file = file::File::new(&cx, &cst, &arena);
         dbg!(file.ir_rules);
-        cx.report_errors("grammar.gng", &mut std::io::stdout().lock());
+        // cx.report_errors("grammar.gng", &mut std::io::stdout().lock());
     }
 
     // profiling::finish_frame!();

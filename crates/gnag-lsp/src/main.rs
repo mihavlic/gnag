@@ -1,16 +1,21 @@
-use std::error::Error;
-use std::str::FromStr;
+mod ctx;
+mod ext;
+mod linemap;
+mod tokens;
 
+use std::str::FromStr;
+use std::sync::mpsc;
+
+use anyhow::Context;
+use ctx::{Config, Ctx};
 use lsp::error::ExtractError;
-use lsp::msg::{Message, Request, RequestId, Response};
-use lsp_types::OneOf;
-use lsp_types::{
-    request::GotoDefinition, GotoDefinitionResponse, InitializeParams, ServerCapabilities,
-};
+use lsp::msg::{ErrorCode, Message, Request, RequestId, Response};
+use lsp_types::*;
 
 use lsp::connection::Connection;
+use tokens::{TokenModifier, TokenType};
 
-fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
+fn main() {
     let level = std::env::var("RUST_LOG").unwrap_or_else(|_| "TRACE".to_owned());
     let level = log::LevelFilter::from_str(&level).unwrap();
 
@@ -23,6 +28,12 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         simplelog::ColorChoice::Never,
     )
     .unwrap();
+
+    // <https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#initialize>
+    // The server is not allowed to send any requests or notifications to the client until it has
+    // responded with an InitializeResult, with the exception that during the initialize request
+    // the server is allowed to send the notifications `window/showMessage`, `window/logMessage` and
+    // `telemetry/event` as well as the `window/showMessageRequest` request to the client
 
     let (mut connection, io_threads) = Connection::stdio();
     if level == log::Level::Trace {
@@ -39,49 +50,145 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         });
     }
 
-    let server_capabilities = serde_json::to_value(&ServerCapabilities {
-        definition_provider: Some(OneOf::Left(true)),
-        ..Default::default()
-    })
-    .unwrap();
+    let config = init(&connection).unwrap();
+    let cx = Ctx::new(config);
 
-    let initialization_params = connection.initialize(server_capabilities).unwrap();
-    main_loop(connection, initialization_params).unwrap();
+    main_loop(connection, cx).unwrap();
     io_threads.join();
-
-    Ok(())
 }
 
-fn main_loop(
-    connection: Connection,
-    params: serde_json::Value,
-) -> Result<(), Box<dyn Error + Sync + Send>> {
-    let _params: InitializeParams = serde_json::from_value(params).unwrap();
+fn init(connection: &Connection) -> anyhow::Result<Config> {
+    let (id, params) = connection.initialize_start()?;
+
+    let config = Config::new(params.initialization_options.unwrap())?;
+
+    let semantic_tokens_provider = config.semantic_tokens.then(|| SemanticTokensOptions {
+        legend: SemanticTokensLegend {
+            token_types: TokenType::types().to_vec(),
+            token_modifiers: TokenModifier::types().to_vec(),
+        },
+        full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
+        ..Default::default()
+    });
+
+    let capabilities = ServerCapabilities {
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: None,
+            work_done_progress_options: WorkDoneProgressOptions {
+                work_done_progress: None,
+            },
+        }),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![String::from(".")]),
+            ..Default::default()
+        }),
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
+                save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                ..Default::default()
+            },
+        )),
+        semantic_tokens_provider: semantic_tokens_provider
+            .map(SemanticTokensServerCapabilities::SemanticTokensOptions),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![],
+            work_done_progress_options: WorkDoneProgressOptions {
+                work_done_progress: None,
+            },
+        }),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        position_encoding: Default::default(),
+        type_definition_provider: Default::default(),
+        implementation_provider: Default::default(),
+        references_provider: Default::default(),
+        document_highlight_provider: Default::default(),
+        code_action_provider: Default::default(),
+        code_lens_provider: Default::default(),
+        document_formatting_provider: Default::default(),
+        document_range_formatting_provider: Default::default(),
+        document_on_type_formatting_provider: Default::default(),
+        rename_provider: Default::default(),
+        document_link_provider: Default::default(),
+        color_provider: Default::default(),
+        folding_range_provider: Default::default(),
+        declaration_provider: Default::default(),
+        workspace: Default::default(),
+        call_hierarchy_provider: Default::default(),
+        moniker_provider: Default::default(),
+        inline_value_provider: Default::default(),
+        inlay_hint_provider: Default::default(),
+        linked_editing_range_provider: Default::default(),
+        experimental: Default::default(),
+    };
+
+    let response = InitializeResult {
+        capabilities,
+        server_info: Some(ServerInfo {
+            name: "gnag-lsp".to_owned(),
+            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        }),
+    };
+
+    connection.initialize_finish(id, &response)?;
+
+    Ok(config)
+}
+
+fn main_loop(connection: Connection, cx: Ctx) -> anyhow::Result<()> {
     for msg in connection.receive_iter() {
-        match msg.unwrap() {
-            Message::Request(req) if req.is_shutdown() => {
-                connection.shutdown_and_exit(req.id)?;
-                break;
-            }
+        match msg.context("Stdin reader failed")? {
             Message::Request(req) => {
-                match cast::<GotoDefinition>(req) {
-                    Ok((id, params)) => {
-                        let result = Some(GotoDefinitionResponse::Array(Vec::new()));
-                        let result = serde_json::to_value(&result).unwrap();
-                        let resp = Response {
-                            id,
-                            result: Some(result),
-                            error: None,
-                        };
-                        connection.send(Message::Response(resp))?;
-                        continue;
-                    }
-                    Err(err @ ExtractError::JsonError { .. }) => panic!("{err:?}"),
-                    Err(ExtractError::MethodMismatch) => {}
+                let Request { id, method, params } = req;
+
+                let error = |code: ErrorCode, message: String| {
+                    connection.send(Response::new_err(id.clone(), code, message))
                 };
-                // ...
+
+                let response =
+                    |response: &dyn JsonSerialize| -> Result<(), mpsc::SendError<Message>> {
+                        connection.send(Message::Response(Response {
+                            id: id.clone(),
+                            result: Some(response.json_serialize().unwrap()),
+                            error: None,
+                        }))
+                    };
+
+                match &*method {
+                    _ if method.starts_with("$") => {
+                        // <https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#dollarRequests>
+                        //   If a server or client receives a request starting with ‘$/’ it must
+                        //   error the request with error code MethodNotFound
+                        error(
+                            ErrorCode::MethodNotFound,
+                            "Request methods starting with '$' are automatically errored.".into(),
+                        )?;
+                    }
+                    "shutdown" => {
+                        connection.shutdown_and_exit(id)?;
+                        break;
+                    }
+                    "textDocument/definition" => {
+                        response(&GotoDefinitionResponse::Array(Vec::new()))?;
+                    }
+                    _ => {
+                        error(
+                            ErrorCode::RequestFailed,
+                            format!("Unsupported request '{}'", method),
+                        )?;
+                    }
+                }
             }
-            _ => {}
+            Message::Notification(not) => match not.method {
+                _ => {}
+            },
+            Message::Response(res) => unreachable!("A server can't get a Response?"),
         }
     }
     Ok(())
@@ -93,4 +200,14 @@ where
     R::Params: serde::de::DeserializeOwned,
 {
     req.extract(R::METHOD)
+}
+
+trait JsonSerialize {
+    fn json_serialize(&self) -> Result<serde_json::Value, serde_json::Error>;
+}
+
+impl<T: serde::Serialize> JsonSerialize for T {
+    fn json_serialize(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
 }

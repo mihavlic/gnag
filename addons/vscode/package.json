@@ -30,16 +30,8 @@
                 "gnag-lsp.semanticTokens": {
                     "title": "Semantic tokens mode",
                     "description": "Enable or disable semantic tokens (LSP syntax highlighting)",
-                    "type": "string",
-                    "default": "enable",
-                    "enum": [
-                        "enable",
-                        "disable"
-                    ],
-                    "enumDescriptions": [
-                        "Use semantic tokens for syntax highlighting",
-                        "Do not use semantic tokens for syntax highlighting"
-                    ]
+                    "default": "true",
+                    "type": "bool"
                 },
                 "gnag-lsp.serverPath": {
                     "title": "Path to server executable",
@@ -74,28 +66,14 @@
                 }
             }
         ],
-        "semanticTokenTypes": [
+        "grammars": [
             {
-                "id": "punct",
-                "description": "Punctuation in code"
-            },
-            {
-                "id": "escape",
-                "description": "Escape sequence"
-            },
-            {
-                "id": "raw",
-                "description": "Raw text"
-            },
-            {
-                "id": "error",
-                "description": "Syntax error"
-            },
-            {
-                "id": "text",
-                "description": "Text"
+                "language": "gnag",
+                "scopeName": "source.gnag",
+                "path": "./syntaxes/gnag.tmLanguage.json"
             }
         ],
+        "semanticTokenTypes": [],
         "semanticTokenModifiers": [],
         "semanticTokenScopes": [],
         "menus": {}

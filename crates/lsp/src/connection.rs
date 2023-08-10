@@ -89,11 +89,17 @@ impl Connection {
 
         (connection, io)
     }
-    pub fn initialize_start(&self) -> Result<(RequestId, serde_json::Value), ProtocolError> {
+    // read the spec
+    // <https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#initialize>
+    pub fn initialize_start(
+        &self,
+    ) -> Result<(RequestId, lsp_types::InitializeParams), ProtocolError> {
         loop {
             match self.receive()? {
                 Ok(Message::Request(req)) if req.is_initialize() => {
-                    return Ok((req.id, req.params));
+                    let params = serde_json::from_value(req.params)
+                        .map_err(|e| ProtocolError(e.to_string()))?;
+                    return Ok((req.id, params));
                 }
                 // Respond to non-initialize requests with ServerNotInitialized
                 Ok(Message::Request(req)) => {
@@ -103,11 +109,8 @@ impl Connection {
                         format!("expected initialize request, got {req:?}"),
                     );
                     self.send(resp)?;
-                    continue;
                 }
-                Ok(Message::Notification(n)) if !n.is_exit() => {
-                    continue;
-                }
+                Ok(Message::Notification(n)) if !n.is_exit() => {}
                 Ok(msg) => {
                     return Err(ProtocolError(format!(
                         "expected initialize request, got {msg:?}"
@@ -124,10 +127,11 @@ impl Connection {
     pub fn initialize_finish(
         &self,
         initialize_id: RequestId,
-        initialize_result: serde_json::Value,
+        initialize_response: &lsp_types::InitializeResult,
     ) -> Result<(), ProtocolError> {
-        let resp = Response::new_ok(initialize_id, initialize_result);
+        let resp = Response::new_ok(initialize_id, initialize_response);
         self.send(resp)?;
+
         match self.receive()? {
             Ok(Message::Notification(n)) if n.is_initialized() => Ok(()),
             Ok(msg) => Err(ProtocolError(format!(
@@ -137,20 +141,6 @@ impl Connection {
                 "expected initialized notification, got error: {e}",
             ))),
         }
-    }
-    pub fn initialize(
-        &self,
-        server_capabilities: serde_json::Value,
-    ) -> Result<serde_json::Value, ProtocolError> {
-        let (id, params) = self.initialize_start()?;
-
-        let initialize_result = serde_json::json!({
-            "capabilities": server_capabilities,
-        });
-
-        self.initialize_finish(id, initialize_result)?;
-
-        Ok(params)
     }
     /// Acknowledges the Shutdown request and waits for Exit. You may want to handle shutdown differently.
     pub fn shutdown_and_exit(&self, id: RequestId) -> Result<(), ProtocolError> {

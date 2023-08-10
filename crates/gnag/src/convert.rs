@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{self, RefCell},
     collections::{hash_map::Entry, HashMap},
 };
 
@@ -10,12 +10,11 @@ use crate::{
         self as f, AstItem, AstItemHandle, RuleDef, RuleExpr, RuleHandle, TokenDef, TokenHandle,
     },
     handle::HandleVec,
-    LineMapping, ParseError, StrSpan,
+    ParseError, StrSpan,
 };
 
 pub struct ConvertCtx<'a> {
     pub src: &'a str,
-    line_mapping: LineMapping,
     errors: RefCell<Vec<ParseError>>,
 }
 
@@ -23,7 +22,6 @@ impl<'a> ConvertCtx<'a> {
     pub fn new(src: &'a str) -> Self {
         Self {
             src,
-            line_mapping: LineMapping::new(src, crate::NewlineStyle::Lf),
             errors: RefCell::new(Vec::new()),
         }
     }
@@ -33,16 +31,8 @@ impl<'a> ConvertCtx<'a> {
             err: err.to_string(),
         })
     }
-    pub fn report_errors(&self, file_name: &str, to: &mut dyn std::io::Write) {
-        let mut errors = self.errors.borrow().clone();
-        errors.sort_by_key(|e| e.span);
-        for e in errors {
-            let (line, column) = self.line_mapping.lookup(self.src.as_bytes(), e.span.start);
-            let line = line + 1;
-            let column = column + 1;
-            let err = e.err;
-            _ = writeln!(to, "{file_name}:{line}:{column}\n  {err}");
-        }
+    pub fn get_errors(&self) -> cell::Ref<'_, Vec<ParseError>> {
+        self.errors.borrow()
     }
 }
 

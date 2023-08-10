@@ -204,10 +204,10 @@ impl Response {
             error: None,
         }
     }
-    pub fn new_err(id: RequestId, code: impl Into<i32>, message: String) -> Response {
+    pub fn new_err(id: RequestId, code: impl Into<i32>, message: impl Into<String>) -> Response {
         let error = ResponseError {
             code: code.into(),
-            message,
+            message: message.into(),
             data: None,
         };
         Response {
@@ -356,6 +356,11 @@ fn read_msg_text(reader: &mut dyn BufRead, buf: &mut Vec<u8>) -> io::Result<()> 
                 size = Some(content_length);
             }
             b"Content-Type" => {
+                // <https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#contentPart>
+                //   The content part is encoded using the charset provided in the Content-Type field.
+                //   It defaults to utf-8, which is the only encoding supported right now. If a server
+                //   or client receives a header with a different encoding than utf-8 it should
+                //   respond with an error.
                 assert_eq!(
                     header_value, b"application/vscode-jsonrpc; charset=utf-8",
                     "Other content-types are unsupported"

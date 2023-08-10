@@ -1,0 +1,55 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "gnag",
+    "scopeName": "source.gnag",
+    "patterns": [
+        {
+            "comment": "cursed single quote strings",
+            "name": "string.quoted.double.gnag",
+            "begin": "(r?)(#*)(')",
+            "beginCaptures": {
+                "1": {
+                    "name": "string.quoted.raw.gnag"
+                },
+                "2": {
+                    "name": "punctuation.definition.string.raw.gnag"
+                },
+                "3": {
+                    "name": "punctuation.definition.string.gnag"
+                }
+            },
+            "end": "(')(\\2)",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.definition.string.gnag"
+                },
+                "2": {
+                    "name": "punctuation.definition.string.raw.gnag"
+                }
+            },
+            "patterns": [
+                {
+                    "match": "\\\\.",
+                    "name": "constant.character.escape.gnag"
+                }
+            ]
+        },
+        {
+            "comment": "line comments",
+            "name": "comment.line.double-slash.gnag",
+            "match": "\\s*//.*"
+        },
+        {
+            "match": "\\b(rule|inline|tokenizer)\\b",
+            "name": "keyword.gnag"
+        },
+        {
+            "match": "\\*|\\+|\\||\\?",
+            "name": "keyword.operator.gnag"
+        },
+        {
+            "match": "\\b[a-zA-Z0-9_]+\\b",
+            "name": "entity.name.function.gnag"
+        }
+    ]
+}

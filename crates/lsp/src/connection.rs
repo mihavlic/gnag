@@ -159,6 +159,7 @@ impl Connection {
                 )))
             }
         }
+
         Ok(())
     }
     pub fn send<T: Into<Message>>(&self, message: T) -> Result<(), mpsc::SendError<Message>> {

@@ -72,18 +72,18 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
     });
 
     let capabilities = ServerCapabilities {
-        signature_help_provider: Some(SignatureHelpOptions {
-            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
-            retrigger_characters: None,
-            work_done_progress_options: WorkDoneProgressOptions {
-                work_done_progress: None,
-            },
-        }),
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
-        completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![String::from(".")]),
-            ..Default::default()
-        }),
+        // signature_help_provider: Some(SignatureHelpOptions {
+        //     trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+        //     retrigger_characters: None,
+        //     work_done_progress_options: WorkDoneProgressOptions {
+        //         work_done_progress: None,
+        //     },
+        // }),
+        // hover_provider: Some(HoverProviderCapability::Simple(true)),
+        // completion_provider: Some(CompletionOptions {
+        //     trigger_characters: Some(vec![String::from(".")]),
+        //     ..Default::default()
+        // }),
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
@@ -92,40 +92,13 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
                 ..Default::default()
             },
         )),
-        semantic_tokens_provider: semantic_tokens_provider
-            .map(SemanticTokensServerCapabilities::SemanticTokensOptions),
-        execute_command_provider: Some(ExecuteCommandOptions {
-            commands: vec![],
-            work_done_progress_options: WorkDoneProgressOptions {
-                work_done_progress: None,
-            },
-        }),
-        document_symbol_provider: Some(OneOf::Left(true)),
-        workspace_symbol_provider: Some(OneOf::Left(true)),
-        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+        // semantic_tokens_provider: semantic_tokens_provider
+        //     .map(SemanticTokensServerCapabilities::SemanticTokensOptions),
+        // document_symbol_provider: Some(OneOf::Left(true)),
+        // workspace_symbol_provider: Some(OneOf::Left(true)),
+        // selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
-        position_encoding: Default::default(),
-        type_definition_provider: Default::default(),
-        implementation_provider: Default::default(),
-        references_provider: Default::default(),
-        document_highlight_provider: Default::default(),
-        code_action_provider: Default::default(),
-        code_lens_provider: Default::default(),
-        document_formatting_provider: Default::default(),
-        document_range_formatting_provider: Default::default(),
-        document_on_type_formatting_provider: Default::default(),
-        rename_provider: Default::default(),
-        document_link_provider: Default::default(),
-        color_provider: Default::default(),
-        folding_range_provider: Default::default(),
-        declaration_provider: Default::default(),
-        workspace: Default::default(),
-        call_hierarchy_provider: Default::default(),
-        moniker_provider: Default::default(),
-        inline_value_provider: Default::default(),
-        inlay_hint_provider: Default::default(),
-        linked_editing_range_provider: Default::default(),
-        experimental: Default::default(),
+        ..Default::default()
     };
 
     let response = InitializeResult {
@@ -188,7 +161,7 @@ fn main_loop(connection: Connection, cx: Ctx) -> anyhow::Result<()> {
             Message::Notification(not) => match not.method {
                 _ => {}
             },
-            Message::Response(res) => unreachable!("A server can't get a Response?"),
+            Message::Response(_) => unreachable!("A server can't get a Response?"),
         }
     }
     Ok(())

@@ -32,7 +32,9 @@ export function activate(context: ExtensionContext): Promise<void> {
         initializationOptions: config,
     };
 
+    
     client = new LanguageClient("gnag-lsp", "Gnag Language Server", serverOptions, clientOptions);
+    client.outputChannel.appendLine("running server at '" + serverCommand + "'");
 
     context.subscriptions.push(
         commands.registerCommand("gnag-lsp.restartServer", () => client?.restart())

@@ -4,8 +4,38 @@
     "scopeName": "source.gnag",
     "patterns": [
         {
+            "include": "#toplevel"
+        }
+    ],
+    "repository": {
+        "toplevel": {
+            "patterns": [
+                {
+                    "include": "#string"
+                },
+                {
+                    "include": "#comment"
+                },
+                {
+                    "include": "#keyword"
+                },
+                {
+                    "include": "#operator"
+                },
+                {
+                    "include": "#annotation"
+                },
+                {
+                    "include": "#call"
+                },
+                {
+                    "include": "#identifier"
+                }
+            ]
+        },
+        "string": {
             "comment": "cursed single quote strings",
-            "name": "string.quoted.double.gnag",
+            "name": "string.quoted.single.gnag",
             "begin": "(r?)(#*)(')",
             "beginCaptures": {
                 "1": {
@@ -34,22 +64,58 @@
                 }
             ]
         },
-        {
+        "comment": {
             "comment": "line comments",
             "name": "comment.line.double-slash.gnag",
             "match": "\\s*//.*"
         },
-        {
+        "keyword": {
             "match": "\\b(rule|inline|tokenizer)\\b",
             "name": "keyword.gnag"
         },
-        {
+        "operator": {
             "match": "\\*|\\+|\\||\\?",
             "name": "keyword.operator.gnag"
         },
-        {
+        "annotation": {
+            "match": "(@)(\\w+)",
+            "name": "meta.declaration.annotation.gnag",
+            "captures": {
+                "1": {
+                    "name": "punctuation.definition.annotation.gnag"
+                },
+                "2": {
+                    "name": "storage.type.annotation.gnag"
+                }
+            }
+        },
+        "call": {
+            "comment": "function call",
+            "name": "",
+            "begin": "(<)(\\w+)",
+            "beginCaptures": {
+                "1": {
+                    "name": "punctuation.definition.call.gnag"
+                },
+                "2": {
+                    "name": "entity.name.function.gnag"
+                }
+            },
+            "end": "(>)",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.definition.call.gnag"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#toplevel"
+                }
+            ]
+        },
+        "identifier": {
             "match": "\\b[a-zA-Z0-9_]+\\b",
-            "name": "entity.name.function.gnag"
+            "name": "entity.name.type.struct.gnag"
         }
-    ]
+    }
 }

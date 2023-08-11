@@ -28,13 +28,11 @@
             "title": "Gnag LSP",
             "properties": {
                 "gnag-lsp.semanticTokens": {
-                    "title": "Semantic tokens mode",
                     "description": "Enable or disable semantic tokens (LSP syntax highlighting)",
-                    "default": "true",
-                    "type": "bool"
+                    "default": true,
+                    "type": "boolean"
                 },
                 "gnag-lsp.serverPath": {
-                    "title": "Path to server executable",
                     "description": "The extension can use a local gnag-lsp executable instead of the one bundled with the extension. This setting controls the path to the executable.",
                     "type": [
                         "string",
@@ -70,7 +68,7 @@
             {
                 "language": "gnag",
                 "scopeName": "source.gnag",
-                "path": "./syntaxes/gnag.tmLanguage.json"
+                "path": "./gnag.tmLanguage.json"
             }
         ],
         "semanticTokenTypes": [],

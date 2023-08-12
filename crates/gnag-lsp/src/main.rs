@@ -1,4 +1,5 @@
 mod ctx;
+mod executor;
 mod ext;
 mod linemap;
 mod tokens;
@@ -71,19 +72,15 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
         ..Default::default()
     });
 
+    if semantic_tokens_provider.is_some() {
+        log::warn!("TODO semantic tokens");
+    }
+
     let capabilities = ServerCapabilities {
-        // signature_help_provider: Some(SignatureHelpOptions {
-        //     trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
-        //     retrigger_characters: None,
-        //     work_done_progress_options: WorkDoneProgressOptions {
-        //         work_done_progress: None,
-        //     },
-        // }),
-        // hover_provider: Some(HoverProviderCapability::Simple(true)),
-        // completion_provider: Some(CompletionOptions {
-        //     trigger_characters: Some(vec![String::from(".")]),
-        //     ..Default::default()
-        // }),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![]),
+            ..Default::default()
+        }),
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
@@ -92,12 +89,17 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
                 ..Default::default()
             },
         )),
-        // semantic_tokens_provider: semantic_tokens_provider
-        //     .map(SemanticTokensServerCapabilities::SemanticTokensOptions),
-        // document_symbol_provider: Some(OneOf::Left(true)),
-        // workspace_symbol_provider: Some(OneOf::Left(true)),
-        // selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
+            identifier: None,
+            inter_file_dependencies: false,
+            workspace_diagnostics: false,
+            work_done_progress_options: WorkDoneProgressOptions {
+                work_done_progress: None,
+            },
+        })),
         ..Default::default()
     };
 
@@ -114,7 +116,7 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
     Ok(config)
 }
 
-fn main_loop(connection: Connection, cx: Ctx) -> anyhow::Result<()> {
+fn main_loop(connection: Connection, mut cx: Ctx) -> anyhow::Result<()> {
     for msg in connection.receive_iter() {
         match msg.context("Stdin reader failed")? {
             Message::Request(req) => {
@@ -158,9 +160,19 @@ fn main_loop(connection: Connection, cx: Ctx) -> anyhow::Result<()> {
                     }
                 }
             }
-            Message::Notification(not) => match not.method {
-                _ => {}
-            },
+            Message::Notification(not) => {
+                let lsp::msg::Notification { method, params } = not;
+
+                use lsp_types::notification::*;
+                match &*method {
+                    "textDocument/didOpen" => {
+                        let params = params.to::<DidOpenTextDocument>()?;
+                        // cx.file = params.
+                    }
+                    "textDocument/didChange" => {}
+                    _ => {}
+                }
+            }
             Message::Response(_) => unreachable!("A server can't get a Response?"),
         }
     }
@@ -173,6 +185,16 @@ where
     R::Params: serde::de::DeserializeOwned,
 {
     req.extract(R::METHOD)
+}
+
+trait NotificationExtract {
+    fn to<N: lsp_types::notification::Notification>(self) -> serde_json::Result<N::Params>;
+}
+
+impl NotificationExtract for serde_json::Value {
+    fn to<N: lsp_types::notification::Notification>(self) -> serde_json::Result<N::Params> {
+        serde_json::from_value(self)
+    }
 }
 
 trait JsonSerialize {

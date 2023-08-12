@@ -1,3 +1,5 @@
+use std::ops;
+
 /// The type of a byte offset in a string
 // TODO add a feature to change this into a usize
 pub type Offset = u32;
@@ -51,6 +53,49 @@ impl From<(u32, u32)> for Utf16Pos {
     }
 }
 
+fn parse_lines(
+    start_offset: Offset,
+    bytes: &[u8],
+
+    prev_end: &mut u32,
+    saw_unicode: &mut bool,
+    lines: &mut Vec<(Offset, bool)>,
+) {
+    assert!(start_offset as usize + bytes.len() as usize <= Offset::MAX as usize);
+
+    let mut bytes = (start_offset..start_offset + bytes.len() as Offset).zip(bytes.iter().copied());
+
+    // utf8 bytes are either encoding an ascii character or are >=128
+    // so we can search for ascii characters by interpreting the string as bytes
+    // and not getting any false positives
+
+    // TODO use memchr?
+    while let Some((mut i, b)) = bytes.next() {
+        // we recognize \r\n  \n  \r as newlines
+        // the LSP spec does the same
+        match b {
+            b'\n' | b'\r' => {
+                if b == b'\r' {
+                    if let Some((new_i, b'\n')) = bytes.clone().next() {
+                        bytes.next();
+                        i = new_i;
+                    }
+                }
+                lines.push((*prev_end, *saw_unicode));
+                *saw_unicode = false;
+                *prev_end = i + 1;
+            }
+            _ => {
+                if b >= 128 {
+                    *saw_unicode = true;
+                }
+            }
+        }
+    }
+
+    lines.push((*prev_end, *saw_unicode));
+}
+
 #[derive(Clone, Copy)]
 pub struct LineInfo {
     /// index of the line within the file
@@ -67,42 +112,9 @@ pub struct LineMap {
 
 impl LineMap {
     pub fn new(src: &str) -> Self {
-        assert!(src.len() <= Offset::MAX as usize);
         let mut lines = Vec::new();
 
-        let mut prev_end = 0;
-        let mut saw_unicode = false;
-        let mut bytes = src.bytes().enumerate();
-
-        // utf8 bytes are either encoding an ascii character or are >=128
-        // so we can search for ascii characters by interpreting the string as bytes
-        // and not getting any false positives
-
-        // TODO use memchr?
-        while let Some((mut i, b)) = bytes.next() {
-            // we recognize \r\n  \n  \r as newlines
-            // the LSP spec does the same
-            match b {
-                b'\n' | b'\r' => {
-                    if b == b'\r' {
-                        if let Some((new_i, b'\n')) = bytes.clone().next() {
-                            bytes.next();
-                            i = new_i;
-                        }
-                    }
-                    lines.push((prev_end, saw_unicode));
-                    saw_unicode = false;
-                    prev_end = i as Offset + 1;
-                }
-                _ => {
-                    if b >= 128 {
-                        saw_unicode = true;
-                    }
-                }
-            }
-        }
-
-        lines.push((prev_end, saw_unicode));
+        parse_lines(0, src.as_bytes(), &mut 0, &mut false, &mut lines);
 
         Self { lines }
     }
@@ -233,6 +245,95 @@ impl LineMap {
             let end = self.line_end(src, line);
             (line_start + character as Offset).min(end)
         }
+    }
+    pub fn replace_offset_range(
+        &mut self,
+        file: &mut String,
+        range: ops::Range<Offset>,
+        replace: &str,
+    ) {
+        assert!(range.start <= range.end);
+        assert!(range.start as usize <= file.len());
+        assert!(range.end as usize <= file.len());
+
+        let start = range.start as usize;
+        let end = range.end as usize;
+
+        // doing this does not invalidate the lookup structure, just have to remember to offset ranges past the replacement
+        file.replace_range(start..end, replace);
+
+        let prev_size = range.end - range.start;
+        let new_size = replace.len().try_into().unwrap();
+        let diff = prev_size.abs_diff(new_size);
+
+        // fast path for the majority of edits where only the content of a single line changes
+        let line = if file.as_bytes()[start..end]
+            .iter()
+            .copied()
+            .all(|b| b.is_ascii() && b != b'\n' && b != b'\n')
+            && replace
+                .bytes()
+                .all(|b| b.is_ascii() && b != b'\n' && b != b'\n')
+        {
+            self.offset_to_line(range.start).line
+        } else {
+            let start_line = self.offset_to_line(range.start);
+            let end_line = self.offset_to_line(range.end);
+
+            // can't use `self.line_end` because we need to apply the offset
+            let end_offset = {
+                self.lines
+                    .get((end_line.line + 1) as usize)
+                    .map(|line| {
+                        // fantastic
+                        if new_size > prev_size {
+                            line.0 + diff
+                        } else {
+                            line.0 - diff
+                        }
+                    })
+                    .unwrap_or_else(|| file.len().try_into().unwrap())
+            };
+
+            let len = self.lines.len();
+            let mut start_offset = start_line.line_start;
+            parse_lines(
+                start_offset,
+                &file.as_bytes()[start_offset as usize..end_offset as usize],
+                &mut start_offset,
+                &mut false,
+                &mut self.lines,
+            );
+
+            // .....xxxxx.....nnnnnn   - x/replaced  n/added  ./preserved elements
+            //
+
+            let added = self.lines.len() - len;
+            let replaced = (end_line.line - start_line.line + 1) as usize;
+
+            let mut write = start_line.line;
+            let mut read = len;
+            for _ in 0..added {
+                self.lines[write] = self.lines[read];
+                write += 1;
+                read += 1;
+            }
+
+            self.lines.truncate(start_line.line + added);
+
+            todo!()
+        };
+
+        let lines = &mut self.lines[(line + 1) as usize..];
+        if new_size > prev_size {
+            for (offset, _) in lines {
+                *offset += diff;
+            }
+        } else {
+            for (offset, _) in lines {
+                *offset -= diff;
+            }
+        };
     }
     /// Find the line which contains the offset and return its Offset is clamped to the end of `src`
     pub fn offset_to_line(&self, byte_offset: Offset) -> LineInfo {
@@ -444,6 +545,14 @@ mod tests {
             let text = "Hi!\nWorld";
             let map = LineMap::new(text);
             assert_eq!(map.lines, &[(0, false), (4, false)]);
+        }
+
+        #[test]
+        fn start_newline() {
+            //          0123 456789
+            let text = "\nHi!\nWorld";
+            let map = LineMap::new(text);
+            assert_eq!(map.lines, &[(0, false), (1, false)]);
         }
 
         #[rustfmt::skip]

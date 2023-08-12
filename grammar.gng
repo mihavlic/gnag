@@ -2,7 +2,7 @@
 tokenizer {
     @skip Whitespace '\s+'
     @skip Comment '//.*$'
-    @proc String {
+    String {
         let mut raw = false;
         if l.peek().unwrap() == b'r' {
             raw = true;
@@ -146,4 +146,4 @@ rule SeqExpr {
 
 inline rule BinExpr(a, b) {
     Expr '|' Expr
-}
+}l

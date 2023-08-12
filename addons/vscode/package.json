@@ -32,6 +32,11 @@
                     "default": true,
                     "type": "boolean"
                 },
+                "gnag-lsp.diagnosticsOnSave": {
+                    "description": "Push diagnostics (errors/warnings) when the file is saved, otherwise try to do so on every keystroke.",
+                    "default": true,
+                    "type": "boolean"
+                },
                 "gnag-lsp.serverPath": {
                     "description": "The extension can use a local gnag-lsp executable instead of the one bundled with the extension. This setting controls the path to the executable.",
                     "type": [

@@ -53,21 +53,17 @@ impl From<(u32, u32)> for Utf16Pos {
     }
 }
 
-fn parse_lines(
-    start_offset: Offset,
-    bytes: &[u8],
-
-    prev_end: &mut u32,
-    saw_unicode: &mut bool,
-    lines: &mut Vec<(Offset, bool)>,
-) {
+fn parse_lines(start_offset: Offset, bytes: &[u8], partial_reparse: bool) -> Vec<(Offset, bool)> {
     assert!(start_offset as usize + bytes.len() as usize <= Offset::MAX as usize);
 
+    let mut lines = Vec::new();
+
+    let mut saw_unicode = false;
+    let mut prev_end = start_offset;
     let mut bytes = (start_offset..start_offset + bytes.len() as Offset).zip(bytes.iter().copied());
 
-    // utf8 bytes are either encoding an ascii character or are >=128
-    // so we can search for ascii characters by interpreting the string as bytes
-    // and not getting any false positives
+    // utf8 bytes are either encoding an ascii character or are >=128 so we can search for ascii
+    // characters by interpreting the string as bytes without any false positives
 
     // TODO use memchr?
     while let Some((mut i, b)) = bytes.next() {
@@ -81,19 +77,28 @@ fn parse_lines(
                         i = new_i;
                     }
                 }
-                lines.push((*prev_end, *saw_unicode));
-                *saw_unicode = false;
-                *prev_end = i + 1;
+                lines.push((prev_end, saw_unicode));
+                saw_unicode = false;
+                prev_end = i + 1;
             }
             _ => {
                 if b >= 128 {
-                    *saw_unicode = true;
+                    saw_unicode = true;
                 }
             }
         }
     }
 
-    lines.push((*prev_end, *saw_unicode));
+    // partial_reparse, lines.is_empty()
+    // 0 0 | 1
+    // 0 1 | 1
+    // 1 0 | 0
+    // 1 1 | 1
+    if !partial_reparse || lines.is_empty() {
+        lines.push((prev_end, saw_unicode));
+    }
+
+    lines
 }
 
 #[derive(Clone, Copy)]
@@ -112,11 +117,9 @@ pub struct LineMap {
 
 impl LineMap {
     pub fn new(src: &str) -> Self {
-        let mut lines = Vec::new();
-
-        parse_lines(0, src.as_bytes(), &mut 0, &mut false, &mut lines);
-
-        Self { lines }
+        Self {
+            lines: parse_lines(0, src.as_bytes(), false),
+        }
     }
     /// Returns zero-based Line and Column offset in utf8 code units (u8). Offset is clamped to the end of `src`
     pub fn offset_to_utf8(&self, src: &str, offset: Offset) -> Utf8Pos {
@@ -250,7 +253,7 @@ impl LineMap {
         &mut self,
         file: &mut String,
         range: ops::Range<Offset>,
-        replace: &str,
+        replace_with: &str,
     ) {
         assert!(range.start <= range.end);
         assert!(range.start as usize <= file.len());
@@ -259,81 +262,76 @@ impl LineMap {
         let start = range.start as usize;
         let end = range.end as usize;
 
-        // doing this does not invalidate the lookup structure, just have to remember to offset ranges past the replacement
-        file.replace_range(start..end, replace);
-
         let prev_size = range.end - range.start;
-        let new_size = replace.len().try_into().unwrap();
+        let new_size = replace_with.len().try_into().unwrap();
         let diff = prev_size.abs_diff(new_size);
 
-        // fast path for the majority of edits where only the content of a single line changes
-        let line = if file.as_bytes()[start..end]
+        let file_plain_ascii = file.as_bytes()[start..end]
             .iter()
             .copied()
-            .all(|b| b.is_ascii() && b != b'\n' && b != b'\n')
-            && replace
+            .all(|b| b.is_ascii() && b != b'\n' && b != b'\n');
+
+        // doing this does not invalidate the lookup structure, just have to remember to offset ranges past the replacement
+        file.replace_range(start..end, replace_with);
+
+        // fast path for the majority of edits where the change affects only one line
+        let line = if file_plain_ascii
+            && replace_with
                 .bytes()
-                .all(|b| b.is_ascii() && b != b'\n' && b != b'\n')
+                .all(|b| b.is_ascii() && b != b'\n' && b != b'\r')
         {
             self.offset_to_line(range.start).line
         } else {
             let start_line = self.offset_to_line(range.start);
             let end_line = self.offset_to_line(range.end);
 
-            // can't use `self.line_end` because we need to apply the offset
-            let end_offset = {
+            // can't use `self.line_end()` because we need to apply the offset
+            let (end_offset, is_eof) = {
                 self.lines
                     .get((end_line.line + 1) as usize)
                     .map(|line| {
                         // fantastic
                         if new_size > prev_size {
-                            line.0 + diff
+                            (line.0 + diff, false)
                         } else {
-                            line.0 - diff
+                            (line.0 - diff, false)
                         }
                     })
-                    .unwrap_or_else(|| file.len().try_into().unwrap())
+                    .unwrap_or_else(|| (file.len().try_into().unwrap(), true))
             };
 
-            let len = self.lines.len();
-            let mut start_offset = start_line.line_start;
-            parse_lines(
-                start_offset,
-                &file.as_bytes()[start_offset as usize..end_offset as usize],
-                &mut start_offset,
-                &mut false,
-                &mut self.lines,
+            // we must not include the last line, let's have:
+            //  "aaaaa\nbbbb"
+            //     ^ edit first line
+            // the range `start_line.line_start..end_offset` contains this:
+            //  "aaaaa\n"
+            // now, the `parse_lines()` function would get to the end of the range and see a "\n",
+            // pushing the entry for the line which it was until then inspecting (0, false)
+            // at the end of the whole function, the very last line is pushed, which we don't want
+            // because we're already aware of the second line and will correct its offset later
+            let new_lines = parse_lines(
+                start_line.line_start,
+                &file.as_bytes()[start_line.line_start as usize..end_offset as usize],
+                !is_eof,
             );
 
-            // .....xxxxx.....nnnnnn   - x/replaced  n/added  ./preserved elements
-            //
+            self.lines
+                .splice(start_line.line as usize..=end_line.line as usize, new_lines);
 
-            let added = self.lines.len() - len;
-            let replaced = (end_line.line - start_line.line + 1) as usize;
-
-            let mut write = start_line.line;
-            let mut read = len;
-            for _ in 0..added {
-                self.lines[write] = self.lines[read];
-                write += 1;
-                read += 1;
-            }
-
-            self.lines.truncate(start_line.line + added);
-
-            todo!()
+            end_line.line
         };
 
-        let lines = &mut self.lines[(line + 1) as usize..];
-        if new_size > prev_size {
-            for (offset, _) in lines {
-                *offset += diff;
-            }
-        } else {
-            for (offset, _) in lines {
-                *offset -= diff;
-            }
-        };
+        if let Some(lines) = self.lines.get_mut((line + 1) as usize..) {
+            if new_size > prev_size {
+                for (offset, _) in lines {
+                    *offset += diff;
+                }
+            } else {
+                for (offset, _) in lines {
+                    *offset -= diff;
+                }
+            };
+        }
     }
     /// Find the line which contains the offset and return its Offset is clamped to the end of `src`
     pub fn offset_to_line(&self, byte_offset: Offset) -> LineInfo {
@@ -510,214 +508,280 @@ mod tests {
         }
     }
 
-    mod offset_map {
-        use crate::linemap::{CodePointPos, LineMap, Utf16Pos, Utf8Pos};
+    use crate::linemap::{CodePointPos, LineMap, Utf16Pos, Utf8Pos};
 
-        use super::iter_chars;
+    #[test]
+    fn no_newline() {
+        //          012
+        let text = "Hi!";
+        let map = LineMap::new(text);
+        assert_eq!(map.lines, &[(0, false)]);
+    }
 
-        #[test]
-        fn no_newline() {
-            //          012
-            let text = "Hi!";
-            let map = LineMap::new(text);
-            assert_eq!(map.lines, &[(0, false)]);
-        }
+    #[test]
+    fn newline() {
+        //          012 3
+        let text = "Hi!\n";
+        let map = LineMap::new(text);
+        assert_eq!(map.lines, &[(0, false), (4, false)]);
+    }
 
-        #[test]
-        fn newline() {
-            //          012 3
-            let text = "Hi!\n";
-            let map = LineMap::new(text);
-            assert_eq!(map.lines, &[(0, false), (4, false)]);
-        }
+    #[test]
+    fn crlf_newline() {
+        //          012 3 4
+        let text = "Hi!\r\n";
+        let map = LineMap::new(text);
+        assert_eq!(map.lines, &[(0, false), (5, false)]);
+    }
 
-        #[test]
-        fn crlf_newline() {
-            //          012 3 4
-            let text = "Hi!\r\n";
-            let map = LineMap::new(text);
-            assert_eq!(map.lines, &[(0, false), (5, false)]);
-        }
+    #[test]
+    fn two_lines() {
+        //          012 345678
+        let text = "Hi!\nWorld";
+        let map = LineMap::new(text);
+        assert_eq!(map.lines, &[(0, false), (4, false)]);
+    }
 
-        #[test]
-        fn two_lines() {
-            //          012 345678
-            let text = "Hi!\nWorld";
-            let map = LineMap::new(text);
-            assert_eq!(map.lines, &[(0, false), (4, false)]);
-        }
+    #[test]
+    fn start_newline() {
+        //          0123 456789
+        let text = "\nHi!\nWorld";
+        let map = LineMap::new(text);
+        assert_eq!(map.lines, &[(0, false), (1, false)]);
+    }
 
-        #[test]
-        fn start_newline() {
-            //          0123 456789
-            let text = "\nHi!\nWorld";
-            let map = LineMap::new(text);
-            assert_eq!(map.lines, &[(0, false), (1, false)]);
-        }
-
-        #[rustfmt::skip]
+    #[rustfmt::skip]
         const UNICODE_STR: &str = 
             //...3.......2....4............
             //01236789 012456 045678 012345
              "aa ᒣ bb\ncróbs\n𒀀gfrd\nnormal";
 
-        #[test]
-        fn line_detection() {
-            let map = LineMap::new(UNICODE_STR);
-            #[rustfmt::skip]
+    #[test]
+    fn line_detection() {
+        let map = LineMap::new(UNICODE_STR);
+        #[rustfmt::skip]
             assert_eq!(map.lines, &[
                 (0, true),
                 (10, true),
                 (17, true),
                 (26, false)
             ]);
-        }
+    }
 
-        #[test]
-        fn utf8_to_offset() {
-            let map = LineMap::new(UNICODE_STR);
-            iter_chars(UNICODE_STR, |info| {
-                let pos = Utf8Pos {
-                    line: info.line,
-                    character: info.line_byte_offset,
-                };
-                let offset = map.utf8_to_offset(UNICODE_STR, pos);
-                assert_eq!(info.offset, offset, "{info:?}");
-            });
-        }
+    #[test]
+    fn utf8_to_offset() {
+        let map = LineMap::new(UNICODE_STR);
+        iter_chars(UNICODE_STR, |info| {
+            let pos = Utf8Pos {
+                line: info.line,
+                character: info.line_byte_offset,
+            };
+            let offset = map.utf8_to_offset(UNICODE_STR, pos);
+            assert_eq!(info.offset, offset, "{info:?}");
+        });
+    }
 
-        #[test]
-        fn utf16_to_offset() {
-            let map = LineMap::new(UNICODE_STR);
-            iter_chars(UNICODE_STR, |info| {
-                let pos = Utf16Pos {
-                    line: info.line,
-                    character: info.line_u16_offset,
-                };
-                let offset = map.utf16_to_offset(UNICODE_STR, pos);
-                assert_eq!(info.offset, offset, "{info:?}");
-            });
-        }
+    #[test]
+    fn utf16_to_offset() {
+        let map = LineMap::new(UNICODE_STR);
+        iter_chars(UNICODE_STR, |info| {
+            let pos = Utf16Pos {
+                line: info.line,
+                character: info.line_u16_offset,
+            };
+            let offset = map.utf16_to_offset(UNICODE_STR, pos);
+            assert_eq!(info.offset, offset, "{info:?}");
+        });
+    }
 
-        #[test]
-        fn codepoint_to_offset() {
-            let map = LineMap::new(UNICODE_STR);
-            iter_chars(UNICODE_STR, |info| {
-                let pos = CodePointPos {
-                    line: info.line,
-                    character: info.line_codepoint_offset,
-                };
-                let offset = map.codepoint_to_offset(UNICODE_STR, pos);
-                assert_eq!(info.offset, offset, "{info:?}");
-            });
-        }
+    #[test]
+    fn codepoint_to_offset() {
+        let map = LineMap::new(UNICODE_STR);
+        iter_chars(UNICODE_STR, |info| {
+            let pos = CodePointPos {
+                line: info.line,
+                character: info.line_codepoint_offset,
+            };
+            let offset = map.codepoint_to_offset(UNICODE_STR, pos);
+            assert_eq!(info.offset, offset, "{info:?}");
+        });
+    }
 
-        #[test]
-        fn offset_to_utf8() {
-            let map = LineMap::new(UNICODE_STR);
-            iter_chars(UNICODE_STR, |info| {
-                let pos = Utf8Pos {
-                    line: info.line,
-                    character: info.line_byte_offset,
-                };
-                let res = map.offset_to_utf8(UNICODE_STR, info.offset);
-                assert_eq!(pos, res, "{info:?}");
-            });
-        }
+    #[test]
+    fn offset_to_utf8() {
+        let map = LineMap::new(UNICODE_STR);
+        iter_chars(UNICODE_STR, |info| {
+            let pos = Utf8Pos {
+                line: info.line,
+                character: info.line_byte_offset,
+            };
+            let res = map.offset_to_utf8(UNICODE_STR, info.offset);
+            assert_eq!(pos, res, "{info:?}");
+        });
+    }
 
-        #[test]
-        fn offset_to_utf16() {
-            let map = LineMap::new(UNICODE_STR);
-            iter_chars(UNICODE_STR, |info| {
-                let pos = Utf16Pos {
-                    line: info.line,
-                    character: info.line_u16_offset,
-                };
-                let res = map.offset_to_utf16(UNICODE_STR, info.offset);
-                assert_eq!(pos, res, "{info:?}");
-            });
-        }
+    #[test]
+    fn offset_to_utf16() {
+        let map = LineMap::new(UNICODE_STR);
+        iter_chars(UNICODE_STR, |info| {
+            let pos = Utf16Pos {
+                line: info.line,
+                character: info.line_u16_offset,
+            };
+            let res = map.offset_to_utf16(UNICODE_STR, info.offset);
+            assert_eq!(pos, res, "{info:?}");
+        });
+    }
 
-        #[test]
-        fn offset_to_codepoint() {
-            let map = LineMap::new(UNICODE_STR);
-            iter_chars(UNICODE_STR, |info| {
-                let pos = CodePointPos {
-                    line: info.line,
-                    character: info.line_codepoint_offset,
-                };
-                let res = map.offset_to_codepoint(UNICODE_STR, info.offset);
-                assert_eq!(pos, res, "{info:?}");
-            });
-        }
+    #[test]
+    fn offset_to_codepoint() {
+        let map = LineMap::new(UNICODE_STR);
+        iter_chars(UNICODE_STR, |info| {
+            let pos = CodePointPos {
+                line: info.line,
+                character: info.line_codepoint_offset,
+            };
+            let res = map.offset_to_codepoint(UNICODE_STR, info.offset);
+            assert_eq!(pos, res, "{info:?}");
+        });
+    }
 
-        #[test]
-        fn empty_offset() {
-            let text = "";
-            let map = LineMap::new(text);
-            let pos = map.offset_to_utf8(text, 0);
-            assert_eq!(pos, Utf8Pos::new(0, 0));
-        }
+    #[test]
+    fn empty_offset() {
+        let text = "";
+        let map = LineMap::new(text);
+        let pos = map.offset_to_utf8(text, 0);
+        assert_eq!(pos, Utf8Pos::new(0, 0));
+    }
 
-        #[test]
-        fn empty_offset_clamp() {
-            let text = "";
-            let map = LineMap::new(text);
-            let pos = map.offset_to_utf8(text, 9000);
-            assert_eq!(pos, Utf8Pos::new(0, 0));
-        }
+    #[test]
+    fn empty_offset_clamp() {
+        let text = "";
+        let map = LineMap::new(text);
+        let pos = map.offset_to_utf8(text, 9000);
+        assert_eq!(pos, Utf8Pos::new(0, 0));
+    }
 
-        #[test]
-        fn offset_clamp() {
-            let text = "a\nb\nc";
-            let map = LineMap::new(text);
-            let pos = map.offset_to_utf8(text, 9000);
-            assert_eq!(pos, Utf8Pos::new(2, 1));
-        }
+    #[test]
+    fn offset_clamp() {
+        let text = "a\nb\nc";
+        let map = LineMap::new(text);
+        let pos = map.offset_to_utf8(text, 9000);
+        assert_eq!(pos, Utf8Pos::new(2, 1));
+    }
 
-        #[test]
-        fn empty_utf8() {
-            let text = "";
-            let map = LineMap::new(text);
-            let pos = map.utf8_to_offset(
-                text,
-                Utf8Pos {
-                    line: 0,
-                    character: 0,
-                },
-            );
-            assert_eq!(pos, 0);
-        }
+    #[test]
+    fn empty_utf8() {
+        let text = "";
+        let map = LineMap::new(text);
+        let pos = map.utf8_to_offset(
+            text,
+            Utf8Pos {
+                line: 0,
+                character: 0,
+            },
+        );
+        assert_eq!(pos, 0);
+    }
 
-        #[test]
-        fn empty_utf8_clamp() {
-            let text = "";
-            let map = LineMap::new(text);
-            let pos = map.utf8_to_offset(
-                text,
-                Utf8Pos {
-                    line: 0,
-                    character: 9000,
-                },
-            );
-            assert_eq!(pos, 0);
-        }
+    #[test]
+    fn empty_utf8_clamp() {
+        let text = "";
+        let map = LineMap::new(text);
+        let pos = map.utf8_to_offset(
+            text,
+            Utf8Pos {
+                line: 0,
+                character: 9000,
+            },
+        );
+        assert_eq!(pos, 0);
+    }
 
-        #[test]
-        fn utf8_line_clamp() {
-            //                012 345 67
-            let text: &str = "aa\nbb\ncc";
-            let map = LineMap::new(text);
-            let pos = map.utf8_to_offset(
-                text,
-                Utf8Pos {
-                    line: 1,
-                    character: 9000,
-                },
-            );
+    #[test]
+    fn utf8_line_clamp() {
+        let text: &str = "aa\nbb\ncc";
+        let map = LineMap::new(text);
+        let pos = map.utf8_to_offset(
+            text,
+            Utf8Pos {
+                line: 1,
+                character: 9000,
+            },
+        );
 
-            // one past the end of the line / start of the next line
-            assert_eq!(pos, 6);
+        // one past the end of the line / start of the next line
+        assert_eq!(pos, 6);
+    }
+
+    #[test]
+    fn replace_fuzz() {
+        let mut text = "aa\nbb\ncc\n\n\naa\nbb\nccaa\nbb\ncc".to_owned();
+        let mut map = LineMap::new(&text);
+
+        let mut state: usize = 0;
+        let mut rng = || {
+            state ^= 939847593342222225;
+            state = state.rotate_left(1);
+            state
+        };
+
+        for _ in 0..10000 {
+            let start = rng() % text.len();
+            let len = rng() % (text.len() - start);
+
+            let replacement = (0..len)
+                .map(|_| if rng() % 8 > 0 { 'a' } else { '\n' })
+                .collect::<String>();
+
+            replace_boilerplate(&mut map, &mut text, start, len, replacement);
         }
+    }
+
+    #[test]
+    fn replace_edgecases() {
+        replace_manual("a\nc", 0..1, "\n");
+        replace_manual("a\nc", 0..2, "\n");
+        replace_manual("a\nc", 0..2, "a");
+        replace_manual("a\nc", 0..2, "");
+    }
+
+    fn replace_manual(text: &str, range: std::ops::Range<usize>, replace_with: &str) {
+        let mut text = text.to_owned();
+        let mut map = LineMap::new(&text);
+        replace_boilerplate(
+            &mut map,
+            &mut text,
+            range.start,
+            range.end - range.start,
+            replace_with.into(),
+        );
+    }
+
+    fn replace_boilerplate(
+        map: &mut LineMap,
+        text: &mut String,
+        start: usize,
+        len: usize,
+        replace_with: String,
+    ) {
+        let mut copy = text.clone();
+
+        copy.replace_range(start..start + len, &replace_with);
+        let map2 = LineMap::new(&copy);
+
+        eprintln!(
+            "{text:?}\n{}..{} {replace_with:?}\n > {copy:?}\n",
+            start,
+            start + len
+        );
+
+        map.replace_offset_range(
+            text,
+            start.try_into().unwrap()..(start + len).try_into().unwrap(),
+            &replace_with,
+        );
+
+        assert_eq!(map.lines, map2.lines);
     }
 }

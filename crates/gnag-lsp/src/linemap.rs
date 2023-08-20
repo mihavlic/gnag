@@ -333,6 +333,36 @@ impl LineMap {
             };
         }
     }
+    pub fn replace_utf8_range(
+        &mut self,
+        file: &mut String,
+        range: ops::Range<Utf8Pos>,
+        replace_with: &str,
+    ) {
+        let start = self.utf8_to_offset(file, range.start);
+        let end = self.utf8_to_offset(file, range.end);
+        self.replace_offset_range(file, start..end, replace_with);
+    }
+    pub fn replace_utf16_range(
+        &mut self,
+        file: &mut String,
+        range: ops::Range<Utf16Pos>,
+        replace_with: &str,
+    ) {
+        let start = self.utf16_to_offset(file, range.start);
+        let end = self.utf16_to_offset(file, range.end);
+        self.replace_offset_range(file, start..end, replace_with);
+    }
+    pub fn replace_codepoint_range(
+        &mut self,
+        file: &mut String,
+        range: ops::Range<CodePointPos>,
+        replace_with: &str,
+    ) {
+        let start = self.codepoint_to_offset(file, range.start);
+        let end = self.codepoint_to_offset(file, range.end);
+        self.replace_offset_range(file, start..end, replace_with);
+    }
     /// Find the line which contains the offset and return its Offset is clamped to the end of `src`
     pub fn offset_to_line(&self, byte_offset: Offset) -> LineInfo {
         let index = self.lines.binary_search_by_key(&byte_offset, |a| a.0);
@@ -734,7 +764,7 @@ mod tests {
                 .map(|_| if rng() % 8 > 0 { 'a' } else { '\n' })
                 .collect::<String>();
 
-            replace_boilerplate(&mut map, &mut text, start, len, replacement);
+            test_replace_equivalent(&mut map, &mut text, start, len, replacement);
         }
     }
 
@@ -749,7 +779,7 @@ mod tests {
     fn replace_manual(text: &str, range: std::ops::Range<usize>, replace_with: &str) {
         let mut text = text.to_owned();
         let mut map = LineMap::new(&text);
-        replace_boilerplate(
+        test_replace_equivalent(
             &mut map,
             &mut text,
             range.start,
@@ -758,7 +788,7 @@ mod tests {
         );
     }
 
-    fn replace_boilerplate(
+    fn test_replace_equivalent(
         map: &mut LineMap,
         text: &mut String,
         start: usize,

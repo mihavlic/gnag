@@ -53,10 +53,15 @@ impl From<(u32, u32)> for Utf16Pos {
     }
 }
 
-fn parse_lines(start_offset: Offset, bytes: &[u8], partial_reparse: bool) -> Vec<(Offset, bool)> {
+fn parse_lines(
+    start_offset: Offset,
+    partial_reparse: bool,
+    bytes: &[u8],
+    lines: &mut Vec<(Offset, bool)>,
+) {
     assert!(start_offset as usize + bytes.len() as usize <= Offset::MAX as usize);
 
-    let mut lines = Vec::new();
+    let len = lines.len();
 
     let mut saw_unicode = false;
     let mut prev_end = start_offset;
@@ -94,11 +99,9 @@ fn parse_lines(start_offset: Offset, bytes: &[u8], partial_reparse: bool) -> Vec
     // 0 1 | 1
     // 1 0 | 0
     // 1 1 | 1
-    if !partial_reparse || lines.is_empty() {
+    if !partial_reparse || lines.len() == len {
         lines.push((prev_end, saw_unicode));
     }
-
-    lines
 }
 
 #[derive(Clone, Copy)]
@@ -117,8 +120,10 @@ pub struct LineMap {
 
 impl LineMap {
     pub fn new(src: &str) -> Self {
+        let mut lines = Vec::new();
+        parse_lines(0,  false, src.as_bytes(), &mut lines);
         Self {
-            lines: parse_lines(0, src.as_bytes(), false),
+            lines,
         }
     }
     /// Returns zero-based Line and Column offset in utf8 code units (u8). Offset is clamped to the end of `src`
@@ -249,6 +254,12 @@ impl LineMap {
             (line_start + character as Offset).min(end)
         }
     }
+    pub fn replace_whole(&mut self, file: &mut String, replace_with: &str) {
+        self.lines.clear();
+        file.clear();
+        file.push_str(replace_with);
+        parse_lines(0, false, file.as_bytes(), &mut self.lines);
+    }
     pub fn replace_offset_range(
         &mut self,
         file: &mut String,
@@ -309,14 +320,16 @@ impl LineMap {
             // pushing the entry for the line which it was until then inspecting (0, false)
             // at the end of the whole function, the very last line is pushed, which we don't want
             // because we're already aware of the second line and will correct its offset later
-            let new_lines = parse_lines(
+            let mut lines = Vec::new();
+            parse_lines(
                 start_line.line_start,
-                &file.as_bytes()[start_line.line_start as usize..end_offset as usize],
                 !is_eof,
+                &file.as_bytes()[start_line.line_start as usize..end_offset as usize],
+                &mut lines
             );
 
             self.lines
-                .splice(start_line.line as usize..=end_line.line as usize, new_lines);
+                .splice(start_line.line as usize..=end_line.line as usize, lines);
 
             end_line.line
         };
@@ -417,8 +430,7 @@ struct IterCodepoints<'a>(&'a str);
 impl<'a> Iterator for IterCodepoints<'a> {
     type Item = u32;
     fn next(&mut self) -> Option<Self::Item> {
-        let bytes = self.0.as_bytes();
-        let b = *bytes.first()?;
+        let b = *self.0.as_bytes().first()?;
 
         // Safety: we got the byte from a &str, which is guaranteed to be utf8
         let len = unsafe { utf8_byte_count(b) };

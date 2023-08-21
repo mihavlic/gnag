@@ -138,8 +138,8 @@ fn main_loop(connection: Connection, mut cx: Ctx) -> anyhow::Result<()> {
                 match &*method {
                     _ if method.starts_with("$") => {
                         // <https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#dollarRequests>
-                        //   If a server or client receives a request starting with ‘$/’ it must
-                        //   error the request with error code MethodNotFound
+                        // If a server or client receives a request starting with ‘$/’ it must
+                        // error the request with error code MethodNotFound
                         error(
                             ErrorCode::MethodNotFound,
                             "Request methods starting with '$' are automatically errored.".into(),
@@ -167,9 +167,17 @@ fn main_loop(connection: Connection, mut cx: Ctx) -> anyhow::Result<()> {
                 match &*method {
                     "textDocument/didOpen" => {
                         let params = params.to::<DidOpenTextDocument>()?;
-                        // cx.file = params.
+                        let document = params.text_document;
+                        cx.file_opened(document.uri.into(), document.text, document.version);
                     }
-                    "textDocument/didChange" => {}
+                    "textDocument/didChange" => {
+                        let params = params.to::<DidChangeTextDocument>()?;
+                        cx.modify_file(
+                            &params.text_document.uri.into(),
+                            params.text_document.version,
+                            &params.content_changes,
+                        )?;
+                    }
                     _ => {}
                 }
             }

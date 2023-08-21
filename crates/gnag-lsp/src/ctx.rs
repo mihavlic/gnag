@@ -1,10 +1,11 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
-    fmt::Debug,
+    fmt::{Debug, Display},
     ops,
 };
 
 use anyhow::{bail, Context};
+use lsp_types::TextDocumentContentChangeEvent;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -109,16 +110,36 @@ impl Ctx {
         &mut self,
         file: &FileUrl,
         new_version: i32,
-        range: ops::Range<Utf16Pos>,
-        replace: &str,
+        changes: &[TextDocumentContentChangeEvent],
     ) -> Result<(), ModifyFileError> {
         if let Some(file) = self.files.get_mut(file) {
-            let diff = new_version.wrapping_sub(file.version);
-            if diff < 0 {
+            let File {
+                linemap,
+                contents,
+                version,
+            } = file;
+
+            if *version > new_version {
                 return Err(ModifyFileError::VersionLower);
             }
 
-            // let start = file.linemap.utf16_to_offset(&file.contents, )
+            for change in changes {
+                // https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_didChange
+                // if change.range is None, replace the whole file
+                if let Some(range) = change.range {
+                    let start = Utf16Pos {
+                        line: range.start.line,
+                        character: range.start.character,
+                    };
+                    let end = Utf16Pos {
+                        line: range.end.line,
+                        character: range.end.character,
+                    };
+                    linemap.replace_utf16_range(contents, start..end, &change.text);
+                } else {
+                    linemap.replace_whole(contents, &change.text);
+                }
+            }
 
             Ok(())
         } else {
@@ -127,7 +148,16 @@ impl Ctx {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModifyFileError {
     FileNotOpened,
     VersionLower,
 }
+
+impl Display for ModifyFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self, f)
+    }
+}
+
+impl std::error::Error for ModifyFileError {}

@@ -50,7 +50,7 @@ fn main() {
     // profiling::finish_frame!();
 }
 
-pub fn parse<'a>(arena: &mut Vec<Node>, text: &str) -> (Node, Vec<ParseError>) {
+fn parse<'a>(arena: &mut Vec<Node>, text: &str) -> (Node, Vec<ParseError>) {
     let mut lexer = Lexer::new(text.as_bytes());
     let (tokens, trivia) = lex(&mut lexer);
     let mut parser = Parser::new(text, tokens, trivia);

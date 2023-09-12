@@ -55,14 +55,13 @@ impl From<(u32, u32)> for Utf16Pos {
 
 fn parse_lines(
     start_offset: Offset,
-    partial_reparse: bool,
+    include_last: bool,
     bytes: &[u8],
     lines: &mut Vec<(Offset, bool)>,
 ) {
     assert!(start_offset as usize + bytes.len() as usize <= Offset::MAX as usize);
 
     let len = lines.len();
-
     let mut saw_unicode = false;
     let mut prev_end = start_offset;
     let mut bytes = (start_offset..start_offset + bytes.len() as Offset).zip(bytes.iter().copied());
@@ -94,12 +93,7 @@ fn parse_lines(
         }
     }
 
-    // partial_reparse, lines.is_empty()
-    // 0 0 | 1
-    // 0 1 | 1
-    // 1 0 | 0
-    // 1 1 | 1
-    if !partial_reparse || lines.len() == len {
+    if len == lines.len() || include_last {
         lines.push((prev_end, saw_unicode));
     }
 }
@@ -121,10 +115,8 @@ pub struct LineMap {
 impl LineMap {
     pub fn new(src: &str) -> Self {
         let mut lines = Vec::new();
-        parse_lines(0,  false, src.as_bytes(), &mut lines);
-        Self {
-            lines,
-        }
+        parse_lines(0, true, src.as_bytes(), &mut lines);
+        Self { lines }
     }
     /// Returns zero-based Line and Column offset in utf8 code units (u8). Offset is clamped to the end of `src`
     pub fn offset_to_utf8(&self, src: &str, offset: Offset) -> Utf8Pos {
@@ -258,92 +250,96 @@ impl LineMap {
         self.lines.clear();
         file.clear();
         file.push_str(replace_with);
-        parse_lines(0, false, file.as_bytes(), &mut self.lines);
+        parse_lines(0, true, file.as_bytes(), &mut self.lines);
     }
     pub fn replace_offset_range(
         &mut self,
         file: &mut String,
-        range: ops::Range<Offset>,
+        replacement_range: ops::Range<Offset>,
         replace_with: &str,
     ) {
-        assert!(range.start <= range.end);
-        assert!(range.start as usize <= file.len());
-        assert!(range.end as usize <= file.len());
+        assert!(replacement_range.start <= replacement_range.end);
+        assert!(replacement_range.start as usize <= file.len());
+        assert!(replacement_range.end as usize <= file.len());
 
-        let start = range.start as usize;
-        let end = range.end as usize;
+        let mut range = replacement_range.clone();
+        let mut slow_path = false;
 
-        let prev_size = range.end - range.start;
-        let new_size = replace_with.len().try_into().unwrap();
-        let diff = prev_size.abs_diff(new_size);
+        // if we are replacing around a \r we're possibly combining or interrupting
+        // a CRLF, so we extend the line selection (by expanding the byte range)
+        if range.start != 0
+            && file.as_bytes().get((range.start - 1) as usize).copied() == Some(b'\r')
+        {
+            range.start -= 1;
+            range.end = (replacement_range.start + 1).max(replacement_range.end);
+            slow_path = true;
+        }
+        if replace_with.ends_with('\r') {
+            range.end = replacement_range.end + 1;
+            slow_path = true;
+        }
 
-        let file_plain_ascii = file.as_bytes()[start..end]
+        slow_path |= file.as_bytes()
+            [replacement_range.start as usize..replacement_range.end as usize]
             .iter()
             .copied()
-            .all(|b| b.is_ascii() && b != b'\n' && b != b'\n');
+            .any(|b| b > 127 || b == b'\n' || b == b'\r');
+        slow_path |= replace_with
+            .bytes()
+            .any(|b| b > 127 || b == b'\n' || b == b'\r');
 
         // doing this does not invalidate the lookup structure, just have to remember to offset ranges past the replacement
-        file.replace_range(start..end, replace_with);
+        file.replace_range(
+            replacement_range.start as usize..replacement_range.end as usize,
+            replace_with,
+        );
+
+        let prev_size = replacement_range.end - replacement_range.start;
+        let new_size: u32 = replace_with.len().try_into().unwrap();
+        // new_size - prev_size might be negative, but it will be later added
+        // to other integers so that the result will always be positive
+        let diff = new_size.wrapping_sub(prev_size);
 
         // fast path for the majority of edits where the change affects only one line
-        let line = if file_plain_ascii
-            && replace_with
-                .bytes()
-                .all(|b| b.is_ascii() && b != b'\n' && b != b'\r')
-        {
-            self.offset_to_line(range.start).line
-        } else {
+        let adjust_start = if slow_path {
             let start_line = self.offset_to_line(range.start);
             let end_line = self.offset_to_line(range.end);
 
-            // can't use `self.line_end()` because we need to apply the offset
-            let (end_offset, is_eof) = {
-                self.lines
-                    .get((end_line.line + 1) as usize)
-                    .map(|line| {
-                        // fantastic
-                        if new_size > prev_size {
-                            (line.0 + diff, false)
-                        } else {
-                            (line.0 - diff, false)
-                        }
-                    })
-                    .unwrap_or_else(|| (file.len().try_into().unwrap(), true))
-            };
+            // possibly special-case edge case:
+            //   if (range.end == end_line.line_start && replace_with ends with newline)
+            //     one_past_end_line = end_line.line
+            let one_past_end_line = end_line.line + 1;
 
-            // we must not include the last line, let's have:
-            //  "aaaaa\nbbbb"
-            //     ^ edit first line
-            // the range `start_line.line_start..end_offset` contains this:
-            //  "aaaaa\n"
-            // now, the `parse_lines()` function would get to the end of the range and see a "\n",
-            // pushing the entry for the line which it was until then inspecting (0, false)
-            // at the end of the whole function, the very last line is pushed, which we don't want
-            // because we're already aware of the second line and will correct its offset later
+            // can't use `self.line_end()` because we need to apply the offset
+            let end_offset = self
+                .lines
+                .get(one_past_end_line as usize)
+                .map(|line| line.0.wrapping_add(diff))
+                .unwrap_or_else(|| file.len().try_into().unwrap());
+
             let mut lines = Vec::new();
             parse_lines(
                 start_line.line_start,
-                !is_eof,
+                one_past_end_line as usize == self.lines.len(),
                 &file.as_bytes()[start_line.line_start as usize..end_offset as usize],
-                &mut lines
+                &mut lines,
             );
 
-            self.lines
-                .splice(start_line.line as usize..=end_line.line as usize, lines);
+            let lines_len: u32 = lines.len().try_into().unwrap();
+            let adjust_line = start_line.line + lines_len;
 
-            end_line.line
+            self.lines
+                .splice(start_line.line as usize..one_past_end_line as usize, lines);
+
+            adjust_line
+        } else {
+            self.offset_to_line(range.start).line + 1
         };
 
-        if let Some(lines) = self.lines.get_mut((line + 1) as usize..) {
-            if new_size > prev_size {
-                for (offset, _) in lines {
-                    *offset += diff;
-                }
-            } else {
-                for (offset, _) in lines {
-                    *offset -= diff;
-                }
-            };
+        if let Some(lines) = self.lines.get_mut(adjust_start as usize..) {
+            for (offset, _) in lines {
+                *offset = offset.wrapping_add(diff);
+            }
         }
     }
     pub fn replace_utf8_range(
@@ -378,14 +374,18 @@ impl LineMap {
     }
     /// Find the line which contains the offset and return its Offset is clamped to the end of `src`
     pub fn offset_to_line(&self, byte_offset: Offset) -> LineInfo {
+        debug_assert!(!self.lines.is_empty());
         let index = self.lines.binary_search_by_key(&byte_offset, |a| a.0);
         let line = match index {
             Ok(a) => a,
             Err(a) => a - 1,
         };
-        let (line_start, is_unicode) = self.lines[line];
-        debug_assert!(line_start <= byte_offset);
-
+        let info = self.get_line_info(line.try_into().unwrap());
+        debug_assert!(info.line_start <= byte_offset);
+        info
+    }
+    fn get_line_info(&self, line: u32) -> LineInfo {
+        let (line_start, is_unicode) = self.lines[line as usize];
         LineInfo {
             line: line.try_into().unwrap(),
             line_start,
@@ -463,28 +463,6 @@ fn utf8_bytecount_to_utf16_codeunits(len: u32) -> u32 {
     // 3 -> 1
     // 4 -> 2
     1 + (len / 4)
-}
-
-#[test]
-fn test_line_lookup() {
-    let str = "abcd\nì\n\nế";
-    let mapping = LineMap::new(str);
-
-    let test = |offset: Offset, (l, c): (u32, u32)| {
-        let res = mapping.offset_to_codepoint(str, offset);
-        let expected = CodePointPos {
-            line: l,
-            character: c,
-        };
-        assert_eq!(expected, res);
-    };
-
-    test(0, (0, 0));
-    test(4, (0, 4));
-    test(5, (1, 0));
-    test(7, (1, 1));
-    test(8, (2, 0));
-    test(9, (3, 0));
 }
 
 #[cfg(test)]
@@ -589,14 +567,14 @@ mod tests {
         //          0123 456789
         let text = "\nHi!\nWorld";
         let map = LineMap::new(text);
-        assert_eq!(map.lines, &[(0, false), (1, false)]);
+        assert_eq!(map.lines, &[(0, false), (1, false), (5, false)]);
     }
 
     #[rustfmt::skip]
-        const UNICODE_STR: &str = 
-            //...3.......2....4............
-            //01236789 012456 045678 012345
-             "aa ᒣ bb\ncróbs\n𒀀gfrd\nnormal";
+    const UNICODE_STR: &str =
+        //...3.......2....4............
+        //01236789 012456 045678 012345
+         "aa ᒣ bb\ncróbs\n𒀀gfrd\nnormal";
 
     #[test]
     fn line_detection() {
@@ -758,34 +736,69 @@ mod tests {
 
     #[test]
     fn replace_fuzz() {
-        let mut text = "aa\nbb\ncc\n\n\naa\nbb\nccaa\nbb\ncc".to_owned();
+        let mut text = "aaaaaaaa".to_owned();
         let mut map = LineMap::new(&text);
 
-        let mut state: usize = 0;
-        let mut rng = || {
-            state ^= 939847593342222225;
-            state = state.rotate_left(1);
-            state
+        let mut rng = oorandom::Rand64::new(123);
+        let mut rng_range = |range: std::ops::Range<usize>| {
+            if range.start == range.end {
+                range.start
+            } else {
+                rng.rand_range(range.start as u64..range.end as u64) as usize
+            }
         };
 
-        for _ in 0..10000 {
-            let start = rng() % text.len();
-            let len = rng() % (text.len() - start);
+        for _ in 0..100000 {
+            let a = rng_range(0..text.len());
+            let b = rng_range(a..text.len());
 
-            let replacement = (0..len)
-                .map(|_| if rng() % 8 > 0 { 'a' } else { '\n' })
+            let start = text.char_indices().nth(a).map_or(text.len(), |(i, _)| i);
+            let end = text.char_indices().nth(b).map_or(text.len(), |(i, _)| i);
+            eprintln!("replace (char) {a}..{b}");
+            let replace_len = rng_range(0..16);
+            let replacement = (0..replace_len)
+                .map(|_| match rng_range(0..8) {
+                    0 => '\n',
+                    1 => '\r',
+                    2 => 'ó',
+                    3 => 'ᒣ',
+                    4 => '𒀀',
+                    _ => 'a',
+                })
                 .collect::<String>();
 
-            test_replace_equivalent(&mut map, &mut text, start, len, replacement);
+            test_replace_equivalent(
+                &mut map,
+                &mut text,
+                start as usize,
+                (end - start) as usize,
+                &replacement,
+            );
         }
     }
 
     #[test]
     fn replace_edgecases() {
-        replace_manual("a\nc", 0..1, "\n");
+        replace_manual("\r\na", 1..1, "a");
+        replace_manual("a\ró", 0..1, "ó");
         replace_manual("a\nc", 0..2, "\n");
+        replace_manual("a\nc", 0..1, "\n");
         replace_manual("a\nc", 0..2, "a");
         replace_manual("a\nc", 0..2, "");
+    }
+
+    #[test]
+    fn replace_delete_line() {
+        replace_manual("AAA\nBBB\nC\n", 4..8, "");
+    }
+
+    #[test]
+    fn replace_redo() {
+        //                 0123 4567 89
+        let mut text: _ = "AAA\nBBB\nC\n".to_owned();
+        let mut map = LineMap::new(&text);
+        test_replace_equivalent(&mut map, &mut text, 4, 4, "");
+        test_replace_equivalent(&mut map, &mut text, 4, 0, "BBB\n");
     }
 
     fn replace_manual(text: &str, range: std::ops::Range<usize>, replace_with: &str) {
@@ -796,7 +809,7 @@ mod tests {
             &mut text,
             range.start,
             range.end - range.start,
-            replace_with.into(),
+            replace_with,
         );
     }
 
@@ -805,18 +818,18 @@ mod tests {
         text: &mut String,
         start: usize,
         len: usize,
-        replace_with: String,
+        replace_with: &str,
     ) {
         let mut copy = text.clone();
 
         copy.replace_range(start..start + len, &replace_with);
         let map2 = LineMap::new(&copy);
 
-        eprintln!(
-            "{text:?}\n{}..{} {replace_with:?}\n > {copy:?}\n",
-            start,
-            start + len
-        );
+        // eprintln!(
+        //     "replace {}..{} {replace_with:?}\n{text:?}\n{copy:?}\n",
+        //     start,
+        //     start + len
+        // );
 
         map.replace_offset_range(
             text,

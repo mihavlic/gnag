@@ -50,6 +50,8 @@ tokenizer {
     RCurly '}'
     LParen '('
     RParen ')'
+    LBracket '['
+    RBracket ']'
     LAngle '<'
     RAngle '>'
     Question '?'
@@ -107,7 +109,7 @@ rule TokenRule {
 }
 
 rule SynRule {
-    Attribute* 'inline'?  'rule' Ident Parameters? '{' Expr '}'
+    Attribute* 'inline'? 'rule' Ident Parameters? '{' Expr '}'
 }
 
 rule Parameters {
@@ -146,4 +148,4 @@ rule SeqExpr {
 
 inline rule BinExpr(a, b) {
     Expr '|' Expr
-}l
+}

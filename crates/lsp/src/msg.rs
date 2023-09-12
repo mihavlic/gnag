@@ -366,7 +366,10 @@ fn read_msg_text(reader: &mut dyn BufRead, buf: &mut Vec<u8>) -> io::Result<()> 
     }
 
     let Some(size) = size else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "No Content-Length"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "No Content-Length",
+        ));
     };
 
     buf.resize(size, 0);

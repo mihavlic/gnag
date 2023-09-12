@@ -1,6 +1,7 @@
 mod ctx;
 mod executor;
 mod ext;
+mod handlers;
 mod linemap;
 mod tokens;
 
@@ -10,10 +11,12 @@ use std::sync::mpsc;
 use anyhow::Context;
 use ctx::{Config, Ctx};
 use lsp::error::ExtractError;
-use lsp::msg::{ErrorCode, Message, Request, RequestId, Response};
+use lsp::msg::{ErrorCode, Message, Request, RequestId, Response, ResponseError};
 use lsp_types::*;
 
 use lsp::connection::Connection;
+use lsp_types::request::GotoDefinition;
+use serde::de::DeserializeOwned;
 use tokens::{TokenModifier, TokenType};
 
 fn main() {
@@ -52,9 +55,10 @@ fn main() {
     }
 
     let config = init(&connection).unwrap();
-    let cx = Ctx::new(config);
+    let mut cx = Ctx::new(config, connection);
 
-    main_loop(connection, cx).unwrap();
+    main_loop(&mut cx).unwrap();
+
     io_threads.join();
 }
 
@@ -77,10 +81,10 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
     }
 
     let capabilities = ServerCapabilities {
-        completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![]),
-            ..Default::default()
-        }),
+        // completion_provider: Some(CompletionOptions {
+        //     trigger_characters: Some(vec![]),
+        //     ..Default::default()
+        // }),
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
@@ -91,7 +95,7 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
-        document_formatting_provider: Some(OneOf::Left(true)),
+        // document_formatting_provider: Some(OneOf::Left(true)),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: None,
             inter_file_dependencies: false,
@@ -116,65 +120,91 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
     Ok(config)
 }
 
-fn main_loop(connection: Connection, mut cx: Ctx) -> anyhow::Result<()> {
-    for msg in connection.receive_iter() {
+fn main_loop(cx: &mut Ctx) -> anyhow::Result<()> {
+    while let Ok(msg) = cx.receive() {
         match msg.context("Stdin reader failed")? {
             Message::Request(req) => {
                 let Request { id, method, params } = req;
 
-                let error = |code: ErrorCode, message: String| {
-                    connection.send(Response::new_err(id.clone(), code, message))
-                };
-
-                let response =
-                    |response: &dyn JsonSerialize| -> Result<(), mpsc::SendError<Message>> {
-                        connection.send(Message::Response(Response {
-                            id: id.clone(),
-                            result: Some(response.json_serialize().unwrap()),
-                            error: None,
-                        }))
-                    };
-
-                match &*method {
+                let result = match method.as_str() {
                     _ if method.starts_with("$") => {
                         // <https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#dollarRequests>
-                        // If a server or client receives a request starting with ‘$/’ it must
-                        // error the request with error code MethodNotFound
-                        error(
+                        // If a server or client receives a request starting with $,
+                        // it must error the request with error code MethodNotFound
+                        cx.error(
+                            id,
                             ErrorCode::MethodNotFound,
-                            "Request methods starting with '$' are automatically errored.".into(),
+                            "Request methods starting with '$' are automatically errored.",
                         )?;
+                        continue;
                     }
                     "shutdown" => {
-                        connection.shutdown_and_exit(id)?;
+                        cx.shutdown_and_exit(id)?;
                         break;
                     }
                     "textDocument/definition" => {
-                        response(&GotoDefinitionResponse::Array(Vec::new()))?;
+                        handlers::definition(cx, &serde_json::from_value(params)?)
+                    }
+                    "textDocument/documentSymbol" => {
+                        handlers::document_symbol(cx, &serde_json::from_value(params)?)
+                    }
+                    "textDocument/completion" => {
+                        handlers::completion(cx, &serde_json::from_value(params)?)
+                    }
+                    "textDocument/formatting" => {
+                        handlers::formatting(cx, &serde_json::from_value(params)?)
+                    }
+                    "textDocument/diagnostic" => {
+                        handlers::diagnostic(cx, &serde_json::from_value(params)?)
                     }
                     _ => {
-                        error(
+                        cx.error(
+                            id,
                             ErrorCode::RequestFailed,
                             format!("Unsupported request '{}'", method),
                         )?;
+                        continue;
                     }
-                }
+                };
+
+                let response = match result {
+                    Ok(ok) => Message::Response(Response {
+                        id,
+                        result: Some(ok),
+                        error: None,
+                    }),
+                    Err(e) => Message::Response(Response {
+                        id: id,
+                        result: None,
+                        error: Some(ResponseError {
+                            code: ErrorCode::InternalError.into(),
+                            message: e.to_string(),
+                            data: None,
+                        }),
+                    }),
+                };
+                cx.send(response)?;
             }
             Message::Notification(not) => {
                 let lsp::msg::Notification { method, params } = not;
 
-                use lsp_types::notification::*;
                 match &*method {
                     "textDocument/didOpen" => {
-                        let params = params.to::<DidOpenTextDocument>()?;
+                        let params: DidOpenTextDocumentParams = serde_json::from_value(params)?;
                         let document = params.text_document;
                         cx.file_opened(document.uri.into(), document.text, document.version);
                     }
+                    "textDocument/didClose" => {
+                        let params: DidCloseTextDocumentParams = serde_json::from_value(params)?;
+                        let document = params.text_document;
+                        cx.file_closed(document.uri.as_ref());
+                    }
                     "textDocument/didChange" => {
-                        let params = params.to::<DidChangeTextDocument>()?;
+                        let params: DidChangeTextDocumentParams = serde_json::from_value(params)?;
+                        let document = params.text_document;
                         cx.modify_file(
-                            &params.text_document.uri.into(),
-                            params.text_document.version,
+                            document.uri.as_ref(),
+                            document.version,
                             &params.content_changes,
                         )?;
                     }
@@ -185,32 +215,4 @@ fn main_loop(connection: Connection, mut cx: Ctx) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn cast<R>(req: Request) -> Result<(RequestId, R::Params), ExtractError>
-where
-    R: lsp_types::request::Request,
-    R::Params: serde::de::DeserializeOwned,
-{
-    req.extract(R::METHOD)
-}
-
-trait NotificationExtract {
-    fn to<N: lsp_types::notification::Notification>(self) -> serde_json::Result<N::Params>;
-}
-
-impl NotificationExtract for serde_json::Value {
-    fn to<N: lsp_types::notification::Notification>(self) -> serde_json::Result<N::Params> {
-        serde_json::from_value(self)
-    }
-}
-
-trait JsonSerialize {
-    fn json_serialize(&self) -> Result<serde_json::Value, serde_json::Error>;
-}
-
-impl<T: serde::Serialize> JsonSerialize for T {
-    fn json_serialize(&self) -> Result<serde_json::Value, serde_json::Error> {
-        serde_json::to_value(self)
-    }
 }

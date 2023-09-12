@@ -13,3 +13,8 @@ serde = "1.0.182"
 log = "0.4.19"
 simplelog = "0.12.1"
 anyhow = "1.0.72"
+
+gnag = { path = "../gnag" }
+
+[dev-dependencies]
+oorandom = "11.1.3"

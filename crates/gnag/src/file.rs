@@ -4,7 +4,7 @@ use crate::{
     ast,
     convert::{self, ConvertCtx},
     handle::HandleVec,
-    Node,
+    lex, Lexer, Node, ParseError, StrSpan,
 };
 
 crate::simple_handle! {
@@ -18,15 +18,35 @@ pub enum AstItem {
     Rule(ast::SynRule, Option<RuleHandle>),
 }
 
+impl AstItem {
+    pub fn name(&self) -> StrSpan {
+        match self {
+            AstItem::Token(a, _) => a.name,
+            AstItem::Rule(a, _) => a.name,
+        }
+    }
+    pub fn span(&self) -> StrSpan {
+        match self {
+            AstItem::Token(a, _) => a.span,
+            AstItem::Rule(a, _) => a.span,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Attribute {
     pub name: String,
 }
 
+pub enum TokenPattern {
+    Regex(String),
+    RustCode(String),
+}
+
 pub struct TokenDef {
     pub attrs: Vec<Attribute>,
     pub name: String,
-    pub pattern: String,
+    pub pattern: TokenPattern,
 }
 
 #[derive(Debug)]
@@ -38,6 +58,7 @@ pub struct RuleDef {
     pub expr: RuleExpr,
 }
 
+#[derive(Default)]
 pub struct File {
     pub ast_items: HandleVec<AstItemHandle, AstItem>,
 
@@ -49,13 +70,27 @@ pub struct File {
 }
 
 impl File {
+    pub fn new_from_string(str: &str) -> (Self, Vec<ParseError>, Vec<ParseError>, Vec<Node>, Node) {
+        let mut lexer = Lexer::new(str.as_bytes());
+
+        let (tokens, trivia) = lex(&mut lexer);
+        let mut parser = crate::Parser::new(str, tokens, trivia);
+        _ = crate::file(&mut parser);
+
+        let mut arena = Vec::new();
+        let root = parser.build_tree(&mut arena);
+
+        let cx = ConvertCtx::new(&str);
+        let file = File::new(&cx, &root, &arena);
+        (file, parser.errors, cx.finish(), arena, root)
+    }
     pub fn new(cx: &ConvertCtx, cst: &Node, arena: &[Node]) -> Self {
         let file = ast::file(&cst, &arena).unwrap();
         let mut file = convert::file(cx, file);
         file.process_inlines();
         file
     }
-    pub fn process_inlines(&mut self) {
+    fn process_inlines(&mut self) {
         let mut partial_rules = Vec::new();
         let mut finished_rules = HashSet::new();
         for r in self.ir_rules.iter_keys() {
@@ -207,25 +242,25 @@ impl RuleExpr {
         }
         fun(self);
     }
-    pub fn push_sequence(&mut self, next: RuleExpr) {
-        match (self, next) {
-            (RuleExpr::Sequence(seq1), RuleExpr::Sequence(seq2)) => {
-                seq1.extend(seq2);
-            }
-            (RuleExpr::Sequence(seq), other) => {
-                seq.push(other);
-            }
-            (this, RuleExpr::Sequence(mut seq)) => {
-                let first = std::mem::replace(this, RuleExpr::Error);
-                seq.insert(0, first);
-                *this = RuleExpr::Sequence(seq);
-            }
-            (this, b) => {
-                let first = std::mem::replace(this, RuleExpr::Error);
-                *this = RuleExpr::Sequence(vec![first, b])
-            }
-        }
-    }
+    // pub fn push_sequence(&mut self, next: RuleExpr) {
+    //     match (self, next) {
+    //         (RuleExpr::Sequence(seq1), RuleExpr::Sequence(seq2)) => {
+    //             seq1.extend(seq2);
+    //         }
+    //         (RuleExpr::Sequence(seq), other) => {
+    //             seq.push(other);
+    //         }
+    //         (this, RuleExpr::Sequence(mut seq)) => {
+    //             let first = std::mem::replace(this, RuleExpr::Error);
+    //             seq.insert(0, first);
+    //             *this = RuleExpr::Sequence(seq);
+    //         }
+    //         (this, b) => {
+    //             let first = std::mem::replace(this, RuleExpr::Error);
+    //             *this = RuleExpr::Sequence(vec![first, b])
+    //         }
+    //     }
+    // }
     pub fn finalize(&mut self) {
         self.visit_nodes_bottom_up(&mut |node| match node {
             RuleExpr::Sequence(seq) => {

@@ -8,6 +8,7 @@ use crate::{
     ast as a,
     file::{
         self as f, AstItem, AstItemHandle, RuleDef, RuleExpr, RuleHandle, TokenDef, TokenHandle,
+        TokenPattern,
     },
     handle::HandleVec,
     ParseError, StrSpan,
@@ -33,6 +34,9 @@ impl<'a> ConvertCtx<'a> {
     }
     pub fn get_errors(&self) -> cell::Ref<'_, Vec<ParseError>> {
         self.errors.borrow()
+    }
+    pub fn finish(self) -> Vec<ParseError> {
+        RefCell::into_inner(self.errors)
     }
 }
 
@@ -108,15 +112,24 @@ pub fn file(cx: &ConvertCtx, file: a::File) -> f::File {
             unreachable!()
         };
 
-        let pattern = a::unescape_str_literal(r.value.resolve(cx));
+        let pattern = match r.value {
+            a::TokenValue::Regex(s) => a::unescape_str_literal(s.resolve(cx))
+                .map(Cow::into_owned)
+                .map(TokenPattern::Regex),
+            a::TokenValue::Arbitrary(s) => Some(TokenPattern::RustCode(s.resolve(cx).to_owned())),
+        };
         if pattern.is_none() {
-            cx.error(r.value, "Invalid string");
+            let span = match r.value {
+                a::TokenValue::Regex(s) => s,
+                a::TokenValue::Arbitrary(s) => s,
+            };
+            cx.error(span, "Invalid token pattern");
         }
 
         TokenDef {
             attrs: attributes(cx, &r.attributes),
             name: r.name.resolve_owned(cx),
-            pattern: pattern.map(Cow::into_owned).unwrap_or(String::new()),
+            pattern: pattern.unwrap_or(TokenPattern::Regex(String::new())),
         }
     });
 
@@ -184,7 +197,10 @@ fn expression(
         a::Expression::Literal(a) => {
             let value = a::unescape_str_literal(a.resolve(cx));
             if let Some(value) = value {
-                let token = tokens.iter_kv().find(|(_, v)| v.pattern == value);
+                let token = tokens.iter_kv().find(|(_, v)| match &v.pattern {
+                    TokenPattern::Regex(pattern) => pattern == &*value,
+                    TokenPattern::RustCode(_) => false,
+                });
                 if let Some((handle, _)) = token {
                     f::RuleExpr::Token(handle)
                 } else {

@@ -162,7 +162,7 @@ impl Connection {
 
         Ok(())
     }
-    pub fn send<T: Into<Message>>(&self, message: T) -> Result<(), mpsc::SendError<Message>> {
+    pub fn send(&self, message: impl Into<Message>) -> Result<(), mpsc::SendError<Message>> {
         let message = message.into();
         if let Some(fun) = self.send_handler {
             fun(&message);

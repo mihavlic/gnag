@@ -90,11 +90,17 @@ fn attribute(tree: &Node, arena: &[Node]) -> Option<Attribute> {
 }
 
 #[derive(Debug)]
+pub enum TokenValue {
+    Regex(StrSpan),
+    Arbitrary(StrSpan),
+}
+
+#[derive(Debug)]
 pub struct TokenRule {
     pub span: StrSpan,
     pub name: StrSpan,
     pub attributes: Vec<Attribute>,
-    pub value: StrSpan,
+    pub value: TokenValue,
 }
 
 fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
@@ -108,7 +114,10 @@ fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
         match c.kind {
             NodeKind::Tree(TreeKind::Attribute) => attrs.extend(attribute(c, arena)),
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
-            NodeKind::Token(TokenKind::Literal) => value = Some(c.span),
+            NodeKind::Token(TokenKind::Literal) => value = Some(TokenValue::Regex(c.span)),
+            NodeKind::Tree(
+                TreeKind::ParenDelimited | TreeKind::CurlyDelimited | TreeKind::BracketDelimited,
+            ) => value = Some(TokenValue::Arbitrary(c.span)),
             _ => {}
         }
     }

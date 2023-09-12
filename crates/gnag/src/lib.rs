@@ -45,6 +45,9 @@ pub enum TreeKind {
         SeqExpr,
         PostExpr,
         PostName,
+      ParenDelimited,
+      CurlyDelimited,
+      BracketDelimited,
 }
 
 use TokenKind::*;
@@ -55,7 +58,7 @@ pub struct TokenSpan {
     pub end: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct StrSpan {
     pub start: u32,
     pub end: u32,
@@ -65,6 +68,9 @@ impl StrSpan {
     #[inline]
     pub fn as_str(self, src: &str) -> &str {
         &src[self.start as usize..self.end as usize]
+    }
+    pub fn contains(self, pos: u32) -> bool {
+        pos >= self.start && pos < self.end
     }
 }
 
@@ -96,16 +102,40 @@ pub enum NodeKind {
     Token(TokenKind),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Node {
-    kind: NodeKind,
-    span: StrSpan,
-    children: Range<u32>,
+    pub kind: NodeKind,
+    pub span: StrSpan,
+    pub children: Range<u32>,
 }
 
 impl Node {
-    fn children<'a>(&self, arena: &'a [Node]) -> &'a [Node] {
+    pub fn children<'a>(&self, arena: &'a [Node]) -> &'a [Node] {
         &arena[self.children.start as usize..self.children.end as usize]
+    }
+    pub fn contains(&self, pos: u32) -> bool {
+        self.span.contains(pos)
+    }
+    pub fn find<'a>(&self, pos: u32, arena: &'a [Node]) -> Option<Node> {
+        let mut node = self;
+        loop {
+            if !node.contains(pos) {
+                return None;
+            }
+
+            let children = node.children(arena);
+            if children.is_empty() {
+                return Some(node.clone());
+            } else {
+                let next = match children.binary_search_by_key(&pos, |k| k.span.start) {
+                    Ok(i) => i,
+                    // we can do a saturating sub, because the actual span is checked in the next iteration
+                    // we've also checked that the `children` are non-empty
+                    Err(i) => i.saturating_sub(1),
+                };
+                node = &children[next];
+            }
+        }
     }
 }
 
@@ -362,14 +392,14 @@ pub struct ParserCheckpoint {
 
 #[derive(Clone, Copy, Debug)]
 pub struct TreeSpan {
-    kind: TreeKind,
-    span: StrSpan,
+    pub kind: TreeKind,
+    pub span: StrSpan,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Hash, Debug)]
 pub struct ParseError {
-    span: StrSpan,
-    err: String,
+    pub span: StrSpan,
+    pub err: String,
 }
 
 pub struct Parser<'a> {
@@ -769,7 +799,80 @@ fn attribute(p: &mut Parser) -> bool {
     true
 }
 
-// Attribute:attributes* Ident:name <commit> Literal:value
+// <delimited '(' ')' DelimitedExpr>
+fn paren_delimited(p: &mut Parser) -> bool {
+    let m = p.open();
+    if !p.token(LParen) {
+        return false;
+    }
+    while !p.eof() {
+        if delimited_expr(p) {
+            continue;
+        }
+        if p.token(RParen) {
+            break;
+        }
+        p.advance();
+    }
+    p.close(m, TreeKind::ParenDelimited);
+    true
+}
+
+// <delimited '{' '}' DelimitedExpr>
+fn curly_delimited(p: &mut Parser) -> bool {
+    let m = p.open();
+    if !p.token(LCurly) {
+        return false;
+    }
+    while !p.eof() {
+        if delimited_expr(p) {
+            continue;
+        }
+        if p.token(RCurly) {
+            break;
+        }
+        p.advance();
+    }
+    p.close(m, TreeKind::CurlyDelimited);
+    true
+}
+
+// <delimited '[' ']' DelimitedExpr>
+fn bracket_delimited(p: &mut Parser) -> bool {
+    let m = p.open();
+    if !p.token(LBracket) {
+        return false;
+    }
+    while !p.eof() {
+        if delimited_expr(p) {
+            continue;
+        }
+        if p.token(RBracket) {
+            break;
+        }
+        p.advance();
+    }
+    p.close(m, TreeKind::BracketDelimited);
+    true
+}
+
+// ParenDelimited | BraceDelimited | BracketDelimited
+fn delimited_expr(p: &mut Parser) -> bool {
+    let checkpoint = p.checkpoint();
+    if paren_delimited(p) {
+        return true;
+    }
+    if curly_delimited(p) {
+        return true;
+    }
+    if bracket_delimited(p) {
+        return true;
+    }
+    p.restore(checkpoint);
+    false
+}
+
+// Attribute:attributes* Ident:name <commit> (Literal:value | <balanced_soup>)
 fn token_rule(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -777,13 +880,23 @@ fn token_rule(p: &mut Parser) -> bool {
     if !p.token(Ident) {
         return false;
     }
-    p.expect(Literal);
+    'choice: {
+        let checkpoint = p.checkpoint();
+        if p.token(Literal) {
+            break 'choice;
+        }
+        p.restore(checkpoint);
+        if delimited_expr(p) {
+            break 'choice;
+        }
+        return false;
+    }
 
     p.close(m, TreeKind::TokenRule);
     true
 }
 
-// Attribute* 'rule' Ident Parameters? '{' SynExpr '}'
+// Attribute* 'inline'? 'rule' Ident Parameters? '{' SynExpr '}'
 fn syn_rule(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -972,4 +1085,27 @@ fn expr(p: &mut Parser, min_bp: u8) -> bool {
     }
 
     true
+}
+
+#[test]
+fn node_find() {
+    let str = "rule A { B }";
+
+    let mut lexer = Lexer::new(str.as_bytes());
+
+    let (tokens, trivia) = lex(&mut lexer);
+    let mut parser = crate::Parser::new(str, tokens, trivia);
+    _ = crate::file(&mut parser);
+
+    let mut arena = Vec::new();
+    let root = parser.build_tree(&mut arena);
+
+    assert_eq!(
+        root.find(0, &arena),
+        Some(Node {
+            kind: NodeKind::Token(RuleKeyword),
+            span: StrSpan { start: 0, end: 4 },
+            children: 0..0
+        })
+    );
 }

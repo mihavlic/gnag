@@ -1,23 +1,15 @@
 mod ctx;
-mod executor;
 mod ext;
 mod handlers;
-mod linemap;
-mod tokens;
 
-use std::str::FromStr;
-use std::sync::mpsc;
+use std::{fmt::Display, str::FromStr};
 
 use anyhow::Context;
 use ctx::{Config, Ctx};
-use lsp::error::ExtractError;
-use lsp::msg::{ErrorCode, Message, Request, RequestId, Response, ResponseError};
+use lsp::msg::{ErrorCode, Message, Request, Response, ResponseError};
 use lsp_types::*;
 
 use lsp::connection::Connection;
-use lsp_types::request::GotoDefinition;
-use serde::de::DeserializeOwned;
-use tokens::{TokenModifier, TokenType};
 
 fn main() {
     let level = std::env::var("RUST_LOG").unwrap_or_else(|_| "TRACE".to_owned());
@@ -41,13 +33,13 @@ fn main() {
 
     let (mut connection, io_threads) = Connection::stdio();
     if level == log::Level::Trace {
-        connection.set_receive_inspect(|result| match result {
-            Ok(msg) => {
-                let json = serde_json::to_string_pretty(msg).unwrap();
-                log::trace!("\n> {json}")
-            }
-            Err(err) => log::error!("> {err}"),
-        });
+        // connection.set_receive_inspect(|result| match result {
+        //     Ok(msg) => {
+        //         let json = serde_json::to_string_pretty(msg).unwrap();
+        //         log::trace!("\n> {json}")
+        //     }
+        //     Err(err) => log::error!("> {err}"),
+        // });
         connection.set_send_inspect(|msg| {
             let json = serde_json::to_string_pretty(msg).unwrap();
             log::trace!("\n< {json}")
@@ -67,24 +59,8 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
 
     let config = Config::new(params.initialization_options.unwrap())?;
 
-    let semantic_tokens_provider = config.semantic_tokens.then(|| SemanticTokensOptions {
-        legend: SemanticTokensLegend {
-            token_types: TokenType::types().to_vec(),
-            token_modifiers: TokenModifier::types().to_vec(),
-        },
-        full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
-        ..Default::default()
-    });
-
-    if semantic_tokens_provider.is_some() {
-        log::warn!("TODO semantic tokens");
-    }
-
     let capabilities = ServerCapabilities {
-        // completion_provider: Some(CompletionOptions {
-        //     trigger_characters: Some(vec![]),
-        //     ..Default::default()
-        // }),
+        completion_provider: Some(CompletionOptions::default()),
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
@@ -95,7 +71,7 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
-        // document_formatting_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: None,
             inter_file_dependencies: false,
@@ -118,6 +94,23 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
     connection.initialize_finish(id, &response)?;
 
     Ok(config)
+}
+
+struct PositionDisplay<'a>(&'a lsp_types::TextDocumentPositionParams);
+impl Display for PositionDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let TextDocumentPositionParams {
+            text_document,
+            position,
+        } = self.0;
+        write!(
+            f,
+            "{}:{}:{}",
+            text_document.uri.as_str(),
+            position.line + 1,
+            position.character + 1
+        )
+    }
 }
 
 fn main_loop(cx: &mut Ctx) -> anyhow::Result<()> {
@@ -143,13 +136,23 @@ fn main_loop(cx: &mut Ctx) -> anyhow::Result<()> {
                         break;
                     }
                     "textDocument/definition" => {
-                        handlers::definition(cx, &serde_json::from_value(params)?)
+                        let params: GotoDefinitionParams = serde_json::from_value(params)?;
+                        log::trace!(
+                            "textDocument/completion {}",
+                            PositionDisplay(&params.text_document_position_params)
+                        );
+                        handlers::definition(cx, &params)
                     }
                     "textDocument/documentSymbol" => {
                         handlers::document_symbol(cx, &serde_json::from_value(params)?)
                     }
                     "textDocument/completion" => {
-                        handlers::completion(cx, &serde_json::from_value(params)?)
+                        let params: CompletionParams = serde_json::from_value(params)?;
+                        log::trace!(
+                            "textDocument/completion {}",
+                            PositionDisplay(&params.text_document_position)
+                        );
+                        handlers::completion(cx, &params)
                     }
                     "textDocument/formatting" => {
                         handlers::formatting(cx, &serde_json::from_value(params)?)

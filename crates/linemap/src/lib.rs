@@ -528,7 +528,7 @@ mod tests {
         }
     }
 
-    use crate::linemap::{CodePointPos, LineMap, Utf16Pos, Utf8Pos};
+    use crate::{CodePointPos, LineMap, Utf16Pos, Utf8Pos};
 
     #[test]
     fn no_newline() {

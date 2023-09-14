@@ -18,7 +18,7 @@ use lsp_types::TextDocumentContentChangeEvent;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::linemap::{LineMap, Utf16Pos};
+use linemap::{LineMap, Utf16Pos};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,15 +133,14 @@ pub struct File {
     pub ast_ir: gnag::file::File,
     pub root: gnag::Node,
     pub arena: Vec<gnag::Node>,
-    pub parse_errors: Vec<gnag::ParseError>,
-    pub convert_errors: Vec<gnag::ParseError>,
+    pub errors: Vec<gnag::ParseError>,
 }
 
 impl File {
     fn new(version: i32, contents: String) -> Self {
         let linemap = LineMap::new(&contents);
-        let (ast_ir, parse_errors, convert_errors, arena, root) =
-            gnag::file::File::new_from_string(&contents);
+        let (ast_ir, errors, arena, root) = gnag::file::File::new_from_string(&contents);
+
         Self {
             version,
             dirty: false,
@@ -150,8 +149,7 @@ impl File {
             ast_ir,
             root,
             arena,
-            parse_errors,
-            convert_errors,
+            errors,
         }
     }
     fn update(&mut self, change: &TextDocumentContentChangeEvent) {
@@ -172,36 +170,32 @@ impl File {
             self.linemap.replace_whole(&mut self.contents, &change.text);
         }
 
-        self.dirty = true;
         self.ast_ir = Default::default();
         // self.root = Default::default();
         self.arena = Default::default();
-        self.parse_errors = Default::default();
-        self.convert_errors = Default::default();
+        self.errors = Default::default();
+        self.dirty = true;
     }
     fn update_public(&mut self) {
         if self.dirty {
             // TODO reuse the public fields' allocations
-            let (ast_ir, parse_errors, convert_errors, arena, root) =
-                gnag::file::File::new_from_string(&self.contents);
+            let (ast_ir, errors, arena, root) = gnag::file::File::new_from_string(&self.contents);
 
             self.ast_ir = ast_ir;
-            self.parse_errors = parse_errors;
-            self.convert_errors = convert_errors;
-            self.arena = arena;
             self.root = root;
-
+            self.arena = arena;
+            self.errors = errors;
             self.dirty = false;
         }
     }
-    pub fn lsp_to_offset(&self, pos: lsp_types::Position) -> crate::linemap::Offset {
+    pub fn lsp_to_offset(&self, pos: lsp_types::Position) -> linemap::Offset {
         let pos = Utf16Pos {
             line: pos.line,
             character: pos.character,
         };
         self.linemap.utf16_to_offset(&self.contents, pos)
     }
-    pub fn offset_to_lsp(&self, pos: crate::linemap::Offset) -> lsp_types::Position {
+    pub fn offset_to_lsp(&self, pos: linemap::Offset) -> lsp_types::Position {
         let utf16 = self.linemap.offset_to_utf16(&self.contents, pos);
         lsp_types::Position {
             line: utf16.line,
@@ -213,12 +207,12 @@ impl File {
         let end = self.offset_to_lsp(span.end);
         lsp_types::Range { start, end }
     }
-    pub fn find_leaf_cst_node_lsp(&self, pos: lsp_types::Position) -> Option<gnag::Node> {
+    pub fn find_leaf_cst_node_lsp(&self, pos: lsp_types::Position) -> Option<&gnag::Node> {
         let offset = self.lsp_to_offset(pos);
-        self.root.find(offset, &self.arena)
+        self.find_leaf_cst_node(offset)
     }
-    pub fn find_leaf_cst_node(&self, pos: crate::linemap::Offset) -> Option<gnag::Node> {
-        self.root.find(pos, &self.arena)
+    pub fn find_leaf_cst_node(&self, pos: linemap::Offset) -> Option<&gnag::Node> {
+        self.root.find_leaf(pos, &self.arena)
     }
     pub fn node_identifier_text(&self, node: &Node) -> Option<&str> {
         if node.kind == gnag::NodeKind::Token(gnag::TokenKind::Ident) {
@@ -291,17 +285,17 @@ impl Ctx {
         file.update_public();
         Some(file)
     }
-    pub fn response(
-        &self,
-        id: RequestId,
-        response: impl serde::Serialize,
-    ) -> Result<(), mpsc::SendError<Message>> {
-        self.send(Message::Response(Response {
-            id,
-            result: Some(serde_json::to_value(response).unwrap()),
-            error: None,
-        }))
-    }
+    // pub fn response(
+    //     &self,
+    //     id: RequestId,
+    //     response: impl serde::Serialize,
+    // ) -> Result<(), mpsc::SendError<Message>> {
+    //     self.send(Message::Response(Response {
+    //         id,
+    //         result: Some(serde_json::to_value(response).unwrap()),
+    //         error: None,
+    //     }))
+    // }
     pub fn error(
         &self,
         id: RequestId,

@@ -132,6 +132,7 @@ fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
 
 #[derive(Debug)]
 pub struct Parameters {
+    pub span: StrSpan,
     pub params: Vec<StrSpan>,
 }
 
@@ -147,7 +148,10 @@ fn parameters(tree: &Node, arena: &[Node]) -> Option<Parameters> {
         }
     }
 
-    Some(Parameters { params })
+    Some(Parameters {
+        span: tree.span,
+        params,
+    })
 }
 
 #[derive(Debug)]
@@ -157,7 +161,7 @@ pub struct SynRule {
     pub inline: bool,
     pub paramaters: Option<Parameters>,
     pub attributes: Vec<Attribute>,
-    pub expression: Expression,
+    pub expression: Option<Expression>,
 }
 
 fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
@@ -199,7 +203,7 @@ fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
         inline,
         paramaters: params,
         attributes,
-        expression: expr?,
+        expression: expr,
     })
 }
 

@@ -1,5 +1,4 @@
 mod ast;
-pub mod convert;
 pub mod file;
 pub mod handle;
 
@@ -72,6 +71,10 @@ impl StrSpan {
     pub fn contains(self, pos: u32) -> bool {
         pos >= self.start && pos < self.end
     }
+    /// Checks whether another span is fully covered by this one, empty spans are never covered.
+    pub fn contains_span(self, other: StrSpan) -> bool {
+        (other.start < other.end) && (other.start >= self.start) && (other.end <= self.end)
+    }
 }
 
 impl Index<StrSpan> for str {
@@ -82,6 +85,9 @@ impl Index<StrSpan> for str {
 }
 
 impl StrSpan {
+    pub fn empty() -> StrSpan {
+        Self { start: 0, end: 0 }
+    }
     pub fn is_empty(self) -> bool {
         self.end <= self.start
     }
@@ -116,7 +122,7 @@ impl Node {
     pub fn contains(&self, pos: u32) -> bool {
         self.span.contains(pos)
     }
-    pub fn find<'a>(&self, pos: u32, arena: &'a [Node]) -> Option<Node> {
+    pub fn find_leaf<'a>(&'a self, pos: u32, arena: &'a [Node]) -> Option<&'a Node> {
         let mut node = self;
         loop {
             if !node.contains(pos) {
@@ -125,7 +131,7 @@ impl Node {
 
             let children = node.children(arena);
             if children.is_empty() {
-                return Some(node.clone());
+                return Some(node);
             } else {
                 let next = match children.binary_search_by_key(&pos, |k| k.span.start) {
                     Ok(i) => i,
@@ -136,6 +142,259 @@ impl Node {
                 node = &children[next];
             }
         }
+    }
+    pub fn find_immediate_child<'a>(&'a self, pos: u32, arena: &'a [Node]) -> Option<&'a Node> {
+        if !self.contains(pos) {
+            return None;
+        }
+
+        let children = self.children(arena);
+        if children.is_empty() {
+            return None;
+        } else {
+            let next = match children.binary_search_by_key(&pos, |k| k.span.start) {
+                Ok(i) => i,
+                // we can do a saturating sub, because the actual span is checked in the next iteration
+                // we've also checked that the `children` are non-empty
+                Err(i) => i.saturating_sub(1),
+            };
+            return Some(&children[next]);
+        }
+    }
+    pub fn visit_downwards<'a>(
+        &'a self,
+        pos: u32,
+        visitor: &mut dyn NodeDescendVisitor<'a>,
+        arena: &'a [Node],
+    ) {
+        self.visit_downwards_(pos, visitor, arena)
+    }
+    #[inline]
+    fn visit_downwards_<'a>(
+        &'a self,
+        pos: u32,
+        visitor: &mut (impl NodeDescendVisitor<'a> + ?Sized),
+        arena: &'a [Node],
+    ) {
+        if visitor.begin(pos) == NodeVisitDecision::Stop {
+            return;
+        }
+
+        let mut node = self;
+        loop {
+            if !node.contains(pos) {
+                return;
+            }
+
+            let children = node.children(arena);
+            if visitor.visit(node) == NodeVisitDecision::Stop || children.is_empty() {
+                return;
+            } else {
+                let next = match children.binary_search_by_key(&pos, |k| k.span.start) {
+                    Ok(i) => i,
+                    // we can do a saturating sub, because the actual span is checked in the next iteration
+                    // we've also checked that the `children` are non-empty
+                    Err(i) => i.saturating_sub(1),
+                };
+                node = &children[next];
+            }
+        }
+    }
+    pub fn find_with_trace<'a>(&'a self, pos: u32, arena: &'a [Node]) -> TreeTrace<'a> {
+        let mut trace = TreeTrace::new();
+        self.visit_downwards_(pos, &mut trace, arena);
+        trace
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NodeVisitDecision {
+    Continue,
+    Stop,
+}
+
+pub trait NodeDescendVisitor<'a> {
+    fn begin(&mut self, _target_pos: u32) -> NodeVisitDecision {
+        NodeVisitDecision::Continue
+    }
+    fn visit(&mut self, node: &'a Node) -> NodeVisitDecision;
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeTrace<'a> {
+    nodes: Vec<&'a Node>,
+}
+
+impl<'a> TreeTrace<'a> {
+    pub fn new() -> TreeTrace<'a> {
+        TreeTrace { nodes: Vec::new() }
+    }
+    pub fn current(&self) -> Option<&Node> {
+        self.nodes.last().copied()
+    }
+    pub fn current_children<'b>(&'a self, arena: &'b [Node]) -> &'b [Node] {
+        self.nodes.last().map_or(&[], |node| node.children(arena))
+    }
+    pub fn parent(&self) -> Option<&Node> {
+        let len = self.nodes.len();
+        if len >= 2 {
+            self.nodes.get(len - 2).copied()
+        } else {
+            None
+        }
+    }
+
+    fn find_current_in_parent(&self, arena: &'a [Node]) -> Option<usize> {
+        let parent = self.parent()?;
+        let current = self.current().unwrap();
+        let children = parent.children(arena);
+        let current_index = children
+            .binary_search_by_key(&current.span.start, |k| k.span.start)
+            .expect("Parent does not contain current??");
+        Some(current_index)
+    }
+    pub fn sibling_before<'b>(&mut self, arena: &'b [Node]) -> Option<&'b Node> {
+        let Some(index) = self.find_current_in_parent(arena) else {
+            return None;
+        };
+        let [.., parent, _] = self.nodes.as_mut_slice() else {
+            unreachable!()
+        };
+        if index != 0 {
+            if let Some(sibling) = parent.children(arena).get(index - 1) {
+                return Some(sibling);
+            }
+        }
+        None
+    }
+    pub fn sibling_after<'b>(&mut self, arena: &'b [Node]) -> Option<&'b Node> {
+        let Some(index) = self.find_current_in_parent(arena) else {
+            return None;
+        };
+        let [.., parent, _] = self.nodes.as_mut_slice() else {
+            unreachable!()
+        };
+        if let Some(sibling) = parent.children(arena).get(index + 1) {
+            return Some(sibling);
+        }
+        None
+    }
+
+    /// Enters the current node's child (the index relates to the array returned by [`Self::current_children()`])
+    ///
+    /// Panics if the index is out of bounds.
+    #[track_caller]
+    pub fn enter_child(&mut self, index: usize, arena: &'a [Node]) {
+        let current = self.current().expect("TreeTrace is empty");
+        let child = current
+            .children(arena)
+            .get(index)
+            .expect("index out of bounds");
+        self.nodes.push(child);
+    }
+    /// Pops the current node, making its parent current. Does nothing if empty.
+    pub fn enter_parent(&mut self) {
+        self.nodes.pop();
+    }
+    pub fn enter_sibling_before(&mut self, arena: &'a [Node]) {
+        if let Some(sibling) = self.sibling_before(arena) {
+            *self.nodes.last_mut().unwrap() = sibling;
+        }
+    }
+    pub fn enter_sibling_after(&mut self, arena: &'a [Node]) {
+        if let Some(sibling) = self.sibling_after(arena) {
+            *self.nodes.last_mut().unwrap() = sibling;
+        }
+    }
+    pub fn enter_leftmost_leaf(&mut self, arena: &'a [Node]) {
+        let Some(mut current) = self.current() else {
+            return;
+        };
+
+        while let Some(leftmost) = current.children(arena).first() {
+            current = leftmost;
+            self.nodes.push(leftmost);
+        }
+    }
+    pub fn enter_rightmost_leaf(&mut self, arena: &'a [Node]) {
+        let Some(mut current) = self.current() else {
+            return;
+        };
+
+        while let Some(leftmost) = current.children(arena).last() {
+            current = leftmost;
+            self.nodes.push(leftmost);
+        }
+    }
+    // pub fn enter_sibling_after(&mut self, arena: &'a [Node]) {
+    //     if let Some(sibling) = self.sibling_after(arena) {
+    //         *self.nodes.last_mut().unwrap() = sibling;
+    //     }
+    // }
+    /// Returns an iterator visiting the current current node and then its parents.
+    pub fn backward_iter(&self) -> std::iter::Copied<std::iter::Rev<std::slice::Iter<'_, &Node>>> {
+        self.nodes.iter().rev().copied()
+    }
+    /// Returns an iterator visiting the current current node and then its parents.
+    pub fn ancestor_iter(&self) -> std::iter::Copied<std::iter::Rev<std::slice::Iter<'_, &Node>>> {
+        let len = self.nodes.len();
+        let slice = if len >= 2 {
+            &self.nodes[..len - 1]
+        } else {
+            &[]
+        };
+        slice.iter().rev().copied()
+    }
+    pub fn backward_contain_kind(&self, kind: TreeKind) -> bool {
+        for node in self.backward_iter() {
+            if let NodeKind::Tree(k) = node.kind {
+                if k == kind {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    pub fn ancestor_contain_kind(&self, kind: TreeKind) -> bool {
+        for node in self.ancestor_iter() {
+            if let NodeKind::Tree(k) = node.kind {
+                if k == kind {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+}
+
+impl<'a> NodeDescendVisitor<'a> for TreeTrace<'a> {
+    fn begin(&mut self, target_pos: u32) -> NodeVisitDecision {
+        if let Some(current) = self.current() {
+            if !current.span.contains(target_pos) {
+                return NodeVisitDecision::Stop;
+            }
+        }
+        NodeVisitDecision::Continue
+    }
+
+    fn visit(&mut self, node: &'a Node) -> NodeVisitDecision {
+        #[cfg(debug_assertions)]
+        if let Some(current) = self.current() {
+            if !current.span.contains_span(node.span) {
+                unreachable!();
+            }
+        }
+        self.nodes.push(node);
+        NodeVisitDecision::Continue
+    }
+}
+
+impl<'a, F: FnMut(&'a Node) -> NodeVisitDecision> NodeDescendVisitor<'a> for F {
+    fn visit(&mut self, node: &'a Node) -> NodeVisitDecision {
+        self(node)
     }
 }
 
@@ -1101,8 +1360,8 @@ fn node_find() {
     let root = parser.build_tree(&mut arena);
 
     assert_eq!(
-        root.find(0, &arena),
-        Some(Node {
+        root.find_leaf(0, &arena),
+        Some(&Node {
             kind: NodeKind::Token(RuleKeyword),
             span: StrSpan { start: 0, end: 4 },
             children: 0..0

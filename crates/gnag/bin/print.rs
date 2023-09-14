@@ -1,6 +1,9 @@
 use std::io::Read;
 
-use gnag::{convert::ConvertCtx, file, lex, Lexer, Node, ParseError, Parser};
+use gnag::{
+    file::{self, ConvertCtx},
+    lex, Lexer, Node, ParseError, Parser,
+};
 
 fn main() {
     // tracy_client::Client::start();
@@ -42,7 +45,7 @@ fn main() {
         println!("{buf}");
 
         let cx = ConvertCtx::new(&input);
-        let file = file::File::new(&cx, &cst, &arena);
+        let file = file::File::from_ast(&cx, &cst, &arena);
         dbg!(file.ir_rules);
         // cx.report_errors("grammar.gng", &mut std::io::stdout().lock());
     }
@@ -54,7 +57,7 @@ fn parse<'a>(arena: &mut Vec<Node>, text: &str) -> (Node, Vec<ParseError>) {
     let mut lexer = Lexer::new(text.as_bytes());
     let (tokens, trivia) = lex(&mut lexer);
     let mut parser = Parser::new(text, tokens, trivia);
-    _ = file(&mut parser);
+    _ = gnag::file(&mut parser);
     let root = parser.build_tree(arena);
 
     (root, parser.errors)

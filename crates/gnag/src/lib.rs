@@ -1,4 +1,5 @@
-mod ast;
+pub mod ast;
+pub mod ctx;
 pub mod file;
 pub mod handle;
 
@@ -49,6 +50,7 @@ pub enum TreeKind {
       BracketDelimited,
 }
 
+use ast::ParsedFile;
 use TokenKind::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -72,8 +74,12 @@ impl StrSpan {
         pos >= self.start && pos < self.end
     }
     /// Checks whether another span is fully covered by this one, empty spans are never covered.
-    pub fn contains_span(self, other: StrSpan) -> bool {
-        (other.start < other.end) && (other.start >= self.start) && (other.end <= self.end)
+    pub fn contains_span(self, span: StrSpan) -> bool {
+        (span.start < span.end) && (span.start >= self.start) && (span.end <= self.end)
+    }
+    /// Checks whether another span overlaps with this one. Empty ranges never overlap.
+    pub fn overlaps(self, span: StrSpan) -> bool {
+        (self.start < span.end) && (span.start < self.end)
     }
 }
 
@@ -122,6 +128,7 @@ impl Node {
     pub fn contains(&self, pos: u32) -> bool {
         self.span.contains(pos)
     }
+    /// Finds a [`Node`] which contains the given `pos` and has no children.
     pub fn find_leaf<'a>(&'a self, pos: u32, arena: &'a [Node]) -> Option<&'a Node> {
         let mut node = self;
         loop {
@@ -135,36 +142,60 @@ impl Node {
             } else {
                 let next = match children.binary_search_by_key(&pos, |k| k.span.start) {
                     Ok(i) => i,
-                    // we can do a saturating sub, because the actual span is checked in the next iteration
-                    // we've also checked that the `children` are non-empty
                     Err(i) => i.saturating_sub(1),
                 };
                 node = &children[next];
             }
         }
     }
-    pub fn find_immediate_child<'a>(&'a self, pos: u32, arena: &'a [Node]) -> Option<&'a Node> {
-        if !self.contains(pos) {
-            return None;
-        }
+    /// Finds the lowest [`Node`] which contains the given `span`.
+    pub fn find_covering<'a>(&'a self, span: StrSpan, arena: &'a [Node]) -> Option<&'a Node> {
+        let mut node = self;
+        loop {
+            if !node.span.contains_span(span) {
+                return None;
+            }
 
-        let children = self.children(arena);
-        if children.is_empty() {
-            return None;
-        } else {
-            let next = match children.binary_search_by_key(&pos, |k| k.span.start) {
-                Ok(i) => i,
-                // we can do a saturating sub, because the actual span is checked in the next iteration
-                // we've also checked that the `children` are non-empty
-                Err(i) => i.saturating_sub(1),
-            };
-            return Some(&children[next]);
+            let children = node.children(arena);
+            if children.is_empty() {
+                return Some(node);
+            } else {
+                let next = match children.binary_search_by_key(&span.start, |k| k.span.start) {
+                    Ok(i) => i,
+                    Err(i) => i.saturating_sub(1),
+                };
+                let child = &children[next];
+                // return current node if the child doesn't contain the span anymore
+                if child.span.end < span.end {
+                    return Some(node);
+                }
+
+                node = child;
+            }
         }
     }
-    pub fn visit_downwards<'a>(
+    // pub fn find_immediate_child<'a>(&'a self, pos: u32, arena: &'a [Node]) -> Option<&'a Node> {
+    //     if !self.contains(pos) {
+    //         return None;
+    //     }
+
+    //     let children = self.children(arena);
+    //     if children.is_empty() {
+    //         return None;
+    //     } else {
+    //         let next = match children.binary_search_by_key(&pos, |k| k.span.start) {
+    //             Ok(i) => i,
+    //             // we can do a saturating sub, because the actual span is checked in the next iteration
+    //             // we've also checked that the `children` are non-empty
+    //             Err(i) => i.saturating_sub(1),
+    //         };
+    //         return Some(&children[next]);
+    //     }
+    // }
+    pub fn visit_children<'a>(
         &'a self,
         pos: u32,
-        visitor: &mut dyn NodeDescendVisitor<'a>,
+        visitor: &mut dyn ChildVisitor<'a>,
         arena: &'a [Node],
     ) {
         self.visit_downwards_(pos, visitor, arena)
@@ -173,7 +204,7 @@ impl Node {
     fn visit_downwards_<'a>(
         &'a self,
         pos: u32,
-        visitor: &mut (impl NodeDescendVisitor<'a> + ?Sized),
+        visitor: &mut (impl ChildVisitor<'a> + ?Sized),
         arena: &'a [Node],
     ) {
         if visitor.begin(pos) == NodeVisitDecision::Stop {
@@ -192,8 +223,6 @@ impl Node {
             } else {
                 let next = match children.binary_search_by_key(&pos, |k| k.span.start) {
                     Ok(i) => i,
-                    // we can do a saturating sub, because the actual span is checked in the next iteration
-                    // we've also checked that the `children` are non-empty
                     Err(i) => i.saturating_sub(1),
                 };
                 node = &children[next];
@@ -213,7 +242,7 @@ pub enum NodeVisitDecision {
     Stop,
 }
 
-pub trait NodeDescendVisitor<'a> {
+pub trait ChildVisitor<'a> {
     fn begin(&mut self, _target_pos: u32) -> NodeVisitDecision {
         NodeVisitDecision::Continue
     }
@@ -370,7 +399,7 @@ impl<'a> TreeTrace<'a> {
     }
 }
 
-impl<'a> NodeDescendVisitor<'a> for TreeTrace<'a> {
+impl<'a> ChildVisitor<'a> for TreeTrace<'a> {
     fn begin(&mut self, target_pos: u32) -> NodeVisitDecision {
         if let Some(current) = self.current() {
             if !current.span.contains(target_pos) {
@@ -392,19 +421,19 @@ impl<'a> NodeDescendVisitor<'a> for TreeTrace<'a> {
     }
 }
 
-impl<'a, F: FnMut(&'a Node) -> NodeVisitDecision> NodeDescendVisitor<'a> for F {
+impl<'a, F: FnMut(&'a Node) -> NodeVisitDecision> ChildVisitor<'a> for F {
     fn visit(&mut self, node: &'a Node) -> NodeVisitDecision {
         self(node)
     }
 }
 
 impl Node {
-    pub fn print(
+    pub fn recursive_format_into(
         &self,
         buf: &mut dyn std::fmt::Write,
         src: &str,
         nodes: &[Node],
-        errors: &mut std::slice::Iter<'_, ParseError>,
+        errors: &mut std::slice::Iter<'_, SpannedError>,
         level: usize,
     ) {
         for _ in 0..level {
@@ -417,16 +446,26 @@ impl Node {
         if self.children.is_empty() {
             _ = write!(buf, " {:?}", self.span.as_str(src));
         }
-        if let Some(peek) = errors.clone().next() {
+        while let Some(peek) = errors.clone().next() {
             if self.span == peek.span {
                 errors.next();
                 _ = write!(buf, " !!{}", peek.err);
+            } else {
+                break;
             }
         }
         _ = write!(buf, "\n");
         for child in self.children(nodes) {
-            child.print(buf, src, nodes, errors, level + 1);
+            child.recursive_format_into(buf, src, nodes, errors, level + 1);
         }
+    }
+    pub fn pretty_print(&self, src: &str, nodes: &[Node], errors: &[SpannedError]) -> String {
+        let mut buf = String::new();
+        self.recursive_format_into(&mut buf, src, nodes, &mut errors.iter(), 0);
+        buf
+    }
+    pub fn pretty_print_with_file(&self, src: &str, file: &ParsedFile) -> String {
+        self.pretty_print(src, &file.arena, &file.errors)
     }
 }
 
@@ -656,7 +695,7 @@ pub struct TreeSpan {
 }
 
 #[derive(Clone, Hash, Debug)]
-pub struct ParseError {
+pub struct SpannedError {
     pub span: StrSpan,
     pub err: String,
 }
@@ -666,7 +705,7 @@ pub struct Parser<'a> {
     trivia: Vec<Token>,
     pos: u32,
     spans: Vec<TreeSpan>,
-    pub errors: Vec<ParseError>,
+    errors: Vec<SpannedError>,
     src: &'a str,
 }
 
@@ -680,6 +719,9 @@ impl<'a> Parser<'a> {
             errors: Vec::new(),
             src,
         }
+    }
+    pub fn finish(self) -> Vec<SpannedError> {
+        self.errors
     }
 
     // We push tree spans (and their errors) when we close them, so we end up with a reversed topological order; the root will always be last.
@@ -844,13 +886,13 @@ impl<'a> Parser<'a> {
         let kind = TreeKind::ErrorTree;
         let err = err.to_string();
         let span = self.close(m, kind);
-        self.errors.push(ParseError { span, err });
+        self.errors.push(SpannedError { span, err });
     }
 
     pub fn error(&mut self, err: impl ToString) {
         let err = err.to_string();
         let end = self.tokens.get(self.pos as usize).map_or(0, |s| s.span.end);
-        self.errors.push(ParseError {
+        self.errors.push(SpannedError {
             span: StrSpan {
                 start: end,
                 end: end,

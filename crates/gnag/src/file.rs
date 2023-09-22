@@ -1,10 +1,14 @@
 use std::{
-    borrow::{Borrow, Cow},
-    cell::RefCell,
-    collections::{hash_map::Entry, HashMap, HashSet},
+    borrow::Cow,
+    collections::{hash_map::Entry, HashMap},
 };
 
-use crate::{ast, handle::HandleVec, lex, Lexer, Node, ParseError, StrSpan};
+use crate::{
+    ast::{self, ParsedFile},
+    ctx::{ConvertCtx, SpanExt},
+    handle::HandleVec,
+    SpannedError, StrSpan,
+};
 
 crate::simple_handle! {
     pub TokenHandle,
@@ -37,11 +41,13 @@ pub struct Attribute {
     pub name: String,
 }
 
+#[derive(Debug)]
 pub enum TokenPattern {
     Regex(String),
     RustCode(String),
 }
 
+#[derive(Debug)]
 pub struct TokenDef {
     pub ast: AstItemHandle,
     pub attrs: Vec<Attribute>,
@@ -65,81 +71,28 @@ pub enum ItemKind {
     Rule(RuleHandle),
 }
 
-pub struct ConvertCtx<'a> {
-    pub src: &'a str,
-    pub errors: RefCell<Vec<ParseError>>,
-}
-
-impl<'a> ConvertCtx<'a> {
-    pub fn new(src: &'a str) -> Self {
-        Self {
-            src,
-            errors: Default::default(),
-        }
-    }
-}
-
-pub trait SpanExt {
-    fn resolve<'a, S: Borrow<str> + 'a>(self, cx: &'a S) -> &'a str;
-    fn resolve_owned<S: Borrow<str>>(self, cx: &S) -> String;
-}
-
-impl SpanExt for StrSpan {
-    fn resolve<'a, S: Borrow<str> + 'a>(self, cx: &'a S) -> &'a str {
-        self.as_str(cx.borrow())
-    }
-
-    fn resolve_owned<S: Borrow<str>>(self, cx: &S) -> String {
-        self.as_str(cx.borrow()).to_owned()
-    }
-}
-
-impl ConvertCtx<'_> {
-    fn error(&self, span: StrSpan, message: impl ToString) {
-        self.errors.borrow_mut().push(ParseError {
-            span,
-            err: message.to_string(),
-        })
-    }
-}
-
-impl Borrow<str> for ConvertCtx<'_> {
-    fn borrow(&self) -> &str {
-        self.src
-    }
-}
-
 #[derive(Default)]
-pub struct File {
+pub struct ConvertedFile {
     pub name_to_item: HashMap<String, ItemKind>,
     pub ast_items: HandleVec<AstItemHandle, AstItem>,
 
-    pub ir_tokens: HandleVec<TokenHandle, TokenDef>,
-    pub ir_rules: HandleVec<RuleHandle, RuleDef>,
+    pub tokens: HandleVec<TokenHandle, TokenDef>,
+    pub rules: HandleVec<RuleHandle, RuleDef>,
+
+    pub errors: Vec<SpannedError>,
 }
 
-impl File {
-    pub fn new_from_string(src: &str) -> (Self, Vec<ParseError>, Vec<Node>, Node) {
-        let mut lexer = Lexer::new(src.as_bytes());
-
-        let (tokens, trivia) = lex(&mut lexer);
-        let mut parser = crate::Parser::new(src, tokens, trivia);
-        _ = crate::file(&mut parser);
-
-        let mut arena = Vec::new();
-        let root = parser.build_tree(&mut arena);
-
-        let cx = ConvertCtx::new(src);
-        let file = File::from_ast(&cx, &root, &arena);
-        (file, RefCell::into_inner(cx.errors), arena, root)
-    }
-    pub fn from_ast(cx: &ConvertCtx, cst: &Node, arena: &[Node]) -> File {
-        let file_ast = ast::file(&cst, &arena).unwrap();
+impl ConvertedFile {
+    pub fn new(src: &str, file: &ParsedFile) -> ConvertedFile {
+        let file_ast = ast::file(&file.root, &file.arena).unwrap();
 
         let mut name_to_item = HashMap::new();
         let mut ast_items = HandleVec::new();
         let mut ast_tokens = HandleVec::new();
         let mut ast_rules = HandleVec::new();
+
+        let mut convert_cx = ConvertCtx::new(src);
+        let cx = &mut convert_cx;
 
         for item in file_ast.items {
             match item {
@@ -194,64 +147,14 @@ impl File {
             ast_token_to_ir(cx, handle, ast, &ir_tokens, &name_to_item)
         });
 
-        File {
+        ConvertedFile {
             name_to_item,
             ast_items,
-            ir_tokens,
-            ir_rules,
+            tokens: ir_tokens,
+            rules: ir_rules,
+            errors: convert_cx.finish(),
         }
     }
-    // fn process_inlines(&mut self) {
-    //     let mut partial_rules = Vec::new();
-    //     let mut finished_rules = HashSet::new();
-    //     for r in self.ir_rules.iter_keys() {
-    //         self.rule_apply_inlines(r, &mut partial_rules, &mut finished_rules);
-    //     }
-    // }
-    // fn rule_process_body(
-    //     &mut self,
-    //     rule_handle: RuleHandle,
-    //     partial_rules: &mut Vec<RuleHandle>,
-    //     finished_rules: &mut HashSet<RuleHandle>,
-    // ) {
-    //     let rule = &self.ir_rules[rule_handle];
-    //     if finished_rules.contains(&rule_handle) {
-    //         return &rule;
-    //     }
-
-    //     if rule.inline {
-    //         let conflict = partial_rules.contains(&rule_handle);
-    //         partial_rules.push(rule_handle);
-
-    //         if conflict {
-    //             let names = partial_rules
-    //                 .iter()
-    //                 .flat_map(|handle| {
-    //                     let name = &self.ir_rules[*handle].name;
-    //                     [name, " "]
-    //                 })
-    //                 .collect::<String>();
-
-    //             panic!("{} rule is recursively inlined:\n{}", rule.name, names);
-    //         }
-
-    //         let mut take = std::mem::replace(&mut self.ir_rules[rule_handle].expr, RuleExpr::Error);
-    //         take.visit_nodes_top_down(&mut |node| {
-    //             if let RuleExpr::Rule(handle) = node {
-    //                 if self.ir_rules[*handle].inline {
-    //                     self.rule_apply_inlines(*handle, partial_rules, finished_rules);
-    //                     *node = self.ir_rules[*handle].expr.clone();
-    //                 }
-    //             }
-    //         });
-    //         take.finalize();
-    //         _ = std::mem::replace(&mut self.ir_rules[rule_handle].expr, take);
-
-    //         assert_eq!(partial_rules.pop(), Some(rule_handle));
-    //     }
-
-    //     finished_rules.insert(rule_handle);
-    // }
 }
 
 fn ast_token_to_ir(
@@ -300,15 +203,15 @@ fn ast_token_to_ir(
 }
 
 fn token_ast_to_ir(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::TokenRule) -> TokenDef {
-    let pattern = match ast.value {
-        ast::TokenValue::Regex(s) => ast::unescape_str_literal(s.resolve(cx))
+    let pattern = match ast.pattern {
+        ast::TokenValue::Regex(s) => ast::extract_str_literal(s.resolve(cx))
             .map(Cow::into_owned)
             .map(TokenPattern::Regex),
         ast::TokenValue::Arbitrary(s) => Some(TokenPattern::RustCode(s.resolve(cx).to_owned())),
     };
 
     if pattern.is_none() {
-        let span = match ast.value {
+        let span = match ast.pattern {
             ast::TokenValue::Regex(s) => s,
             ast::TokenValue::Arbitrary(s) => s,
         };
@@ -325,8 +228,10 @@ fn token_ast_to_ir(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::TokenR
 
 #[derive(Clone, Debug)]
 pub struct CallExpr {
-    rule: RuleHandle,
-    arguments: Vec<RuleExpr>,
+    pub rule: RuleHandle,
+    pub parameters: Vec<RuleExpr>,
+    // TODO use a more consistent solution
+    pub span: StrSpan,
 }
 
 #[derive(Clone, Debug)]
@@ -364,50 +269,56 @@ impl RuleExpr {
     pub fn is_choice(&self) -> bool {
         matches!(self, Self::Choice(_))
     }
-    pub fn visit_nodes_top_down(&mut self, fun: &mut dyn FnMut(&mut RuleExpr)) {
+    pub fn visit_nodes_top_down(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
+        self.visit_nodes_top_down_(&mut fun)
+    }
+    fn visit_nodes_top_down_(&mut self, fun: &mut dyn FnMut(&mut RuleExpr)) {
         fun(self);
         match self {
             RuleExpr::Sequence(vec) | RuleExpr::Choice(vec) => {
                 for a in vec {
-                    a.visit_nodes_top_down(fun);
+                    a.visit_nodes_top_down_(fun);
                 }
             }
             RuleExpr::SeparatedList { element, separator } => {
-                element.visit_nodes_top_down(fun);
-                separator.visit_nodes_top_down(fun);
+                element.visit_nodes_top_down_(fun);
+                separator.visit_nodes_top_down_(fun);
             }
             RuleExpr::Not(a)
             | RuleExpr::Maybe(a)
             | RuleExpr::ZeroOrMore(a)
             | RuleExpr::OneOrMore(a) => {
-                a.visit_nodes_top_down(fun);
+                a.visit_nodes_top_down_(fun);
             }
             _ => {}
         }
     }
-    pub fn visit_nodes_bottom_up(&mut self, fun: &mut dyn FnMut(&mut RuleExpr)) {
+    pub fn visit_nodes_bottom_up(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
+        self.visit_nodes_bottom_up_(&mut fun)
+    }
+    fn visit_nodes_bottom_up_(&mut self, fun: &mut dyn FnMut(&mut RuleExpr)) {
         match self {
             RuleExpr::Sequence(vec) | RuleExpr::Choice(vec) => {
                 for a in vec {
-                    a.visit_nodes_bottom_up(fun);
+                    a.visit_nodes_bottom_up_(fun);
                 }
             }
             RuleExpr::SeparatedList { element, separator } => {
-                element.visit_nodes_bottom_up(fun);
-                separator.visit_nodes_bottom_up(fun);
+                element.visit_nodes_bottom_up_(fun);
+                separator.visit_nodes_bottom_up_(fun);
             }
             RuleExpr::Not(a)
             | RuleExpr::Maybe(a)
             | RuleExpr::ZeroOrMore(a)
             | RuleExpr::OneOrMore(a) => {
-                a.visit_nodes_bottom_up(fun);
+                a.visit_nodes_bottom_up_(fun);
             }
             _ => {}
         }
         fun(self);
     }
     pub fn finalize(&mut self) {
-        self.visit_nodes_bottom_up(&mut |node| match node {
+        self.visit_nodes_bottom_up(|node| match node {
             RuleExpr::Sequence(seq) => {
                 let mut i = 0;
                 while i < seq.len() {
@@ -482,7 +393,7 @@ fn expression(
             }
         }
         ast::Expression::Literal(a) => {
-            let value = ast::unescape_str_literal(a.resolve(cx));
+            let value = ast::extract_str_literal(a.resolve(cx));
             if let Some(value) = value {
                 let token = tokens.iter_kv().find(|(_, v)| match &v.pattern {
                     TokenPattern::Regex(pattern) => pattern == &*value,
@@ -508,11 +419,13 @@ fn expression(
             RuleExpr::Error
         }
         ast::Expression::CallExpr(a) => {
-            let name = a.name.resolve(cx);
             let expression = a
                 .args
                 .as_ref()
                 .map(|e| expression(cx, e, parameters, tokens, name_to_item));
+
+            let name = a.name.resolve(cx);
+
             let mut arguments = match expression {
                 Some(RuleExpr::Sequence(seq)) => seq,
                 Some(a) => vec![a],
@@ -543,7 +456,8 @@ fn expression(
                     }
                     Some(ItemKind::Rule(rule)) => RuleExpr::InlineCall(Box::new(CallExpr {
                         rule: *rule,
-                        arguments,
+                        parameters: arguments,
+                        span: a.span,
                     })),
                     None => {
                         cx.error(a.name, "Unknown item");

@@ -28,6 +28,11 @@
                 "category": "gnag-lsp"
             },
             {
+                "command": "gnag-lsp.showLoweredIr",
+                "title": "Show Rule Lowered IR",
+                "category": "gnag-lsp"
+            },
+            {
                 "command": "gnag-lsp.restartServer",
                 "title": "Restart server",
                 "category": "gnag-lsp"
@@ -92,45 +97,49 @@
         "menus": {
             "commandPalette": [
                 {
-                    "command": "gnag.showAst",
-                    "when": "resourceLangId == typescript"
+                    "command": "gnag-lsp.showAst",
+                    "when": "resourceLangId == gnag"
+                },
+                {
+                    "command": "gnag-lsp.showIr",
+                    "when": "resourceLangId == gnag"
                 }
             ]
         },
         "activationEvents": [
             "onLanguage:gnag"
-        ],
-        "scripts": {
-            "build-base": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node16",
-            "vscode:prepublish": "npm run build-base -- --minify",
-            "package": "vsce package",
-            "compile": "npm run build-base -- --sourcemap",
-            "watch": "npm run build-base -- --sourcemap --watch",
-            "check": "tsc --noEmit",
-            "lint": "eslint ./src --ext .ts",
-            "lint-fix": "eslint ./src --ext .ts --fix",
-            "format-check": "prettier --check .",
-            "format": "prettier --write .",
-            "test": ""
-        },
-        "dependencies": {
-            "vscode-languageclient": "^8.1.0"
-        },
-        "devDependencies": {
-            "@types/node": "^20.4.5",
-            "@types/vscode": "~1.71.0",
-            "@typescript-eslint/eslint-plugin": "^6.2.0",
-            "@typescript-eslint/parser": "^6.2.0",
-            "@vscode/vsce": "^2.19.0",
-            "ovsx": "^0.8.2",
-            "esbuild": "^0.18.16",
-            "eslint": "^8.45.0",
-            "eslint-config-prettier": "^8.8.0",
-            "eslint-plugin-import": "^2.27.5",
-            "eslint-plugin-n": "^16.0.1",
-            "eslint-plugin-promise": "^6.1.1",
-            "prettier": "^3.0.0",
-            "typescript": "^5.1.6"
-        }
+        ]
+    },
+    "scripts": {
+        "build-base": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node16",
+        "vscode:prepublish": "npm run build-base -- --minify",
+        "package": "vsce package",
+        "compile": "npm run build-base -- --sourcemap",
+        "watch": "npm run build-base -- --sourcemap --watch",
+        "check": "tsc --noEmit",
+        "lint": "eslint ./src --ext .ts",
+        "lint-fix": "eslint ./src --ext .ts --fix",
+        "format-check": "prettier --check .",
+        "format": "prettier --write .",
+        "test": ""
+    },
+    "dependencies": {
+        "vscode-languageclient": "^8.1.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.4.5",
+        "@types/vscode": "~1.71.0",
+        "@typescript-eslint/eslint-plugin": "^6.2.0",
+        "@typescript-eslint/parser": "^6.2.0",
+        "@vscode/vsce": "^2.19.0",
+        "ovsx": "^0.8.2",
+        "esbuild": "^0.18.16",
+        "eslint": "^8.45.0",
+        "eslint-config-prettier": "^8.8.0",
+        "eslint-plugin-import": "^2.27.5",
+        "eslint-plugin-n": "^16.0.1",
+        "eslint-plugin-promise": "^6.1.1",
+        "prettier": "^3.0.0",
+        "typescript": "^5.1.6"
     }
 }

@@ -15,5 +15,5 @@ simplelog = "0.12.1"
 anyhow = "1.0.72"
 
 gnag = { path = "../gnag" }
+gnag-gen = { path = "../gnag-gen" }
 linemap = { path = "../linemap" }
-# nucleo = { version = "0.2.1", features = [] }

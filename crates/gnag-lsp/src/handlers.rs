@@ -2,27 +2,33 @@ use std::hash::Hasher;
 
 use anyhow::Context;
 use gnag::{
+    ctx::SpanExt,
     file::{AstItem, RuleExpr},
     NodeKind, StrSpan,
 };
 use lsp_types::{CompletionItemKind, GotoDefinitionResponse, SymbolKind};
 
-use crate::ctx::{Ctx, StrSpanExt};
+use crate::{
+    ctx::{Ctx, ParsedFileExt},
+    lsp_ext::TextDocumentParams,
+};
 
 pub fn definition(
     cx: &mut Ctx,
     params: &lsp_types::GotoDefinitionParams,
 ) -> anyhow::Result<serde_json::Value> {
     let position = &params.text_document_position_params;
-    let file = cx.get_file(position.text_document.uri.as_ref()).unwrap();
 
-    let node = file
-        .find_leaf_cst_node_lsp(position.position)
+    let file = cx.get_file(position.text_document.uri.as_ref()).unwrap();
+    let parsed = file.get_parsed();
+    let converted = file.get_converted();
+
+    let node = parsed
+        .find_leaf_cst_node_lsp(file, position.position)
         .context("Text position is invalid")?;
 
-    if let Some(identifier) = file.node_identifier_text(&node) {
-        if let Some(found) = file
-            .ast_ir
+    if let Some(identifier) = parsed.node_identifier_text(file, &node) {
+        if let Some(found) = converted
             .ast_items
             .iter()
             .find(|item| item.name().resolve(file) == identifier)
@@ -44,8 +50,9 @@ pub fn document_symbol(
     params: &lsp_types::DocumentSymbolParams,
 ) -> anyhow::Result<serde_json::Value> {
     let file = cx.get_file(params.text_document.uri.as_ref()).unwrap();
-    let symbols = file
-        .ast_ir
+    let converted = file.get_converted();
+
+    let symbols = converted
         .ast_items
         .iter()
         .map(|item| lsp_types::SymbolInformation {
@@ -83,8 +90,12 @@ pub fn completion(
         .get_file(params.text_document_position.text_document.uri.as_ref())
         .unwrap();
 
+    let parsed = file.get_parsed();
+    let converted = file.get_converted();
+    // let lowered = file.get_lowered();
+
     let cursor = file.lsp_to_offset(params.text_document_position.position);
-    let mut trace = file.root.find_with_trace(cursor, &file.arena);
+    let mut trace = parsed.root.find_with_trace(cursor, &parsed.arena);
 
     let mut filter = CompletionFilter::Invalid;
     for node in trace.ancestor_iter() {
@@ -95,7 +106,7 @@ pub fn completion(
         match node.kind {
             NodeKind::Tree(gnag::TreeKind::CallExpr) => {
                 let ident = node
-                    .children(&file.arena)
+                    .children(&parsed.arena)
                     .iter()
                     .find(|c| c.kind == NodeKind::Token(gnag::TokenKind::Ident));
 
@@ -129,8 +140,8 @@ pub fn completion(
         // aaaaaaa<whitespace>
         //        | cursor
         if cursor == current.span.start {
-            trace.enter_sibling_before(&file.arena);
-            trace.enter_rightmost_leaf(&file.arena);
+            trace.enter_sibling_before(&parsed.arena);
+            trace.enter_rightmost_leaf(&parsed.arena);
         }
 
         let current = trace.current().unwrap();
@@ -139,7 +150,7 @@ pub fn completion(
                 start: current.span.start,
                 end: cursor,
             };
-            partial_text = span.resolve(&file);
+            partial_text = span.resolve(&*file);
         }
     };
 
@@ -147,17 +158,17 @@ pub fn completion(
 
     let list = match filter {
         CompletionFilter::Symbols => collect_completion_list(
-            file.ast_ir
+            converted
                 .ast_items
                 .iter()
-                .map(|item| (item.name().resolve(&file), item_to_completion_kind(item))),
+                .map(|item| (item.name().resolve(&*file), item_to_completion_kind(item))),
         ),
         CompletionFilter::Callable => collect_completion_list(
-            file.ast_ir
+            converted
                 .ast_items
                 .iter()
                 .filter_map(|item| match item {
-                    AstItem::Rule(rule, _) => rule.inline.then_some(item.name().resolve(&file)),
+                    AstItem::Rule(rule, _) => rule.inline.then_some(item.name().resolve(&*file)),
                     AstItem::Token(_, _) => None,
                 })
                 .chain(RuleExpr::BUILTIN_RULES.iter().copied())
@@ -198,8 +209,8 @@ fn collect_completion_list<'a>(
 }
 
 pub fn formatting(
-    cx: &mut Ctx,
-    params: &lsp_types::DocumentFormattingParams,
+    _cx: &mut Ctx,
+    _params: &lsp_types::DocumentFormattingParams,
 ) -> anyhow::Result<serde_json::Value> {
     anyhow::bail!("TODO")
 }
@@ -209,9 +220,16 @@ pub fn diagnostic(
     params: &lsp_types::DocumentDiagnosticParams,
 ) -> anyhow::Result<serde_json::Value> {
     let file = cx.get_file(params.text_document.uri.as_ref()).unwrap();
+
+    let parsed = file.get_parsed();
+    let converted = file.get_converted();
+    let lowered = file.get_lowered();
+
     let hash = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(&file.errors, &mut hasher);
+        std::hash::Hash::hash(&parsed.errors, &mut hasher);
+        std::hash::Hash::hash(&converted.errors, &mut hasher);
+        std::hash::Hash::hash(&lowered.errors, &mut hasher);
         hasher.finish()
     };
     let hash = format!("{hash:x}");
@@ -225,9 +243,9 @@ pub fn diagnostic(
             },
         )
     } else {
-        let items = file
-            .errors
-            .iter()
+        let items = [&parsed.errors, &converted.errors, &lowered.errors]
+            .into_iter()
+            .flatten()
             .map(|e| lsp_types::Diagnostic {
                 range: file.span_to_lsp(e.span),
                 severity: Some(lsp_types::DiagnosticSeverity::ERROR),
@@ -245,6 +263,99 @@ pub fn diagnostic(
         })
     }
     .serialize()
+}
+
+pub fn show_ast(cx: &mut Ctx, params: &TextDocumentParams) -> anyhow::Result<serde_json::Value> {
+    let file = cx.get_file(params.text_document.uri.as_ref()).unwrap();
+    let parsed = file.get_parsed();
+
+    let node = params
+        .range
+        .map(|span| {
+            let span = parsed.trim_selection(file, file.lsp_to_span(span));
+            parsed.find_covering_cst_node(span)
+        })
+        .flatten()
+        .unwrap_or(&parsed.root);
+
+    node.pretty_print_with_file(file.src(), &*parsed)
+        .serialize()
+}
+
+pub fn show_ir(cx: &mut Ctx, params: &TextDocumentParams) -> anyhow::Result<serde_json::Value> {
+    let file = cx.get_file(params.text_document.uri.as_ref()).unwrap();
+    let parsed = file.get_parsed();
+    let converted = file.get_converted();
+
+    let range = params
+        .range
+        .map(|range| file.lsp_to_span(range))
+        .unwrap_or(parsed.root.span);
+
+    let mut buf = String::new();
+    for item in &converted.ast_items {
+        use std::fmt::Write as _;
+        match *item {
+            AstItem::Token(ref ast, Some(handle)) => {
+                if ast.span.overlaps(range) {
+                    let name = &converted.tokens[handle].name;
+                    let item = &converted.tokens[handle];
+                    _ = writeln!(buf, "{name}: {:#?}", item);
+                }
+            }
+            AstItem::Rule(ref ast, Some(handle)) => {
+                if ast.span.overlaps(range) {
+                    let name = &converted.rules[handle].name;
+                    let item = &converted.rules[handle];
+                    _ = writeln!(buf, "{name}: {:#?}", item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    buf.serialize()
+}
+
+pub fn show_lowered_ir(
+    cx: &mut Ctx,
+    params: &TextDocumentParams,
+) -> anyhow::Result<serde_json::Value> {
+    let file = cx.get_file(params.text_document.uri.as_ref()).unwrap();
+    let parsed = file.get_parsed();
+    let lowered = file.get_lowered();
+    let converted = file.get_converted();
+
+    log::debug!("{:?}", params.range);
+
+    let range = params
+        .range
+        .map(|range| file.lsp_to_span(range))
+        .unwrap_or(parsed.root.span);
+
+    let mut buf = String::new();
+    for item in &converted.ast_items {
+        use std::fmt::Write as _;
+        match *item {
+            AstItem::Token(ref ast, Some(handle)) => {
+                if ast.span.overlaps(range) {
+                    let name = &converted.tokens[handle].name;
+                    let item = &lowered.lowered_tokens[handle];
+                    _ = writeln!(buf, "{name}: {:#?}", item);
+                }
+            }
+            AstItem::Rule(ref ast, Some(handle)) => {
+                if ast.span.overlaps(range) {
+                    let name = &converted.rules[handle].name;
+                    let item = &lowered.lowered_rules[handle];
+                    _ = writeln!(buf, "{name}: {:#?}", item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    buf.serialize()
 }
 
 trait JsonAnyhowSerialize {

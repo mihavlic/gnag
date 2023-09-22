@@ -80,6 +80,9 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
     pub fn get(&self, index: H) -> Option<&T> {
         self.0.get(index.index())
     }
+    pub fn as_slice(&self) -> &[T] {
+        &self.0
+    }
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
@@ -197,6 +200,22 @@ impl<H: TypedHandle, T> SecondaryVec<H, T> {
             Some(some) => some.as_ref(),
             None => None,
         }
+    }
+    pub fn get_mut(&mut self, index: H) -> Option<&mut T> {
+        let get = self.0.get_mut(index.index());
+        match get {
+            Some(some) => some.as_mut(),
+            None => None,
+        }
+    }
+    pub fn entry(&mut self, index: H) -> &mut Option<T> {
+        let index = index.index();
+        if index >= self.0.len() {
+            let add = self.0.len()..=index;
+            self.0.extend(add.map(|_| None));
+        }
+
+        &mut self.0[index]
     }
     pub fn iter(&self) -> std::iter::Flatten<std::slice::Iter<'_, Option<T>>> {
         self.0.iter().flatten()

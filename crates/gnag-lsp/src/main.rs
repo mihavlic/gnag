@@ -1,6 +1,7 @@
 mod ctx;
 mod ext;
 mod handlers;
+mod lsp_ext;
 
 use std::{fmt::Display, str::FromStr};
 
@@ -33,13 +34,13 @@ fn main() {
 
     let (mut connection, io_threads) = Connection::stdio();
     if level == log::Level::Trace {
-        // connection.set_receive_inspect(|result| match result {
-        //     Ok(msg) => {
-        //         let json = serde_json::to_string_pretty(msg).unwrap();
-        //         log::trace!("\n> {json}")
-        //     }
-        //     Err(err) => log::error!("> {err}"),
-        // });
+        connection.set_receive_inspect(|result| match result {
+            Ok(msg) => {
+                let json = serde_json::to_string_pretty(msg).unwrap();
+                log::trace!("\n> {json}")
+            }
+            Err(err) => log::error!("> {err}"),
+        });
         connection.set_send_inspect(|msg| {
             let json = serde_json::to_string_pretty(msg).unwrap();
             log::trace!("\n< {json}")
@@ -71,7 +72,7 @@ fn init(connection: &Connection) -> anyhow::Result<Config> {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
-        document_formatting_provider: Some(OneOf::Left(true)),
+        // document_formatting_provider: Some(OneOf::Left(true)),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: None,
             inter_file_dependencies: false,
@@ -159,6 +160,11 @@ fn main_loop(cx: &mut Ctx) -> anyhow::Result<()> {
                     }
                     "textDocument/diagnostic" => {
                         handlers::diagnostic(cx, &serde_json::from_value(params)?)
+                    }
+                    "gnag-lsp/showAst" => handlers::show_ast(cx, &serde_json::from_value(params)?),
+                    "gnag-lsp/showIr" => handlers::show_ir(cx, &serde_json::from_value(params)?),
+                    "gnag-lsp/showLoweredIr" => {
+                        handlers::show_lowered_ir(cx, &serde_json::from_value(params)?)
                     }
                     _ => {
                         cx.error(

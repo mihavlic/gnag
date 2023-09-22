@@ -1,9 +1,6 @@
 use std::io::Read;
 
-use gnag::{
-    file::{self, ConvertCtx},
-    lex, Lexer, Node, ParseError, Parser,
-};
+use gnag::{ast::ParsedFile, file::ConvertedFile, lex, Lexer, Parser};
 
 fn main() {
     // tracy_client::Client::start();
@@ -38,29 +35,17 @@ fn main() {
             bench("build", input.len(), || parser.build_tree(&mut arena));
         });
     } else {
-        let (cst, errors) = parse(&mut arena, &input);
+        let parsed = ParsedFile::new(&input);
+        {
+            let pretty = parsed.root.pretty_print_with_file(&input, &parsed);
+            println!("{pretty}")
+        }
+        let convert = ConvertedFile::new(&input, &parsed);
 
-        let mut buf = String::new();
-        cst.print(&mut buf, &input, &arena, &mut errors.iter(), 0);
-        println!("{buf}");
-
-        let cx = ConvertCtx::new(&input);
-        let file = file::File::from_ast(&cx, &cst, &arena);
-        dbg!(file.ir_rules);
-        // cx.report_errors("grammar.gng", &mut std::io::stdout().lock());
+        dbg!(convert.rules);
     }
 
     // profiling::finish_frame!();
-}
-
-fn parse<'a>(arena: &mut Vec<Node>, text: &str) -> (Node, Vec<ParseError>) {
-    let mut lexer = Lexer::new(text.as_bytes());
-    let (tokens, trivia) = lex(&mut lexer);
-    let mut parser = Parser::new(text, tokens, trivia);
-    _ = gnag::file(&mut parser);
-    let root = parser.build_tree(arena);
-
-    (root, parser.errors)
 }
 
 fn bench<T>(name: &str, len_bytes: usize, fun: impl FnOnce() -> T) -> T {

@@ -1,14 +1,16 @@
 use std::{
+    cell::{Ref, RefCell},
     collections::HashMap,
     fmt::{Debug, Display},
     io,
-    ops::{self, Deref},
+    ops::Deref,
     sync::mpsc,
     time::Duration,
 };
 
 use anyhow::{bail, Context};
-use gnag::{Node, StrSpan};
+use gnag::{ast::ParsedFile, ctx::SpanExt, file::ConvertedFile, Node, StrSpan};
+use gnag_gen::LoweredFile;
 use lsp::{
     connection::{Connection, ReceiveIter},
     error::ProtocolError,
@@ -83,7 +85,7 @@ impl Debug for FileUrl {
     }
 }
 
-impl ops::Deref for FileUrl {
+impl Deref for FileUrl {
     type Target = FileUrlRef;
     fn deref(&self) -> &Self::Target {
         self.0.as_str().into()
@@ -125,31 +127,32 @@ impl Debug for FileUrlRef {
     }
 }
 
-pub struct File {
+pub struct LspFile {
     version: i32,
-    dirty: bool,
-    pub linemap: LineMap,
-    pub contents: String,
-    pub ast_ir: gnag::file::File,
-    pub root: gnag::Node,
-    pub arena: Vec<gnag::Node>,
-    pub errors: Vec<gnag::ParseError>,
+
+    src: String,
+    linemap: LineMap,
+
+    parsed: RefCell<Option<ParsedFile>>,
+    converted: RefCell<Option<ConvertedFile>>,
+    lowered: RefCell<Option<LoweredFile>>,
 }
 
-impl File {
-    fn new(version: i32, contents: String) -> Self {
-        let linemap = LineMap::new(&contents);
-        let (ast_ir, errors, arena, root) = gnag::file::File::new_from_string(&contents);
+impl std::borrow::Borrow<str> for LspFile {
+    fn borrow(&self) -> &str {
+        &self.src
+    }
+}
 
+impl LspFile {
+    fn new(version: i32, src: String) -> Self {
         Self {
             version,
-            dirty: false,
-            linemap,
-            contents,
-            ast_ir,
-            root,
-            arena,
-            errors,
+            linemap: LineMap::new(&src),
+            src,
+            parsed: Default::default(),
+            converted: Default::default(),
+            lowered: Default::default(),
         }
     }
     fn update(&mut self, change: &TextDocumentContentChangeEvent) {
@@ -165,78 +168,170 @@ impl File {
                 character: range.end.character,
             };
             self.linemap
-                .replace_utf16_range(&mut self.contents, start..end, &change.text);
+                .replace_utf16_range(&mut self.src, start..end, &change.text);
         } else {
-            self.linemap.replace_whole(&mut self.contents, &change.text);
+            self.linemap.replace_whole(&mut self.src, &change.text);
         }
 
-        self.ast_ir = Default::default();
-        // self.root = Default::default();
-        self.arena = Default::default();
-        self.errors = Default::default();
-        self.dirty = true;
+        self.parsed = Default::default();
+        self.converted = Default::default();
+        self.lowered = Default::default();
     }
-    fn update_public(&mut self) {
-        if self.dirty {
-            // TODO reuse the public fields' allocations
-            let (ast_ir, errors, arena, root) = gnag::file::File::new_from_string(&self.contents);
-
-            self.ast_ir = ast_ir;
-            self.root = root;
-            self.arena = arena;
-            self.errors = errors;
-            self.dirty = false;
+    pub fn src(&self) -> &str {
+        &self.src
+    }
+    pub fn get_parsed(&self) -> Ref<ParsedFile> {
+        if let Ok(some) = Ref::filter_map(self.parsed.borrow(), |a| a.as_ref()) {
+            return some;
         }
+
+        _ = self.parsed.borrow_mut().insert(ParsedFile::new(&self.src));
+
+        Ref::map(self.parsed.borrow(), |a| a.as_ref().unwrap())
+    }
+    pub fn get_converted(&self) -> Ref<ConvertedFile> {
+        if let Ok(some) = Ref::filter_map(self.converted.borrow(), |a| a.as_ref()) {
+            return some;
+        }
+
+        let parsed = self.get_parsed();
+        _ = self
+            .converted
+            .borrow_mut()
+            .insert(ConvertedFile::new(&self.src, &parsed));
+
+        Ref::map(self.converted.borrow(), |a| a.as_ref().unwrap())
+    }
+    pub fn get_lowered(&self) -> Ref<LoweredFile> {
+        if let Ok(some) = Ref::filter_map(self.lowered.borrow(), |a| a.as_ref()) {
+            return some;
+        }
+
+        let converted = self.get_converted();
+        _ = self
+            .lowered
+            .borrow_mut()
+            .insert(LoweredFile::new(&self.src, &converted));
+
+        Ref::map(self.lowered.borrow(), |a| a.as_ref().unwrap())
     }
     pub fn lsp_to_offset(&self, pos: lsp_types::Position) -> linemap::Offset {
         let pos = Utf16Pos {
             line: pos.line,
             character: pos.character,
         };
-        self.linemap.utf16_to_offset(&self.contents, pos)
+        self.linemap.utf16_to_offset(&self.src, pos)
     }
     pub fn offset_to_lsp(&self, pos: linemap::Offset) -> lsp_types::Position {
-        let utf16 = self.linemap.offset_to_utf16(&self.contents, pos);
+        let utf16 = self.linemap.offset_to_utf16(&self.src, pos);
         lsp_types::Position {
             line: utf16.line,
             character: utf16.character,
         }
+    }
+    pub fn lsp_to_span(&self, span: lsp_types::Range) -> StrSpan {
+        let start = self.lsp_to_offset(span.start);
+        let end = self.lsp_to_offset(span.end);
+        StrSpan { start, end }
     }
     pub fn span_to_lsp(&self, span: StrSpan) -> lsp_types::Range {
         let start = self.offset_to_lsp(span.start);
         let end = self.offset_to_lsp(span.end);
         lsp_types::Range { start, end }
     }
-    pub fn find_leaf_cst_node_lsp(&self, pos: lsp_types::Position) -> Option<&gnag::Node> {
-        let offset = self.lsp_to_offset(pos);
+}
+
+// pub struct DoubleDeref<'a, 'b, A: ?Sized, B: ?Sized>(pub &'a A, pub &'b B);
+
+// impl<'a, 'b, A, B> DoubleDeref<'a, 'b, A, B> {
+//     // pub fn new(a: &'a A, b: &'b B) {
+//     //     Self { a, b }
+//     // }
+//     pub fn a(&self) -> &'a A {
+//         self.0
+//     }
+//     pub fn b(&self) -> &'b B {
+//         self.1
+//     }
+// }
+
+// impl<'a, 'b, A, B> Deref for DoubleDeref<'a, 'b, A, B> {
+//     type Target = A;
+//     fn deref(&self) -> &Self::Target {
+//         self.0
+//     }
+// }
+
+// pub trait WithDoubleDeref {
+//     fn with_double_deref<'a, 'b, T>(&'a self, file: &'b T) -> DoubleDeref<'a, 'b, Self, T> {
+//         DoubleDeref(self, file)
+//     }
+// }
+// impl<T> WithDoubleDeref for T {}
+
+pub trait ParsedFileExt {
+    fn this(&self) -> &ParsedFile;
+
+    fn find_leaf_cst_node_lsp(
+        &self,
+        file: &LspFile,
+        pos: lsp_types::Position,
+    ) -> Option<&gnag::Node> {
+        let offset = file.lsp_to_offset(pos);
         self.find_leaf_cst_node(offset)
     }
-    pub fn find_leaf_cst_node(&self, pos: linemap::Offset) -> Option<&gnag::Node> {
-        self.root.find_leaf(pos, &self.arena)
+    fn find_leaf_cst_node(&self, pos: linemap::Offset) -> Option<&gnag::Node> {
+        let this = self.this();
+
+        this.root.find_leaf(pos, &this.arena)
     }
-    pub fn node_identifier_text(&self, node: &Node) -> Option<&str> {
+    fn find_covering_cst_node_lsp(
+        &self,
+        file: &LspFile,
+        span: lsp_types::Range,
+    ) -> Option<&gnag::Node> {
+        let span = file.lsp_to_span(span);
+        self.find_covering_cst_node(span)
+    }
+    fn find_covering_cst_node(&self, span: StrSpan) -> Option<&gnag::Node> {
+        let this = self.this();
+
+        this.root.find_covering(span, &this.arena)
+    }
+    fn trim_selection(&self, file: &LspFile, span: StrSpan) -> StrSpan {
+        let selection = span.resolve(file);
+        let trim = selection.trim();
+
+        let start_diff = trim.as_ptr() as usize - selection.as_ptr() as usize;
+        let len_diff = selection.len() - trim.len();
+
+        let start_diff = u32::try_from(start_diff).unwrap();
+        let len_diff = u32::try_from(len_diff).unwrap();
+
+        StrSpan {
+            start: span.start + start_diff,
+            end: (span.end + start_diff) - len_diff,
+        }
+    }
+    fn node_identifier_text<'b>(&self, file: &'b LspFile, node: &Node) -> Option<&'b str> {
         if node.kind == gnag::NodeKind::Token(gnag::TokenKind::Ident) {
-            Some(node.span.resolve(self))
+            Some(node.span.resolve(file))
         } else {
             None
         }
     }
 }
 
-pub trait StrSpanExt {
-    fn resolve(self, file: &File) -> &str;
-}
-
-impl StrSpanExt for StrSpan {
-    fn resolve(self, file: &File) -> &str {
-        self.as_str(&file.contents)
+impl ParsedFileExt for ParsedFile {
+    fn this(&self) -> &ParsedFile {
+        self
     }
 }
 
 pub struct Ctx {
     config: Config,
     connection: Connection,
-    files: HashMap<FileUrl, File>,
+    files: HashMap<FileUrl, LspFile>,
 }
 
 impl Ctx {
@@ -255,7 +350,7 @@ impl Ctx {
             log::warn!("File {file:?} opened twice.");
         }
 
-        self.files.insert(file, File::new(version, contents));
+        self.files.insert(file, LspFile::new(version, contents));
     }
     pub fn file_closed(&mut self, file: &FileUrlRef) {
         self.files.remove(file);
@@ -280,10 +375,8 @@ impl Ctx {
             Err(ModifyFileError::FileNotOpened)
         }
     }
-    pub fn get_file(&mut self, file: &FileUrlRef) -> Option<&File> {
-        let file = self.files.get_mut(file)?;
-        file.update_public();
-        Some(file)
+    pub fn get_file(&mut self, file: &FileUrlRef) -> Option<&LspFile> {
+        self.files.get(file)
     }
     // pub fn response(
     //     &self,

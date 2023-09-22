@@ -2,6 +2,7 @@
 tokenizer {
     @skip Whitespace '\s+'
     @skip Comment '//.*$'
+    @error ErrorToken '\S+'
     String {
         let mut raw = false;
         if l.peek().unwrap() == b'r' {
@@ -60,8 +61,6 @@ tokenizer {
     At '@'
     Colon ':'
     Comma ','
-    @error
-    ErrorToken '\S+'
 }
 
 rule File {

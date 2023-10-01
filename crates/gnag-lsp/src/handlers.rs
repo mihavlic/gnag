@@ -224,12 +224,14 @@ pub fn diagnostic(
     let parsed = file.get_parsed();
     let converted = file.get_converted();
     let lowered = file.get_lowered();
+    let compiled = file.get_compiled();
 
     let hash = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(&parsed.errors, &mut hasher);
         std::hash::Hash::hash(&converted.errors, &mut hasher);
         std::hash::Hash::hash(&lowered.errors, &mut hasher);
+        std::hash::Hash::hash(&compiled.errors, &mut hasher);
         hasher.finish()
     };
     let hash = format!("{hash:x}");
@@ -243,16 +245,21 @@ pub fn diagnostic(
             },
         )
     } else {
-        let items = [&parsed.errors, &converted.errors, &lowered.errors]
-            .into_iter()
-            .flatten()
-            .map(|e| lsp_types::Diagnostic {
-                range: file.span_to_lsp(e.span),
-                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
-                message: e.err.clone(),
-                ..Default::default()
-            })
-            .collect();
+        let items = [
+            &parsed.errors,
+            &converted.errors,
+            &lowered.errors,
+            &compiled.errors,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|e| lsp_types::Diagnostic {
+            range: file.span_to_lsp(e.span),
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            message: e.err.clone(),
+            ..Default::default()
+        })
+        .collect();
 
         lsp_types::DocumentDiagnosticReport::Full(lsp_types::RelatedFullDocumentDiagnosticReport {
             related_documents: None,
@@ -340,14 +347,14 @@ pub fn show_lowered_ir(
             AstItem::Token(ref ast, Some(handle)) => {
                 if ast.span.overlaps(range) {
                     let name = &converted.tokens[handle].name;
-                    let item = &lowered.lowered_tokens[handle];
+                    let item = &lowered.tokens[handle];
                     _ = writeln!(buf, "{name}: {:#?}", item);
                 }
             }
             AstItem::Rule(ref ast, Some(handle)) => {
                 if ast.span.overlaps(range) {
                     let name = &converted.rules[handle].name;
-                    let item = &lowered.lowered_rules[handle];
+                    let item = &lowered.rules[handle];
                     _ = writeln!(buf, "{name}: {:#?}", item);
                 }
             }

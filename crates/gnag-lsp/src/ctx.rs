@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{bail, Context};
 use gnag::{ast::ParsedFile, ctx::SpanExt, file::ConvertedFile, Node, StrSpan};
-use gnag_gen::LoweredFile;
+use gnag_gen::{compile::CompiledFile, LoweredFile};
 use lsp::{
     connection::{Connection, ReceiveIter},
     error::ProtocolError,
@@ -136,6 +136,7 @@ pub struct LspFile {
     parsed: RefCell<Option<ParsedFile>>,
     converted: RefCell<Option<ConvertedFile>>,
     lowered: RefCell<Option<LoweredFile>>,
+    compiled: RefCell<Option<CompiledFile>>,
 }
 
 impl std::borrow::Borrow<str> for LspFile {
@@ -153,6 +154,7 @@ impl LspFile {
             parsed: Default::default(),
             converted: Default::default(),
             lowered: Default::default(),
+            compiled: Default::default(),
         }
     }
     fn update(&mut self, change: &TextDocumentContentChangeEvent) {
@@ -176,6 +178,7 @@ impl LspFile {
         self.parsed = Default::default();
         self.converted = Default::default();
         self.lowered = Default::default();
+        self.compiled = Default::default();
     }
     pub fn src(&self) -> &str {
         &self.src
@@ -214,6 +217,20 @@ impl LspFile {
             .insert(LoweredFile::new(&self.src, &converted));
 
         Ref::map(self.lowered.borrow(), |a| a.as_ref().unwrap())
+    }
+    pub fn get_compiled(&self) -> Ref<CompiledFile> {
+        if let Ok(some) = Ref::filter_map(self.compiled.borrow(), |a| a.as_ref()) {
+            return some;
+        }
+
+        let converted = self.get_converted();
+        let lowered = self.get_lowered();
+        _ = self
+            .compiled
+            .borrow_mut()
+            .insert(CompiledFile::new(&self.src, &converted, &lowered));
+
+        Ref::map(self.compiled.borrow(), |a| a.as_ref().unwrap())
     }
     pub fn lsp_to_offset(&self, pos: lsp_types::Position) -> linemap::Offset {
         let pos = Utf16Pos {

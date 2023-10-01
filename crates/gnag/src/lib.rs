@@ -66,7 +66,13 @@ pub struct StrSpan {
 }
 
 impl StrSpan {
-    #[inline]
+    pub fn at(pos: u32) -> StrSpan {
+        Self {
+            start: pos,
+            end: pos,
+        }
+    }
+    #[track_caller]
     pub fn as_str(self, src: &str) -> &str {
         &src[self.start as usize..self.end as usize]
     }

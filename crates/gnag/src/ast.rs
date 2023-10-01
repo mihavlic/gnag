@@ -117,8 +117,8 @@ fn attribute(tree: &Node, arena: &[Node]) -> Option<Attribute> {
 
 #[derive(Debug)]
 pub enum TokenValue {
-    Regex(StrSpan),
-    Arbitrary(StrSpan),
+    String(StrSpan),
+    RustCode(StrSpan),
 }
 
 #[derive(Debug)]
@@ -140,10 +140,10 @@ fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
         match c.kind {
             NodeKind::Tree(TreeKind::Attribute) => attrs.extend(attribute(c, arena)),
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
-            NodeKind::Token(TokenKind::Literal) => value = Some(TokenValue::Regex(c.span)),
+            NodeKind::Token(TokenKind::Literal) => value = Some(TokenValue::String(c.span)),
             NodeKind::Tree(
                 TreeKind::ParenDelimited | TreeKind::CurlyDelimited | TreeKind::BracketDelimited,
-            ) => value = Some(TokenValue::Arbitrary(c.span)),
+            ) => value = Some(TokenValue::RustCode(c.span)),
             _ => {}
         }
     }
@@ -502,14 +502,16 @@ impl<'a> ExtractedStringAccumulator<'a> for String {
     }
 }
 
-pub fn extract_str_literal(src: &str) -> Option<Cow<str>> {
-    extract_str_literal_raw(src, String::new())
+/// returns a string extracted from the string literal syntax, along with a flag
+/// whether the string was "raw" (ignored all escapes)
+pub fn extract_str_literal(src: &str) -> Option<(Cow<str>, bool)> {
+    extract_str_literal_impl(src, String::new())
 }
 
-pub fn extract_str_literal_raw<'a, U: ExtractedStringAccumulator<'a>>(
+pub fn extract_str_literal_impl<'a, U: ExtractedStringAccumulator<'a>>(
     src: &'a str,
     mut string: U,
-) -> Option<U::Result> {
+) -> Option<(U::Result, bool)> {
     assert!(!src.is_empty());
 
     let mut l = Lexer::new(src.as_bytes());
@@ -579,7 +581,7 @@ pub fn extract_str_literal_raw<'a, U: ExtractedStringAccumulator<'a>>(
     let span = StrSpan { start, end };
     let str = span.as_str(src);
 
-    Some(string.finish(str))
+    Some((string.finish(str), raw))
 }
 
 #[derive(Debug)]
@@ -629,7 +631,7 @@ impl<'a> ExtractedStringAccumulator<'a> for DescribedString {
 
 impl DescribedString {
     pub fn new(str: &str) -> Option<DescribedString> {
-        extract_str_literal_raw(str, DescribedString::default())
+        extract_str_literal_impl(str, DescribedString::default()).map(|str| str.0)
     }
     /// Map an "index into the extracted string" to a "index into the source unextracted"
     pub fn find_offset(&self, out_offset: usize) -> Option<usize> {
@@ -730,6 +732,6 @@ fn test_extract_string() {
     };
 
     let res = extract_str_literal(src).unwrap();
-    assert!(matches!(res, Cow::Owned(_)));
-    assert_eq!(&*res, out);
+    assert!(matches!(res.0, Cow::Owned(_)));
+    assert_eq!(res.0, out);
 }

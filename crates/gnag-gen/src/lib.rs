@@ -1,4 +1,6 @@
-use std::{borrow::Borrow, ops::ControlFlow};
+pub mod compile;
+
+use std::borrow::Borrow;
 
 use gnag::{
     ctx::{ConvertCtx, SpanExt},
@@ -11,6 +13,7 @@ use gnag::{
 pub enum LoweredTokenPattern {
     Regex(regex_syntax::hir::Hir),
     RustCode(String),
+    Literal(Vec<u8>),
     Error,
 }
 
@@ -43,9 +46,28 @@ impl Borrow<str> for LoweringCtx<'_, '_> {
 }
 
 pub struct LoweredFile {
-    pub lowered_tokens: HandleVec<TokenHandle, LoweredTokenPattern>,
-    pub lowered_rules: SecondaryVec<RuleHandle, RuleExpr>,
+    pub tokens: HandleVec<TokenHandle, LoweredTokenPattern>,
+    pub rules: HandleVec<RuleHandle, RuleExpr>,
     pub errors: Vec<SpannedError>,
+}
+
+impl LoweredFile {
+    pub fn new(src: &str, file: &gnag::file::ConvertedFile) -> LoweredFile {
+        let mut cx = LoweringCtx::new(src, file);
+
+        let tokens = file.tokens.map_ref(|token| lower_token(token, &mut cx));
+        let mut rules = SecondaryVec::new();
+
+        for handle in file.rules.iter_keys() {
+            get_rule(handle, &mut rules, &mut cx);
+        }
+
+        LoweredFile {
+            tokens,
+            rules: HandleVec::try_from(rules).expect("All rules have been visited?"),
+            errors: Vec::new(),
+        }
+    }
 }
 
 fn convert_regex_syntax_span(
@@ -75,14 +97,19 @@ fn convert_regex_syntax_span(
 fn lower_token(token: &gnag::file::TokenDef, cx: &LoweringCtx) -> LoweredTokenPattern {
     match &token.pattern {
         TokenPattern::Regex(pattern) => match regex_syntax::parse(pattern) {
-            Ok(hir) => LoweredTokenPattern::Regex(hir),
+            Ok(hir) => match hir.kind() {
+                regex_syntax::hir::HirKind::Literal(lit) => {
+                    LoweredTokenPattern::Literal(lit.0.to_vec())
+                }
+                _ => LoweredTokenPattern::Regex(hir),
+            },
             Err(err) => {
                 let AstItem::Token(ast, _) = &cx.file.ast_items[token.ast] else {
                     unreachable!()
                 };
                 let span = match ast.pattern {
-                    gnag::ast::TokenValue::Regex(span) => span,
-                    gnag::ast::TokenValue::Arbitrary(span) => span,
+                    gnag::ast::TokenValue::String(s) => s,
+                    gnag::ast::TokenValue::RustCode(s) => s,
                 };
 
                 match err {
@@ -100,157 +127,168 @@ fn lower_token(token: &gnag::file::TokenDef, cx: &LoweringCtx) -> LoweredTokenPa
                 LoweredTokenPattern::Error
             }
         },
-        TokenPattern::RustCode(code) => LoweredTokenPattern::RustCode(code.clone()),
+        TokenPattern::RustCode(s) => LoweredTokenPattern::RustCode(s.clone()),
+        TokenPattern::SimpleString(s) => LoweredTokenPattern::Literal(s.as_bytes().to_vec()),
+        TokenPattern::Invalid => LoweredTokenPattern::Error,
     }
 }
 
-impl LoweredFile {
-    pub fn new(src: &str, file: &gnag::file::ConvertedFile) -> LoweredFile {
-        let mut cx = LoweringCtx::new(src, file);
-        let mut lowered = LoweredFile {
-            lowered_tokens: file.tokens.map_ref(|token| lower_token(token, &mut cx)),
-            lowered_rules: SecondaryVec::new(),
-            errors: Vec::new(),
+fn get_rule<'a>(
+    handle: RuleHandle,
+    rules: &'a mut SecondaryVec<RuleHandle, RuleExpr>,
+    cx: &mut LoweringCtx,
+) -> &'a RuleExpr {
+    // NLL issue workaround https://github.com/rust-lang/rust/issues/54663#issuecomment-973936708
+    if rules.get(handle).is_some() {
+        return rules.get(handle).unwrap();
+    }
+
+    let ir = &cx.file.rules[handle];
+
+    if cx.stack.contains(&handle) {
+        let prev = *cx.stack.last().unwrap();
+        let prev_ir = &cx.file.rules[prev];
+
+        let AstItem::Rule(ast, _) = &cx.file.ast_items[prev_ir.ast] else {
+            unreachable!()
         };
 
-        for handle in file.rules.iter_keys() {
-            lowered.get_rule(handle, &mut cx);
-        }
-
-        lowered.errors = cx.finish();
-        lowered
+        cx.error(
+            ast.span,
+            format_args!(
+                "Rule {} recursively includes itself through {}",
+                prev_ir.name, ir.name
+            ),
+        );
     }
-    fn get_rule(&mut self, handle: RuleHandle, cx: &mut LoweringCtx) -> &RuleExpr {
-        // NLL issue workaround https://github.com/rust-lang/rust/issues/54663#issuecomment-973936708
-        if self.lowered_rules.get(handle).is_some() {
-            return self.lowered_rules.get(handle).unwrap();
+
+    let mut expr = ir.expr.clone();
+
+    cx.stack.push(handle);
+    expr.visit_nodes_bottom_up_mut(|node| {
+        lower_expr_node(rules, node, cx);
+    });
+    cx.stack.pop();
+
+    rules.entry(handle).insert(expr)
+}
+
+fn lower_expr_node(
+    rules: &mut SecondaryVec<RuleHandle, RuleExpr>,
+    node: &mut RuleExpr,
+    cx: &mut LoweringCtx<'_, '_>,
+) {
+    match node {
+        _ if node.is_empty_nonrecursive() => {
+            *node = RuleExpr::Empty;
         }
-
-        let ir = &cx.file.rules[handle];
-
-        if cx.stack.contains(&handle) {
-            let prev = *cx.stack.last().unwrap();
-            let prev_ir = &cx.file.rules[prev];
-
-            let AstItem::Rule(ast, _) = &cx.file.ast_items[prev_ir.ast] else {
-                unreachable!()
-            };
-
-            cx.error(
-                ast.span,
-                format_args!(
-                    "Rule {} recursively includes itself through {}",
-                    prev_ir.name, ir.name
-                ),
-            );
-
-            // let expr = ast.expression.as_ref().expect("Rule must contain some expression to cause a cycle.");
-            // expr.visit(&mut |expr| if let Expression::Ident(e) = expr {
-            //     if e.resolve(cx) == &ir.name {
-            //         cx.error(*e, "Rule ")
-            //     }
-            // })
+        RuleExpr::Rule(rule) => {
+            let rule_ir = &cx.file.rules[*rule];
+            if rule_ir.inline {
+                *node = get_rule(*rule, rules, cx).clone();
+            }
         }
+        RuleExpr::InlineCall(call) => {
+            let CallExpr {
+                rule,
+                parameters,
+                span,
+            } = call.as_ref();
 
-        let mut expr = ir.expr.clone();
-
-        cx.stack.push(handle);
-        expr.visit_nodes_bottom_up(|node| {
-            if let ControlFlow::Break(_) = self.lower_expr_node(node, cx) {
-                return;
+            let mut parameters = parameters.clone();
+            for p in &mut parameters {
+                lower_expr_node(rules, p, cx);
             }
-        });
-        cx.stack.pop();
 
-        self.lowered_rules.entry(handle).insert(expr)
-    }
-    fn lower_expr_node(
-        &mut self,
-        node: &mut RuleExpr,
-        cx: &mut LoweringCtx<'_, '_>,
-    ) -> ControlFlow<()> {
-        match node {
-            RuleExpr::Rule(rule) => {
-                let rule_ir = &cx.file.rules[*rule];
-                if rule_ir.inline {
-                    *node = self.get_rule(*rule, cx).clone();
-                }
-            }
-            RuleExpr::InlineCall(call) => {
-                let CallExpr {
-                    rule,
-                    parameters,
-                    span,
-                } = call.as_ref();
+            let rule_ir = &cx.file.rules[*rule];
 
-                let mut arguments = parameters.clone();
-                for p in &mut arguments {
-                    self.lower_expr_node(p, cx);
-                }
+            let expected = rule_ir.parameters.len();
+            let provided = parameters.len();
 
-                let rule_ir = &cx.file.rules[*rule];
+            if !rule_ir.inline {
+                cx.error(*span, format_args!("Rule {} is not inline", rule_ir.name));
 
-                let expected = rule_ir.parameters.len();
-                let provided = arguments.len();
-                if !rule_ir.inline {
-                    cx.error(*span, format_args!("Rule {} is not inline", rule_ir.name));
-                    *node = RuleExpr::Error;
-                    return ControlFlow::Break(());
-                } else if expected != provided {
-                    cx.error(
-                        *span,
-                        format_args!("Expected {expected} arguments, got {provided}"),
-                    );
-                    *node = RuleExpr::Error;
-                    return ControlFlow::Break(());
-                }
+                *node = RuleExpr::Error;
+            } else if expected != provided {
+                cx.error(
+                    *span,
+                    format_args!("Expected {expected} arguments, got {provided}"),
+                );
 
-                let mut expr = self.get_rule(*rule, cx).clone();
-                if !arguments.is_empty() {
-                    expr.visit_nodes_top_down(|node| {
+                *node = RuleExpr::Error;
+            } else {
+                let mut expr = get_rule(*rule, rules, cx).clone();
+                if !parameters.is_empty() {
+                    expr.visit_nodes_top_down_mut(|node| {
                         if let &mut RuleExpr::InlineParameter(pos) = node {
-                            *node = arguments
+                            *node = parameters
                                 .get(pos)
                                 .expect("InlineParameter out of bounds??")
                                 .clone();
+                        } else {
+                            // we need to rerun this on the nodes because we could have
+                            //  parameters A, B = Empty
+                            //  Expr = Sequence(A B)
+                            //    =>
+                            //  Expr = Sequence(Empty Empty)
+                            lower_expr_node(rules, node, cx);
                         }
                     })
                 }
 
                 *node = expr;
             }
-            RuleExpr::Sequence(a) => {
-                // we can do this instead of mutual recursion (as in file::binary_expression)
-                // because we've already processed any such nested equivalent expressions
-                // and any more are the result of inlining rules
-                // which are necessarily only one deep
-                if a.iter().any(|a| matches!(a, RuleExpr::Sequence(_))) {
-                    let mut vec = Vec::new();
-                    for expr in a.drain(..) {
-                        if let RuleExpr::Sequence(inner) = expr {
-                            vec.extend(inner);
-                        } else {
-                            vec.push(expr);
-                        }
-                    }
-                    *a = vec;
-                }
-            }
-            RuleExpr::Choice(a) => {
-                if a.iter().any(|a| matches!(a, RuleExpr::Choice(_))) {
-                    let mut vec = Vec::new();
-                    for expr in a.drain(..) {
-                        if let RuleExpr::Choice(inner) = expr {
-                            vec.extend(inner);
-                        } else {
-                            vec.push(expr);
-                        }
-                    }
-                    *a = vec;
-                }
-            }
-            _ => {}
         }
-        ControlFlow::Continue(())
+        RuleExpr::Sequence(a) => {
+            // we can do this instead of mutual recursion (as in file::binary_expression)
+            // because we've already processed any such nested equivalent expressions
+            // and any more are the result of inlining rules
+            // which are necessarily only one deep
+            if a.iter()
+                .any(|a| matches!(a, RuleExpr::Sequence(_) | RuleExpr::Empty))
+            {
+                let mut vec = Vec::new();
+                for expr in a.drain(..) {
+                    match expr {
+                        RuleExpr::Sequence(inner) => vec.extend(inner),
+                        RuleExpr::Empty => {}
+                        _ => vec.push(expr),
+                    }
+                }
+                *a = vec;
+            }
+
+            match a.len() {
+                0 => *node = RuleExpr::Empty,
+                1 => *node = a.pop().unwrap(),
+                _ => {}
+            }
+        }
+        RuleExpr::Choice(a) => {
+            if a.iter()
+                .any(|a| matches!(a, RuleExpr::Choice(_) | RuleExpr::Empty))
+            {
+                let mut vec = Vec::new();
+                for expr in a.drain(..) {
+                    match expr {
+                        RuleExpr::Choice(inner) => vec.extend(inner),
+                        // RuleExpr::Empty always matches without consuming anything so we can safely remove anything that would go after it
+                        RuleExpr::Empty => {
+                            vec.push(expr);
+                            break;
+                        }
+                        _ => vec.push(expr),
+                    }
+                }
+                *a = vec;
+            }
+
+            match a.len() {
+                0 => *node = RuleExpr::Empty,
+                1 => *node = a.pop().unwrap(),
+                _ => {}
+            }
+        }
+        _ => {}
     }
 }

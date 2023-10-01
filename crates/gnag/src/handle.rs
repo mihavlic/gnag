@@ -1,5 +1,6 @@
 use std::{
-    fmt::Debug,
+    error::Error,
+    fmt::{Debug, Display},
     marker::PhantomData,
     ops::{Index, IndexMut},
 };
@@ -56,18 +57,57 @@ impl<H, T> Default for HandleVec<H, T> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotCompleteError;
+impl Display for NotCompleteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NotCompleteError")
+    }
+}
+impl Error for NotCompleteError {}
+
+impl<H, T> TryFrom<SecondaryVec<H, T>> for HandleVec<H, T> {
+    type Error = NotCompleteError;
+    fn try_from(value: SecondaryVec<H, T>) -> Result<Self, Self::Error> {
+        if let Some(vec) = value.0.into_iter().collect::<Option<Vec<_>>>() {
+            Ok(HandleVec(vec, PhantomData))
+        } else {
+            Err(NotCompleteError)
+        }
+    }
+}
+
 impl<H: TypedHandle, T> HandleVec<H, T> {
     pub fn new() -> Self {
         HandleVec(Vec::new(), PhantomData)
     }
     pub fn map<A>(self, fun: impl FnMut(T) -> A) -> HandleVec<H, A> {
-        HandleVec(self.0.into_iter().map(fun).collect(), PhantomData)
+        HandleVec(self.into_iter().map(fun).collect(), PhantomData)
+    }
+    pub fn map_fill<A: Clone>(&self, value: A) -> HandleVec<H, A> {
+        let vec = vec![value; self.len()];
+        HandleVec(vec, PhantomData)
     }
     pub fn map_ref<A>(&self, fun: impl FnMut(&T) -> A) -> HandleVec<H, A> {
-        HandleVec(self.0.iter().map(fun).collect(), PhantomData)
+        HandleVec(self.iter().map(fun).collect(), PhantomData)
+    }
+    pub fn map_with_key<A>(self, mut fun: impl FnMut(H, T) -> A) -> HandleVec<H, A> {
+        HandleVec(
+            self.into_iter_kv().map(|(h, t)| fun(h, t)).collect(),
+            PhantomData,
+        )
+    }
+    pub fn map_ref_with_key<A>(&self, mut fun: impl FnMut(H, &T) -> A) -> HandleVec<H, A> {
+        HandleVec(
+            self.iter_kv().map(|(h, t)| fun(h, t)).collect(),
+            PhantomData,
+        )
     }
     pub fn with_capacity(capacity: usize) -> Self {
         HandleVec(Vec::with_capacity(capacity), PhantomData)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
     pub fn len(&self) -> usize {
         self.0.len()
@@ -80,6 +120,9 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
     pub fn get(&self, index: H) -> Option<&T> {
         self.0.get(index.index())
     }
+    pub fn get_mut(&mut self, index: H) -> Option<&mut T> {
+        self.0.get_mut(index.index())
+    }
     pub fn as_slice(&self) -> &[T] {
         &self.0
     }
@@ -90,6 +133,11 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
         &self,
     ) -> impl Iterator<Item = (H, &T)> + Clone + ExactSizeIterator + DoubleEndedIterator {
         self.0.iter().enumerate().map(|(i, t)| (H::new(i), t))
+    }
+    pub fn into_iter_kv(
+        self,
+    ) -> impl Iterator<Item = (H, T)> + ExactSizeIterator + DoubleEndedIterator {
+        self.0.into_iter().enumerate().map(|(i, t)| (H::new(i), t))
     }
     pub fn iter_keys(
         &self,
@@ -157,6 +205,10 @@ impl<H: TypedHandle, T> SecondaryVec<H, T> {
     pub fn new() -> Self {
         SecondaryVec(Vec::new(), PhantomData)
     }
+    pub fn new_preallocated<T_>(primary: &HandleVec<H, T_>) -> Self {
+        let n_none = (0..primary.len()).map(|_| None);
+        SecondaryVec(n_none.collect(), PhantomData)
+    }
     pub fn map<A>(self, mut fun: impl FnMut(T) -> A) -> SecondaryVec<H, A> {
         SecondaryVec(
             self.0
@@ -194,6 +246,9 @@ impl<H: TypedHandle, T> SecondaryVec<H, T> {
         let old = std::mem::replace(&mut self.0[index], Some(value));
         return old;
     }
+    pub fn contains(&self, index: H) -> bool {
+        self.0.get(index.index()).is_some()
+    }
     pub fn get(&self, index: H) -> Option<&T> {
         let get = self.0.get(index.index());
         match get {
@@ -220,11 +275,20 @@ impl<H: TypedHandle, T> SecondaryVec<H, T> {
     pub fn iter(&self) -> std::iter::Flatten<std::slice::Iter<'_, Option<T>>> {
         self.0.iter().flatten()
     }
+    pub fn iter_mut(&mut self) -> std::iter::Flatten<std::slice::IterMut<'_, Option<T>>> {
+        self.0.iter_mut().flatten()
+    }
     pub fn iter_kv(&self) -> impl Iterator<Item = (H, &T)> + Clone + DoubleEndedIterator {
         self.0
             .iter()
             .enumerate()
             .filter_map(|(i, t)| t.as_ref().map(|t| (H::new(i), t)))
+    }
+    pub fn iter_kv_mut(&mut self) -> impl Iterator<Item = (H, &mut T)> + DoubleEndedIterator {
+        self.0
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, t)| t.as_mut().map(|t| (H::new(i), t)))
     }
     pub fn iter_keys(&self) -> impl Iterator<Item = H> + Clone + DoubleEndedIterator + '_ {
         self.0

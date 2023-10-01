@@ -1,8 +1,8 @@
 // comment!
 tokenizer {
-    @skip Whitespace '\s+'
-    @skip Comment '//.*$'
-    @error ErrorToken '\S+'
+    @skip Whitespace r'\s+'
+    @skip Comment r'//.*$'
+    @error ErrorToken r'\S+'
     String {
         let mut raw = false;
         if l.peek().unwrap() == b'r' {
@@ -45,7 +45,8 @@ tokenizer {
     InlineKeyword 'inline'
     TokenizerKeyword 'tokenizer'
     RuleKeyword 'rule'
-    Ident '\w+'
+    GroupKeyword 'group'
+    Ident r'\w+'
     Number '[0-9]+'
     LCurly '{'
     RCurly '}'
@@ -68,7 +69,7 @@ rule File {
 }
 
 rule Item {
-    Tokenizer | SynRule
+    Tokenizer | SynRule | Group
 }
 
 rule AttributeExpr {
@@ -117,7 +118,7 @@ rule Parameters {
 
 @pratt
 rule Expr {
-    CallExpr | ParenExpr | PreExpr | PostExpr | PostName | SeqExpr | BinExpr
+    Ident | String | CallExpr | ParenExpr | PreExpr | PostExpr | PostName | SeqExpr | BinExpr
 }
 
 rule CallExpr {
@@ -145,6 +146,16 @@ rule SeqExpr {
     Expr Expr+
 }
 
-inline rule BinExpr(a, b) {
-    Expr '|' Expr
+rule BinExpr {
+    Expr | Expr
+}
+
+rule Group {
+    'group' Ident '{'
+        GroupItem*
+    '}' 
+}
+
+rule GroupItem {
+    Ident Ident
 }

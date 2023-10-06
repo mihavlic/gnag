@@ -69,15 +69,18 @@ pub enum LoweredTokenAttribute {
     ErrorToken(StrSpan),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum RuleAttribute {
-    Pratt,
+#[derive(Debug, Default)]
+pub struct RuleAttributes {
+    pub root: bool,
+    pub pratt: bool,
+    pub left_assoc: bool,
+    pub right_assoc: bool,
 }
 
 #[derive(Debug)]
 pub struct RuleDef {
     pub ast: AstItemHandle,
-    pub attribute: Option<RuleAttribute>,
+    pub attributes: RuleAttributes,
     pub name: String,
     pub inline: bool,
     pub parameters: Vec<String>,
@@ -174,6 +177,22 @@ impl ConvertedFile {
             errors: convert_cx.finish(),
         }
     }
+    pub fn get_token_ast(&self, handle: TokenHandle) -> &ast::TokenRule {
+        let token = &self.tokens[handle];
+        if let AstItem::Token(ast, _) = &self.ast_items[token.ast] {
+            ast
+        } else {
+            unreachable!()
+        }
+    }
+    pub fn get_rule_ast(&self, handle: RuleHandle) -> &ast::SynRule {
+        let rule = &self.rules[handle];
+        if let AstItem::Rule(ast, _) = &self.ast_items[rule.ast] {
+            ast
+        } else {
+            unreachable!()
+        }
+    }
 }
 
 fn ast_token_to_ir(
@@ -200,17 +219,20 @@ fn ast_token_to_ir(
         })
         .unwrap_or_default();
 
-    let mut attribute = None;
+    let mut attributes = RuleAttributes::default();
     for attr in &ast.attributes {
         match attr.name.resolve(cx) {
-            "pratt" => attribute = Some(RuleAttribute::Pratt),
+            "root" => attributes.root = true,
+            "pratt" => attributes.pratt = true,
+            "left" => attributes.left_assoc = true,
+            "right" => attributes.right_assoc = true,
             _ => cx.error(attr.name, "Unknown attribute"),
         }
     }
 
     let rule = RuleDef {
         ast: handle,
-        attribute,
+        attributes,
         name: ast.name.resolve_owned(cx),
         inline: ast.inline,
         expr: ast.expression.as_ref().map_or(RuleExpr::Empty, |e| {
@@ -284,7 +306,7 @@ pub enum RuleExpr {
     ZeroOrMore(Box<RuleExpr>),
     OneOrMore(Box<RuleExpr>),
     Maybe(Box<RuleExpr>),
-    // inline rules
+    // inline rules (eliminated during lowering)
     InlineParameter(usize),
     InlineCall(Box<CallExpr>),
     // builtins
@@ -297,6 +319,13 @@ pub enum RuleExpr {
     ZeroSpace,
     Empty,
     Error,
+    // compilation annotated pratt recursion (used to differentiate normal recursion from pratt during left recursion checking)
+    PrattRecursion {
+        pratt: RuleHandle,
+        binding_power: u32,
+    },
+    // compiled pratt rule
+    // PrattSequence(Vec<PrattExpr>),
 }
 
 impl RuleExpr {
@@ -327,11 +356,19 @@ impl RuleExpr {
     fn is_empty_impl<F: Fn(&Self) -> bool>(&self, fun: F) -> bool {
         match self {
             RuleExpr::Empty => true,
-            RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.is_empty() || a.iter().all(fun),
+            RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.iter().all(fun),
             RuleExpr::ZeroOrMore(a) | RuleExpr::OneOrMore(a) | RuleExpr::Maybe(a) => fun(a),
             RuleExpr::Not(a) => !fun(a),
             RuleExpr::SeparatedList { element, separator } => fun(element) && fun(separator),
-            _ => false,
+            // RuleExpr::PrattSequence(a) => a.iter().all(|pratt| fun(&pratt.expr)),
+            RuleExpr::Token(_)
+            | RuleExpr::Rule(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::InlineCall(_)
+            | RuleExpr::Any
+            | RuleExpr::ZeroSpace
+            | RuleExpr::Error
+            | RuleExpr::PrattRecursion { .. } => false,
         }
     }
     pub fn visit_nodes_top_down(&self, mut fun: impl FnMut(&RuleExpr)) {
@@ -355,7 +392,20 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_top_down_(fun);
             }
-            _ => {}
+            // RuleExpr::PrattSequence(vec) => {
+            //     for a in vec {
+            //         a.expr.visit_nodes_top_down_(fun);
+            //     }
+            // }
+            RuleExpr::Token(_)
+            | RuleExpr::Rule(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::InlineCall(_)
+            | RuleExpr::Any
+            | RuleExpr::ZeroSpace
+            | RuleExpr::Empty
+            | RuleExpr::Error
+            | RuleExpr::PrattRecursion { .. } => {}
         }
     }
     pub fn visit_nodes_bottom_up(&self, mut fun: impl FnMut(&RuleExpr)) {
@@ -378,7 +428,20 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_bottom_up_(fun);
             }
-            _ => {}
+            // RuleExpr::PrattSequence(vec) => {
+            //     for a in vec {
+            //         a.expr.visit_nodes_bottom_up_(fun);
+            //     }
+            // }
+            RuleExpr::Token(_)
+            | RuleExpr::Rule(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::InlineCall(_)
+            | RuleExpr::Any
+            | RuleExpr::ZeroSpace
+            | RuleExpr::Empty
+            | RuleExpr::Error
+            | RuleExpr::PrattRecursion { .. } => {}
         }
         fun(self);
     }
@@ -403,7 +466,20 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_top_down_mut_(fun);
             }
-            _ => {}
+            // RuleExpr::PrattSequence(vec) => {
+            //     for a in vec {
+            //         a.expr.visit_nodes_top_down_mut_(fun);
+            //     }
+            // }
+            RuleExpr::Token(_)
+            | RuleExpr::Rule(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::InlineCall(_)
+            | RuleExpr::Any
+            | RuleExpr::ZeroSpace
+            | RuleExpr::Empty
+            | RuleExpr::Error
+            | RuleExpr::PrattRecursion { .. } => {}
         }
     }
     pub fn visit_nodes_bottom_up_mut(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
@@ -426,7 +502,20 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_bottom_up_mut_(fun);
             }
-            _ => {}
+            // RuleExpr::PrattSequence(vec) => {
+            //     for a in vec {
+            //         a.expr.visit_nodes_bottom_up_mut_(fun);
+            //     }
+            // }
+            RuleExpr::Token(_)
+            | RuleExpr::Rule(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::InlineCall(_)
+            | RuleExpr::Any
+            | RuleExpr::ZeroSpace
+            | RuleExpr::Empty
+            | RuleExpr::Error
+            | RuleExpr::PrattRecursion { .. } => {}
         }
         fun(self);
     }
@@ -456,50 +545,38 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a)
             | RuleExpr::Maybe(a)
             | RuleExpr::SeparatedList { element: a, .. } => a.visit_prefix_leaves_(fun),
-            _ => fun(self),
+            // RuleExpr::PrattSequence(a) => {
+            //     for e in a {
+            //         if e.expr.visit_prefix_leaves_(fun) {
+            //             return true;
+            //         }
+            //     }
+            //     false
+            // }
+            RuleExpr::Token(_)
+            | RuleExpr::Rule(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::InlineCall(_)
+            | RuleExpr::Any
+            | RuleExpr::Not(_)
+            | RuleExpr::ZeroSpace
+            | RuleExpr::Empty
+            | RuleExpr::Error
+            | RuleExpr::PrattRecursion { .. } => fun(self),
         }
     }
-    // pub fn finalize(&mut self) {
-    //     self.visit_nodes_bottom_up(|node| match node {
-    //         RuleExpr::Sequence(seq) => {
-    //             let mut i = 0;
-    //             while i < seq.len() {
-    //                 match &mut seq[i] {
-    //                     RuleExpr::Sequence(a) => {
-    //                         let drain = std::mem::take(a);
-    //                         seq.splice(i..=i, drain);
-    //                     }
-    //                     RuleExpr::Empty => {
-    //                         seq.remove(i);
-    //                     }
-    //                     _ => i += 1,
-    //                 }
-    //             }
-    //             if seq.is_empty() {
-    //                 *node = RuleExpr::Empty;
-    //             }
-    //         }
-    //         RuleExpr::Choice(seq) => {
-    //             let mut i = 0;
-    //             while i < seq.len() {
-    //                 match &mut seq[i] {
-    //                     RuleExpr::Choice(a) => {
-    //                         let drain = std::mem::take(a);
-    //                         seq.splice(i..=i, drain);
-    //                     }
-    //                     RuleExpr::Empty => {
-    //                         seq.remove(i);
-    //                     }
-    //                     _ => i += 1,
-    //                 }
-    //             }
-    //             if seq.is_empty() {
-    //                 *node = RuleExpr::Empty;
-    //             }
-    //         }
-    //         _ => {}
-    //     });
-    // }
+    pub fn get_sequence_slice(&self) -> &[RuleExpr] {
+        match self {
+            Self::Sequence(a) => a.as_slice(),
+            _ => std::array::from_ref(self),
+        }
+    }
+    pub fn get_choice_slice(&self) -> &[RuleExpr] {
+        match self {
+            Self::Choice(a) => a.as_slice(),
+            _ => std::array::from_ref(self),
+        }
+    }
 }
 
 fn expression(

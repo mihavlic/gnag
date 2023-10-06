@@ -134,8 +134,7 @@ rule PreExpr {
 }
 
 rule PostExpr {
-    Expr '?' |
-    Expr '+'
+    Expr ('?' | '+')
 }
 
 rule PostName {
@@ -147,7 +146,7 @@ rule SeqExpr {
 }
 
 rule BinExpr {
-    Expr | Expr
+    Expr '|' Expr
 }
 
 rule Group {

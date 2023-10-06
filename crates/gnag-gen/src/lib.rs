@@ -1,4 +1,5 @@
 pub mod compile;
+pub mod pratt;
 
 use std::borrow::Borrow;
 
@@ -148,13 +149,10 @@ fn get_rule<'a>(
     if cx.stack.contains(&handle) {
         let prev = *cx.stack.last().unwrap();
         let prev_ir = &cx.file.rules[prev];
-
-        let AstItem::Rule(ast, _) = &cx.file.ast_items[prev_ir.ast] else {
-            unreachable!()
-        };
+        let prev_ast = cx.file.get_rule_ast(prev);
 
         cx.error(
-            ast.span,
+            prev_ast.span,
             format_args!(
                 "Rule {} recursively includes itself through {}",
                 prev_ir.name, ir.name

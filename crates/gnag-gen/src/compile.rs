@@ -164,12 +164,24 @@ impl CompiledFile {
 
             let ast = converted.get_rule_ast(handle);
 
+            let is_pratt = match compiled[handle] {
+                CompiledRule::PrattChild(_) | CompiledRule::Pratt(_) => true,
+                CompiledRule::Unchanged => false,
+            };
+
             for &mut child in data {
-                let child = &converted.rules[child];
-                cx.error(
-                    ast.span,
-                    format_args!("Rule is left-recursive through {}", child.name),
-                );
+                let name = &converted.rules[child].name;
+                if is_pratt {
+                    cx.error(
+                        ast.span,
+                        format_args!("Failed to eliminate left-recursion through {}", name),
+                    );
+                } else {
+                    cx.error(
+                        ast.span,
+                        format_args!("Rule is left-recursive through {}", name),
+                    );
+                }
             }
         }
 

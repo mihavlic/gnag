@@ -258,34 +258,6 @@ impl LspFile {
     }
 }
 
-// pub struct DoubleDeref<'a, 'b, A: ?Sized, B: ?Sized>(pub &'a A, pub &'b B);
-
-// impl<'a, 'b, A, B> DoubleDeref<'a, 'b, A, B> {
-//     // pub fn new(a: &'a A, b: &'b B) {
-//     //     Self { a, b }
-//     // }
-//     pub fn a(&self) -> &'a A {
-//         self.0
-//     }
-//     pub fn b(&self) -> &'b B {
-//         self.1
-//     }
-// }
-
-// impl<'a, 'b, A, B> Deref for DoubleDeref<'a, 'b, A, B> {
-//     type Target = A;
-//     fn deref(&self) -> &Self::Target {
-//         self.0
-//     }
-// }
-
-// pub trait WithDoubleDeref {
-//     fn with_double_deref<'a, 'b, T>(&'a self, file: &'b T) -> DoubleDeref<'a, 'b, Self, T> {
-//         DoubleDeref(self, file)
-//     }
-// }
-// impl<T> WithDoubleDeref for T {}
-
 pub trait ParsedFileExt {
     fn this(&self) -> &ParsedFile;
 

@@ -9,8 +9,8 @@ use std::{
 };
 
 use anyhow::{bail, Context};
-use gnag::{ast::ParsedFile, ctx::SpanExt, file::ConvertedFile, Node, StrSpan};
-use gnag_gen::{compile::CompiledFile, LoweredFile};
+use gnag::{ast::ParsedFile, ctx::SpanExt, Node, StrSpan};
+use gnag_gen::{compile::CompiledFile, convert::ConvertedFile, lower::LoweredFile};
 use lsp::{
     connection::{Connection, ReceiveIter},
     error::ProtocolError,

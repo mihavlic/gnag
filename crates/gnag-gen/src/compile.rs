@@ -2,14 +2,14 @@ use std::collections::HashSet;
 
 use gnag::{
     ctx::ConvertCtx,
-    file::{ConvertedFile, RuleExpr, RuleHandle, TokenAttribute, TokenHandle},
     handle::{HandleVec, SecondaryVec},
     SpannedError, StrSpan,
 };
 
 use crate::{
+    convert::{ConvertedFile, RuleExpr, RuleHandle, TokenAttribute, TokenHandle},
+    lower::LoweredFile,
     pratt::{Associativity, PrattChild, PrattExpr, PrattExprKind},
-    LoweredFile,
 };
 
 pub enum CompiledTokenKind {

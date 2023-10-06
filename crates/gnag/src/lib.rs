@@ -1,6 +1,5 @@
 pub mod ast;
 pub mod ctx;
-pub mod file;
 pub mod handle;
 
 use std::ops::{Index, Range};

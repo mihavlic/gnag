@@ -3,14 +3,14 @@ use std::{
     collections::{hash_map::Entry, HashMap},
 };
 
-use crate::{
+use gnag::{
     ast::{self, ParsedFile},
     ctx::{ConvertCtx, SpanExt},
     handle::HandleVec,
     SpannedError, StrSpan,
 };
 
-crate::simple_handle! {
+gnag::simple_handle! {
     pub TokenHandle,
     pub RuleHandle,
     pub AstItemHandle
@@ -36,11 +36,6 @@ impl AstItem {
     }
 }
 
-// #[derive(Debug)]
-// pub struct Attribute {
-//     pub name: String,
-// }
-
 #[derive(Debug)]
 pub enum TokenPattern {
     Regex(String),
@@ -61,12 +56,6 @@ pub struct TokenDef {
     pub attribute: Option<TokenAttribute>,
     pub name: String,
     pub pattern: TokenPattern,
-}
-
-#[derive(Debug)]
-pub enum LoweredTokenAttribute {
-    Skip(StrSpan),
-    ErrorToken(StrSpan),
 }
 
 #[derive(Debug, Default)]

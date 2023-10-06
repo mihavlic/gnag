@@ -1,11 +1,8 @@
 use std::hash::Hasher;
 
 use anyhow::Context;
-use gnag::{
-    ctx::SpanExt,
-    file::{AstItem, RuleExpr},
-    NodeKind, StrSpan,
-};
+use gnag::{ctx::SpanExt, NodeKind, StrSpan};
+use gnag_gen::convert::{AstItem, RuleExpr};
 use lsp_types::{CompletionItemKind, GotoDefinitionResponse, SymbolKind};
 
 use crate::{
@@ -58,8 +55,8 @@ pub fn document_symbol(
         .map(|item| lsp_types::SymbolInformation {
             name: item.name().resolve(file).to_owned(),
             kind: match item {
-                gnag::file::AstItem::Token(_, _) => SymbolKind::ENUM_MEMBER,
-                gnag::file::AstItem::Rule(_, _) => SymbolKind::FUNCTION,
+                AstItem::Token(_, _) => SymbolKind::ENUM_MEMBER,
+                AstItem::Rule(_, _) => SymbolKind::FUNCTION,
             },
             tags: None,
             location: lsp_types::Location {
@@ -183,10 +180,10 @@ pub fn completion(
     lsp_types::CompletionResponse::List(list).serialize()
 }
 
-fn item_to_completion_kind(item: &gnag::file::AstItem) -> CompletionItemKind {
+fn item_to_completion_kind(item: &AstItem) -> CompletionItemKind {
     match item {
-        gnag::file::AstItem::Token(_, _) => lsp_types::CompletionItemKind::ENUM_MEMBER,
-        gnag::file::AstItem::Rule(_, _) => lsp_types::CompletionItemKind::FUNCTION,
+        AstItem::Token(_, _) => lsp_types::CompletionItemKind::ENUM_MEMBER,
+        AstItem::Rule(_, _) => lsp_types::CompletionItemKind::FUNCTION,
     }
 }
 

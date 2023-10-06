@@ -1,4 +1,4 @@
-use gnag::file::{RuleHandle, TokenHandle};
+use crate::convert::{RuleHandle, TokenHandle};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrattExprKind {

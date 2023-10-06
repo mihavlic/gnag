@@ -76,6 +76,8 @@ enum CompletionFilter {
     Symbols,
     // inline rules + builtin functions
     Callable,
+    // outside any rule, suggest snippets
+    Toplevel,
     Invalid,
 }
 
@@ -95,6 +97,10 @@ pub fn completion(
     let mut trace = parsed.root.find_with_trace(cursor, &parsed.arena);
 
     let mut filter = CompletionFilter::Invalid;
+    let mut rule = None;
+    if trace.is_empty() {
+        filter = CompletionFilter::Toplevel;
+    }
     for node in trace.ancestor_iter() {
         if cursor == node.span.start {
             continue;
@@ -115,16 +121,22 @@ pub fn completion(
                         // the cursor is recognized as within the next token (whitespace) but
                         // we still want to provide completions for the first ident
                         filter = CompletionFilter::Callable;
+                        break;
                     } else {
                         filter = CompletionFilter::Symbols;
                     };
                 } else {
-                    filter = CompletionFilter::Callable
+                    filter = CompletionFilter::Callable;
+                    break;
                 }
-                break;
             }
             NodeKind::Tree(gnag::TreeKind::SynRule) => {
+                rule = converted.find_rule_handle(cursor);
                 filter = CompletionFilter::Symbols;
+                break;
+            }
+            NodeKind::Tree(gnag::TreeKind::File) => {
+                filter = CompletionFilter::Toplevel;
                 break;
             }
             NodeKind::Token(_) => unreachable!(),
@@ -154,12 +166,23 @@ pub fn completion(
     log::trace!("  filter: {filter:?}, partial_text: '{partial_text}'");
 
     let list = match filter {
-        CompletionFilter::Symbols => collect_completion_list(
-            converted
-                .ast_items
-                .iter()
-                .map(|item| (item.name().resolve(&*file), item_to_completion_kind(item))),
-        ),
+        CompletionFilter::Symbols => {
+            let params = match rule {
+                Some(rule) => converted.rules[rule].parameters.as_slice(),
+                None => &[],
+            };
+            collect_completion_list(
+                converted
+                    .ast_items
+                    .iter()
+                    .map(|item| (item.name().resolve(&*file), item_to_completion_kind(item)))
+                    .chain(
+                        params
+                            .iter()
+                            .map(|name| (name.as_str(), lsp_types::CompletionItemKind::VARIABLE)),
+                    ),
+            )
+        }
         CompletionFilter::Callable => collect_completion_list(
             converted
                 .ast_items
@@ -171,6 +194,11 @@ pub fn completion(
                 .chain(RuleExpr::BUILTIN_RULES.iter().copied())
                 .map(|name| (name, lsp_types::CompletionItemKind::FUNCTION)),
         ),
+        CompletionFilter::Toplevel => collect_completion_snippets_list([
+            ("rule", "rule $1 {\n\t$2\n}"),
+            ("inline", "inline $1 {\n\t$2\n}"),
+            ("group", "group $1 {\n\t$2\n}"),
+        ]),
         CompletionFilter::Invalid => lsp_types::CompletionList {
             is_incomplete: false,
             items: Vec::new(),
@@ -195,6 +223,26 @@ fn collect_completion_list<'a>(
         .map(|(name, kind)| lsp_types::CompletionItem {
             label: name.to_owned(),
             kind: Some(kind),
+            ..Default::default()
+        })
+        .collect();
+
+    lsp_types::CompletionList {
+        is_incomplete: true,
+        items,
+    }
+}
+
+fn collect_completion_snippets_list<'a>(
+    iter: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> lsp_types::CompletionList {
+    let items: Vec<_> = iter
+        .into_iter()
+        .map(|(name, snippet)| lsp_types::CompletionItem {
+            label: name.to_owned(),
+            kind: Some(lsp_types::CompletionItemKind::SNIPPET),
+            insert_text: Some(snippet.to_owned()),
+            insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
             ..Default::default()
         })
         .collect();

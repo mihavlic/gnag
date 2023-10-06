@@ -62,8 +62,10 @@ tokenizer {
     At '@'
     Colon ':'
     Comma ','
+    Dot '.'
 }
 
+@root
 rule File {
     Item*
 }
@@ -72,36 +74,44 @@ rule Item {
     Tokenizer | SynRule | Group
 }
 
+rule AttributeValue {
+    String | Ident | Number
+}
+
 rule AttributeExpr {
-    Ident ( '(' String | Ident | Number ')' )?
+    Ident ( '(' AttributeValue ')' )?
 }
 
 rule Attribute {
-    '@' Ident ( '(' <separated_list AttributeExpr ','> ')' )?
+    '@' Ident ( '(' <comma_list AttributeExpr> ')' )?
 }
 
 rule Tokenizer {
     'tokenizer' '{' TokenRule* '}'
 }
 
-inline rule delimited(bra, ket, inside) {
-    bra (inside | <not ket>)* ket
+inline comma_list(element) {
+    <separated_list element ','>
+}
+
+inline delimited(bra, ket, inside) {
+    bra (DelimitedExpr | <not ket>)* ket
+}
+
+inline DelimitedExpr {
+    ParenDelimited | BraceDelimited | BracketDelimited
 }
 
 rule ParenDelimited {
-    <delimited '(' ')' DelimitedExpr>
+    <delimited '(' ')'>
 }
 
 rule BraceDelimited {
-    <delimited '{' '}' DelimitedExpr>
+    <delimited '{' '}'>
 }
 
 rule BracketDelimited {
-    <delimited '[' ']' DelimitedExpr>
-}
-
-inline rule DelimitedExpr {
-    ParenDelimited | BraceDelimited | BracketDelimited
+    <delimited '[' ']'>
 }
 
 rule TokenRule {
@@ -109,11 +119,11 @@ rule TokenRule {
 }
 
 rule SynRule {
-    Attribute* 'inline'? 'rule' Ident Parameters? '{' Expr '}'
+    Attribute* ('inline' | 'rule') Ident Parameters? '{' Expr '}'
 }
 
 rule Parameters {
-    '(' <separated_list Ident ','> ')'
+   '(' <comma_list Ident> ')'
 }
 
 @pratt
@@ -138,7 +148,7 @@ rule PostExpr {
 }
 
 rule PostName {
-    Expr ':' Ident
+    Expr ':' Ident ('.' Ident)?
 }
 
 rule SeqExpr {
@@ -150,9 +160,7 @@ rule BinExpr {
 }
 
 rule Group {
-    'group' Ident '{'
-        GroupItem*
-    '}' 
+    'group' Ident '{' GroupItem* '}' 
 }
 
 rule GroupItem {

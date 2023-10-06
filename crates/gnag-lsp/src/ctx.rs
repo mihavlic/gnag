@@ -367,17 +367,6 @@ impl Ctx {
     pub fn get_file(&mut self, file: &FileUrlRef) -> Option<&LspFile> {
         self.files.get(file)
     }
-    // pub fn response(
-    //     &self,
-    //     id: RequestId,
-    //     response: impl serde::Serialize,
-    // ) -> Result<(), mpsc::SendError<Message>> {
-    //     self.send(Message::Response(Response {
-    //         id,
-    //         result: Some(serde_json::to_value(response).unwrap()),
-    //         error: None,
-    //     }))
-    // }
     pub fn error(
         &self,
         id: RequestId,

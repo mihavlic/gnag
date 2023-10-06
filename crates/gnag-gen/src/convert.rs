@@ -182,6 +182,26 @@ impl ConvertedFile {
             unreachable!()
         }
     }
+    pub fn find_ast_item(&self, pos: u32) -> Option<&AstItem> {
+        let items = self.ast_items.as_slice();
+        let index = match items.binary_search_by_key(&pos, |a| a.span().start) {
+            Ok(ok) => ok,
+            Err(a) => a.checked_sub(1)?,
+        };
+        Some(&items[index])
+    }
+    pub fn find_rule_token(&self, pos: u32) -> Option<TokenHandle> {
+        match self.find_ast_item(pos)? {
+            AstItem::Token(_, handle) => *handle,
+            AstItem::Rule(_, _) => None,
+        }
+    }
+    pub fn find_rule_handle(&self, pos: u32) -> Option<RuleHandle> {
+        match self.find_ast_item(pos)? {
+            AstItem::Token(_, _) => None,
+            AstItem::Rule(_, handle) => *handle,
+        }
+    }
 }
 
 fn ast_token_to_ir(
@@ -313,8 +333,6 @@ pub enum RuleExpr {
         pratt: RuleHandle,
         binding_power: u32,
     },
-    // compiled pratt rule
-    // PrattSequence(Vec<PrattExpr>),
 }
 
 impl RuleExpr {

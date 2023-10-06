@@ -1202,14 +1202,16 @@ fn token_rule(p: &mut Parser) -> bool {
     true
 }
 
-// Attribute* 'inline'? 'rule' Ident Parameters? '{' SynExpr '}'
+// Attribute* ('inline' | 'rule') Ident Parameters? '{' SynExpr '}'
 fn syn_rule(p: &mut Parser) -> bool {
     let m = p.open();
 
     while attribute(p) {}
-    p.token(InlineKeyword);
-    if !p.token(RuleKeyword) {
-        return false;
+
+    if !p.token(InlineKeyword) {
+        if !p.token(RuleKeyword) {
+            return false;
+        }
     }
     p.expect(Ident);
     parameters(p);

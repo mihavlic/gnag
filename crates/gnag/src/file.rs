@@ -360,7 +360,6 @@ impl RuleExpr {
             RuleExpr::ZeroOrMore(a) | RuleExpr::OneOrMore(a) | RuleExpr::Maybe(a) => fun(a),
             RuleExpr::Not(a) => !fun(a),
             RuleExpr::SeparatedList { element, separator } => fun(element) && fun(separator),
-            // RuleExpr::PrattSequence(a) => a.iter().all(|pratt| fun(&pratt.expr)),
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
@@ -392,11 +391,6 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_top_down_(fun);
             }
-            // RuleExpr::PrattSequence(vec) => {
-            //     for a in vec {
-            //         a.expr.visit_nodes_top_down_(fun);
-            //     }
-            // }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
@@ -428,11 +422,6 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_bottom_up_(fun);
             }
-            // RuleExpr::PrattSequence(vec) => {
-            //     for a in vec {
-            //         a.expr.visit_nodes_bottom_up_(fun);
-            //     }
-            // }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
@@ -466,11 +455,6 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_top_down_mut_(fun);
             }
-            // RuleExpr::PrattSequence(vec) => {
-            //     for a in vec {
-            //         a.expr.visit_nodes_top_down_mut_(fun);
-            //     }
-            // }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
@@ -502,11 +486,6 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_bottom_up_mut_(fun);
             }
-            // RuleExpr::PrattSequence(vec) => {
-            //     for a in vec {
-            //         a.expr.visit_nodes_bottom_up_mut_(fun);
-            //     }
-            // }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
@@ -545,14 +524,6 @@ impl RuleExpr {
             | RuleExpr::OneOrMore(a)
             | RuleExpr::Maybe(a)
             | RuleExpr::SeparatedList { element: a, .. } => a.visit_prefix_leaves_(fun),
-            // RuleExpr::PrattSequence(a) => {
-            //     for e in a {
-            //         if e.expr.visit_prefix_leaves_(fun) {
-            //             return true;
-            //         }
-            //     }
-            //     false
-            // }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)

@@ -1,11 +1,8 @@
 use std::collections::HashSet;
 
 use gnag::{
-    ast::ParsedFile,
     ctx::ConvertCtx,
-    file::{
-        AstItem, ConvertedFile, RuleAttributes, RuleExpr, RuleHandle, TokenAttribute, TokenHandle,
-    },
+    file::{ConvertedFile, RuleExpr, RuleHandle, TokenAttribute, TokenHandle},
     handle::{HandleVec, SecondaryVec},
     SpannedError, StrSpan,
 };
@@ -20,18 +17,6 @@ pub enum CompiledTokenKind {
     ErrorToken,
     Normal,
 }
-
-pub struct CompiledToken {
-    kind: CompiledTokenKind,
-}
-
-// struct PrattDecision {
-//     kind: PrattExprKind,
-//     /// expression where the recursive call to Expr has been removed
-//     stripped_expr: RuleExpr,
-//     /// expression where the recursive call to Expr has been replaced with RuleExppr::PrattRecursion
-//     fixed_expr: RuleExpr,
-// }
 
 fn decide_pratt_expr(
     pratt_rule: RuleHandle,
@@ -135,26 +120,6 @@ impl CompiledFile {
             cx.error(end, "No error token defined")
         }
 
-        // // we expect that rules are ordered by file position due to running a left-to-right parser
-        // let root_rule = converted
-        //     .rules
-        //     .iter_keys()
-        //     .filter(|handle| !converted.rules[*handle].inline)
-        //     .next();
-
-        // let Some(root_rule) = root_rule else {
-        //     if !converted.rules.is_empty() {
-        //         cx.error(end, "File must contain at least one non-inline rule");
-        //     }
-
-        //     return CompiledFile {
-        //         error_token,
-        //         root_rule: None,
-        //         rules: SecondaryVec::new(),
-        //         errors: cx.finish(),
-        //     };
-        // };
-
         let mut compiled = converted.rules.map_fill(CompiledRule::Unchanged);
         for (k, v) in converted.rules.iter_kv() {
             if v.attributes.pratt {
@@ -207,22 +172,6 @@ impl CompiledFile {
                 );
             }
         }
-
-        // let mut active = converted.rules.map_fill(false);
-        // let mut topological_order = Vec::new();
-        // visit_rules(root_rule, lowered, &mut |handle| {
-        //     if active[handle] {
-        //         return true;
-        //     }
-        //     active[handle] = true;
-        //     topological_order.push(handle);
-
-        //     if converted.rules[handle].inline {
-        //         unreachable!("Lowered rules shouldn't reference inline rules");
-        //     }
-
-        //     false
-        // });
 
         CompiledFile {
             error_token,
@@ -344,19 +293,3 @@ fn find_prefix_cycles(
     }
     stack.pop();
 }
-
-// fn visit_rules(
-//     handle: RuleHandle,
-//     lowered: &LoweredFile,
-//     fun: &mut impl FnMut(RuleHandle) -> bool,
-// ) {
-//     if fun(handle) {
-//         return;
-//     }
-
-//     lowered.rules[handle].visit_nodes_top_down(|expr| {
-//         if let RuleExpr::Rule(rule) = expr {
-//             visit_rules(*rule, lowered, fun);
-//         }
-//     })
-// }

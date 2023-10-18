@@ -57,6 +57,12 @@ impl<H, T> Default for HandleVec<H, T> {
     }
 }
 
+impl<H, T: Clone> Clone for HandleVec<H, T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotCompleteError;
 impl Display for NotCompleteError {
@@ -143,6 +149,9 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
         &self,
     ) -> impl Iterator<Item = H> + Clone + ExactSizeIterator + DoubleEndedIterator {
         (0..self.len()).map(H::new)
+    }
+    pub fn clear(&mut self) {
+        self.0.clear()
     }
 }
 

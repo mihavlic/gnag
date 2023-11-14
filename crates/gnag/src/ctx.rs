@@ -1,4 +1,7 @@
-use std::{borrow::Borrow, cell::Cell};
+use std::{
+    borrow::Borrow,
+    cell::{Cell, RefCell},
+};
 
 use crate::{SpannedError, StrSpan};
 
@@ -19,7 +22,7 @@ impl SpanExt for StrSpan {
 
 pub struct ConvertCtx<'a> {
     src: &'a str,
-    errors: Cell<Vec<SpannedError>>,
+    errors: RefCell<Vec<SpannedError>>,
 }
 
 impl<'a> ConvertCtx<'a> {
@@ -30,19 +33,13 @@ impl<'a> ConvertCtx<'a> {
         }
     }
     pub fn error(&self, span: StrSpan, err: impl ToString) {
-        // this is zero-cost after optimalization since Vec::default doesn't allocate
-        let mut errors = Cell::take(&self.errors);
-
-        // we can also see that nothing can push into the default() vector in `self.errors` during this
-        errors.push(SpannedError {
+        self.errors.borrow_mut().push(SpannedError {
             span,
             err: err.to_string(),
         });
-
-        Cell::replace(&self.errors, errors);
     }
     pub fn finish(self) -> Vec<SpannedError> {
-        Cell::take(&self.errors)
+        RefCell::into_inner(self.errors)
     }
 }
 

@@ -1078,7 +1078,7 @@ fn attribute_expr(p: &mut Parser) -> bool {
     true
 }
 
-// '@' Ident:name ( '(' <separated_list AttributeExpr ','>:values ')' )?
+// '@' Ident:name ( '(' <separated_list AttributeExpr ','> ')' )?
 fn attribute(p: &mut Parser) -> bool {
     let m = p.open();
 

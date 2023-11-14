@@ -1,5 +1,5 @@
 [package]
-name = "gnag-gen"
+name = "dump"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,4 +7,5 @@ edition = "2021"
 
 [dependencies]
 gnag = { path = "../gnag" }
-regex-syntax = "0.7.5"
+gnag-gen = { path = "../gnag-gen" }
+linemap = { path = "../linemap" }

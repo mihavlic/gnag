@@ -65,7 +65,7 @@ impl LoweredFile {
         LoweredFile {
             tokens,
             rules: HandleVec::try_from(rules).expect("All rules have been visited?"),
-            errors: Vec::new(),
+            errors: cx.finish(),
         }
     }
 }
@@ -129,6 +129,7 @@ fn lower_token(token: &TokenDef, cx: &LoweringCtx) -> LoweredTokenPattern {
         },
         TokenPattern::RustCode(s) => LoweredTokenPattern::RustCode(s.clone()),
         TokenPattern::SimpleString(s) => LoweredTokenPattern::Literal(s.as_bytes().to_vec()),
+        // already repored
         TokenPattern::Invalid => LoweredTokenPattern::Error,
     }
 }

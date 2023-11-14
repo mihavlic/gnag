@@ -1,13 +1,19 @@
-use bumpalo::Bump;
+use std::{
+    cell::Cell,
+    fmt::{Debug, Display, Write},
+};
+
 use gnag::{
-    handle::{HandleCounter, HandleVec, TypedHandle},
-    simple_handle,
+    ctx::ConvertCtx,
+    handle::{HandleVec, SecondaryVec, TypedHandle},
+    simple_handle, SpannedError, StrSpan,
 };
 
 use crate::{
-    compile::CompiledFile,
-    convert::{ConvertedFile, RuleExpr},
+    compile::{CompiledFile, CompiledRule},
+    convert::{ConvertedFile, RuleExpr, RuleHandle},
     lower::LoweredFile,
+    pratt::{PrattChild, PrattExpr, PrattExprKind},
 };
 
 simple_handle!(
@@ -26,11 +32,10 @@ pub enum FunctionBody {
 
 #[derive(Clone, Debug)]
 pub struct Function {
-    name: String,
-    args: Vec<ExprType>,
-    ret: ExprType,
-
-    body: FunctionBody,
+    pub name: String,
+    pub args: Vec<ExprType>,
+    pub ret: ExprType,
+    pub body: FunctionBody,
 }
 
 impl Function {
@@ -44,42 +49,68 @@ impl Function {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ExprType {
     Never,
     Void,
     Bool,
     U32,
+    String,
     SpanKind,
     Custom(CustomTypeHandle),
 }
 
+impl ExprType {
+    fn get_name(self, module: &ModuleBuilder) -> &str {
+        match self {
+            ExprType::Never => "!",
+            ExprType::Void => "()",
+            ExprType::Bool => "bool",
+            ExprType::U32 => "u32",
+            ExprType::String => "String",
+            ExprType::SpanKind => "u32",
+            ExprType::Custom(a) => &module.custom_types[a],
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ExprConstant {
+    Void,
     Bool(bool),
     U32(u32),
     SpanKind(u32),
+    String(String),
 }
 
 impl ExprConstant {
     pub fn ty(&self) -> ExprType {
         match self {
+            ExprConstant::Void => ExprType::Void,
             ExprConstant::Bool(_) => ExprType::Bool,
             ExprConstant::U32(_) => ExprType::U32,
             ExprConstant::SpanKind(_) => ExprType::SpanKind,
+            ExprConstant::String(_) => ExprType::String,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum Expr {
+    Error,
+    Empty,
     Negate(Box<Expr>),
-    Argument(u32),
+    LessOrEqual(Box<Expr>, Box<Expr>),
+    MoreOrEqual(Box<Expr>, Box<Expr>),
+    Less(Box<Expr>, Box<Expr>),
+    More(Box<Expr>, Box<Expr>),
+    Equal(Box<Expr>, Box<Expr>),
+    NotEqual(Box<Expr>, Box<Expr>),
     VariableAccess(VariableHandle),
     DeclareVariable {
         handle: VariableHandle,
         mutable: bool,
-        value: Box<Expr>,
+        value: Option<Box<Expr>>,
     },
     AssignVariable {
         handle: VariableHandle,
@@ -105,12 +136,499 @@ pub enum Expr {
         statements: Vec<Expr>,
     },
     Break(BlockHandle, Box<Expr>),
-    Return(Box<Expr>),
+    Continue(BlockHandle),
 }
 
+pub struct ExprPrinter<'a, 'b> {
+    module: &'a ModuleBuilder,
+    writer: &'b mut dyn Write,
+    indent: u32,
+}
+
+impl Write for ExprPrinter<'_, '_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for c in s.chars() {
+            self.writer.write_char(c)?;
+            if c == '\n' {
+                for _ in 0..self.indent {
+                    self.writer.write_str("    ")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a, 'b> ExprPrinter<'a, 'b> {
+    pub fn new(module: &'a ModuleBuilder, writer: &'b mut dyn Write) -> ExprPrinter<'a, 'b> {
+        Self {
+            module,
+            writer,
+            indent: 0,
+        }
+    }
+    pub fn push(&mut self) {
+        self.indent += 1;
+    }
+    pub fn pop(&mut self) {
+        self.indent = self.indent.checked_sub(1).unwrap();
+    }
+    fn fmt_monoop(&mut self, str: &str, a: &Expr) -> std::fmt::Result {
+        let w = self;
+        w.write_str(str)?;
+        a.print(w)
+    }
+    fn fmt_binop(&mut self, a: &Expr, str: &str, b: &Expr) -> std::fmt::Result {
+        let w = self;
+        a.print(w)?;
+        write!(w, " {str} ")?;
+        b.print(w)
+    }
+    fn fmt_enclosed_delimited_generic<T>(
+        &mut self,
+        arguments: &[T],
+        mut element: impl FnMut(&T, usize, &mut ExprPrinter) -> std::fmt::Result,
+        start: &str,
+        end: &str,
+        delimiter: &str,
+        multiline: bool,
+    ) -> std::fmt::Result {
+        let w = self;
+        w.write_str(start)?;
+        if !multiline {
+            let mut first = true;
+            for (i, a) in arguments.iter().enumerate() {
+                if !first {
+                    write!(w, "{delimiter} ")?;
+                }
+                first = false;
+                element(a, i, w)?;
+            }
+        } else {
+            w.push();
+            for (i, a) in arguments.iter().enumerate() {
+                write!(w, "\n")?;
+                element(a, i, w)?;
+                write!(w, "{delimiter}")?;
+            }
+            w.pop();
+            write!(w, "\n")?;
+        }
+        w.write_str(end)
+    }
+    fn fmt_enclosed_delimited(
+        &mut self,
+        arguments: &[Expr],
+        start: &str,
+        end: &str,
+        delimiter: &str,
+        multiline: bool,
+    ) -> std::fmt::Result {
+        self.fmt_enclosed_delimited_generic(
+            arguments,
+            |a, _, w| a.print(w),
+            start,
+            end,
+            delimiter,
+            multiline,
+        )
+    }
+    fn brace_delimited(&mut self, expr: &Expr) -> std::fmt::Result {
+        let w = self;
+        match expr {
+            Expr::Empty { .. } => w.write_str("{ }"),
+            Expr::Block { .. } => expr.print(w),
+            _ => {
+                w.push();
+                write!(w, "{{\n")?;
+                expr.print(w)?;
+                w.pop();
+                write!(w, "\n}}")
+            }
+        }
+    }
+}
+
+impl Expr {
+    pub fn print(&self, w: &mut ExprPrinter) -> Result<(), std::fmt::Error> {
+        match self {
+            Expr::Error => write!(w, "/* Parsing error */"),
+            Expr::Empty => write!(w, "()"),
+            Expr::Negate(a) => w.fmt_monoop("!", a),
+            Expr::LessOrEqual(a, b) => w.fmt_binop(a, "<=", b),
+            Expr::MoreOrEqual(a, b) => w.fmt_binop(a, ">=", b),
+            Expr::Less(a, b) => w.fmt_binop(a, "<", b),
+            Expr::More(a, b) => w.fmt_binop(a, ">", b),
+            Expr::Equal(a, b) => w.fmt_binop(a, "==", b),
+            Expr::NotEqual(a, b) => w.fmt_binop(a, "!=", b),
+            Expr::VariableAccess(i) => write!(w, "v{}", i.index()),
+            Expr::DeclareVariable {
+                handle,
+                mutable,
+                value,
+            } => {
+                let m = match mutable {
+                    true => " mut",
+                    false => "",
+                };
+                write!(w, "let{m} v{}", handle.index())?;
+                if let Some(a) = value {
+                    write!(w, " = ")?;
+                    a.print(w)?;
+                }
+                Ok(())
+            }
+            Expr::AssignVariable { handle, value } => {
+                write!(w, "v{} = ", handle.index())?;
+                value.print(w)
+            }
+            Expr::Constant(a) => match a {
+                ExprConstant::Void => write!(w, "()"),
+                ExprConstant::Bool(a) => write!(w, "{a}"),
+                ExprConstant::U32(a) => write!(w, "{a}"),
+                ExprConstant::SpanKind(a) => write!(w, "{a}"),
+                ExprConstant::String(a) => write!(w, "{a:?}"),
+            },
+            Expr::Call { fun, arguments } => {
+                let name = &w.module.functions[*fun].name;
+                write!(w, "{name}")?;
+                w.fmt_enclosed_delimited(arguments, "(", ")", ",", false)
+            }
+            Expr::If {
+                condition,
+                pass,
+                otherwise,
+            } => {
+                write!(w, "if ")?;
+                condition.print(w)?;
+                write!(w, " ")?;
+                w.brace_delimited(pass)?;
+                if let Some(otherwise) = otherwise {
+                    write!(w, " else ")?;
+                    w.brace_delimited(&otherwise)?;
+                }
+                Ok(())
+            }
+            Expr::While { condition, block } => {
+                write!(w, "while ")?;
+                condition.print(w)?;
+                write!(w, " ")?;
+                w.brace_delimited(block)
+            }
+            Expr::Loop(a) => {
+                write!(w, "loop ")?;
+                w.brace_delimited(a)
+            }
+            Expr::Block { handle, statements } => {
+                write!(w, "'b{}: {{", handle.index())?;
+
+                if statements.is_empty() {
+                    write!(w, " }}")
+                } else {
+                    w.push();
+                    for a in statements {
+                        write!(w, "\n")?;
+                        a.print(w)?;
+                        write!(w, ";")?;
+                    }
+                    w.pop();
+                    write!(w, "\n}}")
+                }
+            }
+            Expr::Break(handle, b) => {
+                write!(w, "break 'b{} ", handle.index())?;
+                b.print(w)
+            }
+            Expr::Continue(handle) => {
+                write!(w, "continue 'b{}", handle.index())
+            }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+pub mod expr {
+    use super::{BlockHandle, Expr, ExprConstant, FunctionHandle, VariableHandle};
+    pub fn Empty() -> Expr {
+        Expr::Empty
+    }
+    pub fn Error() -> Expr {
+        Expr::Error
+    }
+    pub fn Negate(expr: Expr) -> Expr {
+        Expr::Negate(Box::new(expr))
+    }
+    pub fn LessOrEqual(left: Expr, right: Expr) -> Expr {
+        Expr::LessOrEqual(Box::new(left), Box::new(right))
+    }
+    pub fn MoreOrEqual(left: Expr, right: Expr) -> Expr {
+        Expr::MoreOrEqual(Box::new(left), Box::new(right))
+    }
+    pub fn Less(left: Expr, right: Expr) -> Expr {
+        Expr::Less(Box::new(left), Box::new(right))
+    }
+    pub fn More(left: Expr, right: Expr) -> Expr {
+        Expr::More(Box::new(left), Box::new(right))
+    }
+    pub fn Equal(left: Expr, right: Expr) -> Expr {
+        Expr::Equal(Box::new(left), Box::new(right))
+    }
+    pub fn NotEqual(left: Expr, right: Expr) -> Expr {
+        Expr::NotEqual(Box::new(left), Box::new(right))
+    }
+    pub fn Variable(variable: VariableHandle) -> Expr {
+        Expr::VariableAccess(variable)
+    }
+    pub fn DeclareVar(variable: VariableHandle, mutable: bool, value: Option<Expr>) -> Expr {
+        Expr::DeclareVariable {
+            handle: variable,
+            mutable,
+            value: value.map(Box::new),
+        }
+    }
+    pub fn AssignVar(variable: VariableHandle, value: Expr) -> Expr {
+        Expr::AssignVariable {
+            handle: variable,
+            value: Box::new(value),
+        }
+    }
+    pub fn Constant(constant: ExprConstant) -> Expr {
+        Expr::Constant(constant)
+    }
+    pub fn Call(fun: FunctionHandle, arguments: Vec<Expr>) -> Expr {
+        Expr::Call {
+            fun,
+            arguments: arguments,
+        }
+    }
+    pub fn If(condition: Expr, pass: Expr) -> Expr {
+        Expr::If {
+            condition: Box::new(condition),
+            pass: Box::new(pass),
+            otherwise: None,
+        }
+    }
+    pub fn IfElse(condition: Expr, pass: Expr, otherwise: Expr) -> Expr {
+        Expr::If {
+            condition: Box::new(condition),
+            pass: Box::new(pass),
+            otherwise: Some(Box::new(otherwise)),
+        }
+    }
+    pub fn While(condition: Expr, block: Expr) -> Expr {
+        Expr::While {
+            condition: Box::new(condition),
+            block: Box::new(block),
+        }
+    }
+    pub fn Loop(expr: Expr) -> Expr {
+        Expr::Loop(Box::new(expr))
+    }
+    pub fn Block(handle: BlockHandle, statements: Vec<Expr>) -> Expr {
+        Expr::Block { handle, statements }
+    }
+    pub fn Break(block: BlockHandle, expr: Expr) -> Expr {
+        Expr::Break(block, Box::new(expr))
+    }
+    pub fn Continue(block: BlockHandle) -> Expr {
+        Expr::Continue(block)
+    }
+
+    pub fn Constant_bool(constant: bool) -> Expr {
+        Expr::Constant(ExprConstant::Bool(constant))
+    }
+    pub fn Constant_u32(constant: u32) -> Expr {
+        Expr::Constant(ExprConstant::U32(constant))
+    }
+    pub fn Constant_SpanKind(constant: u32) -> Expr {
+        Expr::Constant(ExprConstant::SpanKind(constant))
+    }
+    pub fn Constant_String(constant: String) -> Expr {
+        Expr::Constant(ExprConstant::String(constant))
+    }
+    pub fn Constant_str(constant: &str) -> Expr {
+        Expr::Constant(ExprConstant::String(constant.to_owned()))
+    }
+}
+
+pub struct SequenceBuilder {
+    sequence: Vec<Expr>,
+}
+
+#[allow(non_snake_case)]
+impl SequenceBuilder {
+    pub fn new() -> SequenceBuilder {
+        Self {
+            sequence: Vec::new(),
+        }
+    }
+    pub fn push(&mut self, expr: Expr) -> &mut SequenceBuilder {
+        self.sequence.push(expr);
+        self
+    }
+    pub fn Negate(&mut self, expr: Expr) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Negate(expr));
+        self
+    }
+    pub fn Variable(&mut self, variable: VariableHandle) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Variable(variable));
+        self
+    }
+    pub fn Constant(&mut self, constant: ExprConstant) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Constant(constant));
+        self
+    }
+    pub fn Call(&mut self, fun: FunctionHandle, arguments: Vec<Expr>) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Call(fun, arguments));
+        self
+    }
+    pub fn If(&mut self, condition: Expr, pass: Expr) -> &mut SequenceBuilder {
+        self.sequence.push(expr::If(condition, pass));
+        self
+    }
+    pub fn IfElse(&mut self, condition: Expr, pass: Expr, otherwise: Expr) -> &mut SequenceBuilder {
+        self.sequence.push(expr::IfElse(condition, pass, otherwise));
+        self
+    }
+    pub fn While(&mut self, condition: Expr, block: Expr) -> &mut SequenceBuilder {
+        self.sequence.push(expr::While(condition, block));
+        self
+    }
+    pub fn Loop(&mut self, expr: Expr) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Loop(expr));
+        self
+    }
+    pub fn Block(&mut self, handle: BlockHandle, statements: Vec<Expr>) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Block(handle, statements));
+        self
+    }
+    pub fn Break(&mut self, block: BlockHandle, expr: Expr) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Break(block, expr));
+        self
+    }
+    pub fn Continue(&mut self, block: BlockHandle) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Continue(block));
+        self
+    }
+
+    pub fn Constant_bool(&mut self, constant: bool) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Constant_bool(constant));
+        self
+    }
+    pub fn Constant_u32(&mut self, constant: u32) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Constant_u32(constant));
+        self
+    }
+    pub fn Constant_SpanKind(&mut self, constant: u32) -> &mut SequenceBuilder {
+        self.sequence.push(expr::Constant_SpanKind(constant));
+        self
+    }
+}
+
+pub struct BlockBuilder<'a> {
+    builder: &'a FunctionBuilder,
+    handle: BlockHandle,
+    statements: SequenceBuilder,
+}
+
+impl std::ops::Deref for BlockBuilder<'_> {
+    type Target = SequenceBuilder;
+    fn deref(&self) -> &Self::Target {
+        &self.statements
+    }
+}
+impl std::ops::DerefMut for BlockBuilder<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.statements
+    }
+}
+
+impl<'a> BlockBuilder<'a> {
+    pub fn new(builder: &'a FunctionBuilder) -> BlockBuilder<'a> {
+        Self {
+            builder,
+            handle: builder.new_block(),
+            statements: SequenceBuilder::new(),
+        }
+    }
+    pub fn get_handle(&self) -> BlockHandle {
+        self.handle
+    }
+    #[allow(non_snake_case)]
+    pub fn DeclareVar(&mut self, mutable: bool, value: Option<Expr>) -> VariableHandle {
+        let handle = self.builder.new_variable();
+        self.sequence.push(expr::DeclareVar(handle, mutable, value));
+        handle
+    }
+    #[allow(non_snake_case)]
+    pub fn LetMut(&mut self, value: Expr) -> VariableHandle {
+        self.DeclareVar(true, Some(value))
+    }
+    #[allow(non_snake_case)]
+    pub fn Let(&mut self, value: Expr) -> VariableHandle {
+        self.DeclareVar(false, Some(value))
+    }
+    #[allow(non_snake_case)]
+    pub fn AssignVar(&mut self, variable: VariableHandle, value: Expr) -> &mut Self {
+        self.sequence.push(expr::AssignVar(variable, value));
+        self
+    }
+    #[allow(non_snake_case)]
+    pub fn BreakSelf(&mut self, value: Expr) -> &mut Self {
+        let block = self.get_handle();
+        self.sequence.push(expr::Break(block, value));
+        self
+    }
+    #[allow(non_snake_case)]
+    pub fn IfBreakSelf(&mut self, condition: Expr, value: Expr) -> &mut Self {
+        let block = self.get_handle();
+        self.If(condition, expr::Break(block, value));
+        self
+    }
+    pub fn finish(self) -> Expr {
+        Expr::Block {
+            handle: self.handle,
+            statements: self.statements.sequence,
+        }
+    }
+}
+
+// pub struct CallBuilder {
+//     handle: FunctionHandle,
+//     statements: SequenceBuilder,
+// }
+
+// impl std::ops::Deref for CallBuilder {
+//     type Target = SequenceBuilder;
+//     fn deref(&self) -> &Self::Target {
+//         &self.statements
+//     }
+// }
+// impl std::ops::DerefMut for CallBuilder {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         &mut self.statements
+//     }
+// }
+
+// impl CallBuilder {
+//     pub fn new(function: FunctionHandle) -> CallBuilder {
+//         Self {
+//             handle: function,
+//             statements: SequenceBuilder::new(),
+//         }
+//     }
+//     pub fn finish(self) -> Expr {
+//         Expr::Call {
+//             fun: self.handle,
+//             arguments: self.statements.sequence,
+//         }
+//     }
+// }
+
+#[derive(Debug)]
 pub struct ModuleBuilder {
-    custom_types: HandleVec<CustomTypeHandle, String>,
-    functions: HandleVec<FunctionHandle, Function>,
+    pub custom_types: HandleVec<CustomTypeHandle, String>,
+    pub functions: HandleVec<FunctionHandle, Function>,
 }
 
 impl ModuleBuilder {
@@ -144,53 +662,101 @@ impl ModuleBuilder {
             body: FunctionBody::Todo,
         })
     }
+    pub fn finish_fn(&mut self, predeclared: FunctionHandle, body: Expr) {
+        let fun = &mut self.functions[predeclared];
+        assert!(matches!(fun.body, FunctionBody::Todo));
+        fun.body = FunctionBody::Known(body);
+    }
     pub fn finish(self) -> HandleVec<FunctionHandle, Function> {
         self.functions
     }
 }
 
-pub struct FunctionBuilder<'a> {
-    module: &'a mut ModuleBuilder,
-    function: FunctionHandle,
-    variable_counter: usize,
-    block_counter: usize,
+impl Display for ModuleBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut w = ExprPrinter::new(self, f);
+        let mut first = true;
+        for fun in &self.functions {
+            if !first {
+                write!(w, "\n\n")?;
+            }
+            first = false;
+            write!(w, "fn {}", fun.name)?;
+            w.fmt_enclosed_delimited_generic(
+                &fun.args,
+                |el, i, w| {
+                    let name = el.get_name(self);
+                    write!(w, "v{i}: {name}",)
+                },
+                "(",
+                ")",
+                ",",
+                false,
+            )?;
+            if fun.ret != ExprType::Void {
+                write!(w, " -> {}", fun.ret.get_name(self))?;
+            }
+            write!(w, " ")?;
+            match &fun.body {
+                FunctionBody::Builtin => {
+                    w.push();
+                    write!(w, "{{\nunreachable!(\"Builtin\")")?;
+                    w.pop();
+                    write!(w, "\n}}")?;
+                }
+                FunctionBody::Todo => {
+                    w.push();
+                    write!(w, "{{\ntodo!()")?;
+                    w.pop();
+                    write!(w, "\n}}")?;
+                }
+                FunctionBody::Known(b) => b.print(&mut w)?,
+            }
+        }
+        Ok(())
+    }
 }
 
-impl<'a> FunctionBuilder<'a> {
-    pub fn new(function: FunctionHandle, module: &'a mut ModuleBuilder) -> FunctionBuilder {
-        let fun = &module.functions[function];
-        let variable_counter = fun.args.len();
+pub struct FunctionBuilder {
+    arg_count: usize,
+    variable_counter: Cell<usize>,
+    block_counter: Cell<usize>,
+}
 
+impl FunctionBuilder {
+    pub fn new(function: FunctionHandle, module: &ModuleBuilder) -> FunctionBuilder {
+        let fun = &module.functions[function];
+        let arg_count = fun.args.len();
         Self {
-            module,
-            function,
-            variable_counter,
-            block_counter: 0,
+            arg_count,
+            variable_counter: Cell::new(arg_count),
+            block_counter: Cell::new(0),
         }
     }
-    pub fn variables_for_arguments(
+    pub fn parameters_iter(
         &self,
     ) -> std::iter::Map<std::ops::Range<usize>, fn(usize) -> VariableHandle> {
-        let fun = &self.module.functions[self.function];
-        let args = fun.args.len();
-
-        (0..args).map(VariableHandle::new)
+        (0..self.arg_count).map(VariableHandle::new)
     }
-    pub fn new_variable(&mut self) -> VariableHandle {
-        let c = self.variable_counter;
-        self.variable_counter += 1;
+    pub fn get_parameter(&self, index: usize) -> Option<VariableHandle> {
+        if index < self.arg_count {
+            Some(VariableHandle::new(index))
+        } else {
+            None
+        }
+    }
+    pub fn new_variable(&self) -> VariableHandle {
+        let c = self.variable_counter.get();
+        self.variable_counter.set(c + 1);
         VariableHandle::new(c)
     }
-    pub fn new_block(&mut self) -> BlockHandle {
-        let c = self.block_counter;
-        self.block_counter += 1;
+    pub fn new_block(&self) -> BlockHandle {
+        let c = self.block_counter.get();
+        self.block_counter.set(c + 1);
         BlockHandle::new(c)
     }
-    pub fn finish(self, predeclared: FunctionHandle, body: Expr) {
-        let fun = &mut self.module.functions[predeclared];
-        assert!(matches!(fun.body, FunctionBody::Todo));
-
-        fun.body = FunctionBody::Known(body);
+    pub fn new_block_builder(&self) -> BlockBuilder {
+        BlockBuilder::new(self)
     }
 }
 
@@ -198,16 +764,27 @@ pub fn generate_functions(
     converted: &ConvertedFile,
     lowered: &LoweredFile,
     compiled: &CompiledFile,
-) -> HandleVec<FunctionHandle, Function> {
+) -> (ModuleBuilder, GenerationContext, Vec<SpannedError>) {
     let mut module = ModuleBuilder::new();
     let parser = ExprType::Custom(module.register_type("Parser"));
     let checkpoint = ExprType::Custom(module.register_type("Checkpoint"));
     let span_start = ExprType::Custom(module.register_type("Position"));
 
     let fn_expect = module.builtin_fn("expect", &[parser, ExprType::SpanKind], ExprType::Bool);
+    let fn_token_any = module.builtin_fn("token_any", &[parser], ExprType::Bool);
+    let fn_token_not =
+        module.builtin_fn("token_not", &[parser, ExprType::SpanKind], ExprType::Bool);
     let fn_make_checkpoint = module.builtin_fn("checkpoint", &[parser], checkpoint);
     let fn_restore_checkpoint = module.builtin_fn("restore", &[parser, checkpoint], ExprType::Void);
     let fn_start_span = module.builtin_fn("start_span", &[parser], span_start);
+    let fn_close_span =
+        module.builtin_fn("close_span", &[parser, ExprType::SpanKind], ExprType::Void);
+    let fn_report_err = module.builtin_fn("report_err", &[parser, ExprType::String], span_start);
+    let fn_report_err_since = module.builtin_fn(
+        "report_err_since",
+        &[parser, span_start, ExprType::String],
+        span_start,
+    );
 
     let mut counter = 0u32;
     let token_kinds = lowered.tokens.map_ref(|_| {
@@ -215,94 +792,361 @@ pub fn generate_functions(
         counter += 1;
         copy
     });
-    let rule_kinds = lowered.rules.map_ref(|_| {
-        let copy = counter;
-        counter += 1;
-        copy
-    });
-    let rule_functions = converted
-        .rules
-        .map_ref(|conv| module.predeclare_fn(&conv.name, &[], ExprType::Bool));
+    let rule_data =
+        SecondaryVec::from_iter(converted.rules.iter_kv().filter(|(_, v)| !v.inline).map(
+            |(k, conv)| {
+                let function = if conv.attributes.pratt {
+                    let name = format!("{}_pratt", conv.name);
+                    module.predeclare_fn(&name, &[parser, ExprType::U32], ExprType::Bool)
+                } else {
+                    module.predeclare_fn(&conv.name, &[parser], ExprType::Bool)
+                };
+                let data = RuleData {
+                    function,
+                    kind: counter,
+                };
+                counter += 1;
+                (k, data)
+            },
+        ));
 
-    let context = GenerationContext {
+    let cx = GenerationContext {
         token_kinds,
-        rule_functions,
+        rule_data,
         fn_expect,
+        fn_token_any,
+        fn_token_not,
         fn_make_checkpoint,
         fn_restore_checkpoint,
+        fn_start_span,
+        fn_close_span,
+        fn_report_err,
+        fn_report_err_since,
     };
 
-    for (rule_handle, rule) in compiled.rules.iter_kv() {
-        let mut builder = FunctionBuilder::new(todo!(), &mut module);
-        let parser_var = builder.variables_for_arguments().next().unwrap();
+    let mut errors = Vec::new();
 
-        let out = generate_expr(rule,);
+    for (handle, data) in cx.rule_data.iter_kv() {
+        let function = FunctionBuilder::new(data.function, &mut module);
+
+        let mut expr = if converted.rules[handle].attributes.pratt {
+            let CompiledRule::Pratt(children) = &compiled.rules[handle] else {
+                unreachable!()
+            };
+            generate_pratt_expr(
+                &function,
+                handle,
+                children,
+                compiled,
+                converted,
+                &mut errors,
+                &cx,
+            )
+        } else {
+            let expr = match &compiled.rules[handle] {
+                CompiledRule::Unchanged => &lowered.rules[handle],
+                CompiledRule::PrattChild(a) => a,
+                CompiledRule::Pratt(_) => unreachable!(),
+            };
+            generate_expr_function(expr, &function, data, converted, &mut errors, &cx)
+        };
+
+        massage_body(&mut expr, &function);
+        module.finish_fn(data.function, expr);
     }
 
-    (C⇒D)⇒(¬D⇒¬C)    fn_restore_checkpoint: FunctionHandle,
+    (module, cx, errors)
+}
+
+fn generate_expr_function(
+    expr: &RuleExpr,
+    function: &FunctionBuilder,
+    data: &RuleData,
+    converted: &ConvertedFile,
+    errors: &mut Vec<SpannedError>,
+    cx: &GenerationContext,
+) -> Expr {
+    let parser_var = function.get_parameter(0).unwrap();
+
+    let mut body = function.new_block_builder();
+    let start_var = body.Let(expr::Call(
+        cx.fn_start_span,
+        vec![expr::Variable(parser_var)],
+    ));
+
+    let mut pass = function.new_block_builder();
+    {
+        pass.Call(
+            cx.fn_close_span,
+            vec![
+                expr::Constant_SpanKind(data.kind),
+                expr::Variable(start_var),
+            ],
+        );
+        pass.Break(body.get_handle(), expr::Constant_bool(true));
+    }
+
+    let expr = generate_expr(expr, parser_var, &function, converted, errors, cx);
+    let block_handle = body.get_handle();
+    body.IfElse(
+        expr,
+        pass.finish(),
+        expr::Break(block_handle, expr::Constant_bool(false)),
+    );
+
+    body.finish()
+}
+
+pub struct RuleData {
+    pub function: FunctionHandle,
+    pub kind: u32,
+}
+
+pub struct GenerationContext {
+    pub token_kinds: HandleVec<crate::convert::TokenHandle, u32>,
+    pub rule_data: SecondaryVec<crate::convert::RuleHandle, RuleData>,
+    pub fn_expect: FunctionHandle,
+    pub fn_token_any: FunctionHandle,
+    pub fn_token_not: FunctionHandle,
+    pub fn_make_checkpoint: FunctionHandle,
+    pub fn_restore_checkpoint: FunctionHandle,
+    pub fn_start_span: FunctionHandle,
+    pub fn_close_span: FunctionHandle,
+    pub fn_report_err: FunctionHandle,
+    pub fn_report_err_since: FunctionHandle,
+}
+
+/// ```
+/// fn expr(p: &mut Parser, min_bp: u8) -> bool {
+///     let m = p.open();
+///
+///     // parse choice of leaf (Atom and Prefix) expressions
+///     'block: {
+///         if rule1(p) {
+///             break 'block;
+///         }
+///         if rule2(p) {
+///             break 'block;
+///         }
+///         return false;
+///     }
+///
+///     // parse Postfix or Binary expressions
+///     // at this point we've consumed the leading Expression, we need to inline all the patterns excluding the start
+///     'consume: loop {
+///         'block: {
+///             if bp /* bp table lookup */ < min_bp {
+///                 break 'block;
+///             }
+///
+///             if !p.token(TokenKind) {
+///                 break 'block;
+///             }
+///             // commit
+///             p.token(TokenKind);
+///             p.token(TokenKind);
+///             // ...
+///
+///             p.close(m, SpanKind);
+///             continue 'consume;
+///         }
+///
+///         'block: {
+///             if bp /* bp table lookup */ < min_bp {
+///                 break 'block;
+///             }
+///
+///             if !p.token(TokenKind) {
+///                 break 'block;
+///             }
+///             // commit
+///             p.token(TokenKind);
+///             p.token(TokenKind);
+///             // ...
+///
+///             p.close(m, SpanKind);
+///             continue 'consume;
+///         }
+///
+///         break;
+///     }
+///
+///     return true;
+/// }
+/// ```
+fn generate_pratt_expr(
+    builder: &FunctionBuilder,
+    this: RuleHandle,
+    children: &[PrattChild],
+    compiled: &CompiledFile,
+    converted: &ConvertedFile,
+    errors: &mut Vec<SpannedError>,
+    cx: &GenerationContext,
+) -> Expr {
+    let parser_var = builder.get_parameter(0).unwrap();
+    let min_bp_var = builder.get_parameter(1).unwrap();
+
+    let mut body = builder.new_block_builder();
+    let start_var = body.Let(expr::Call(
+        cx.fn_start_span,
+        vec![expr::Variable(parser_var)],
+    ));
+
+    let parser = expr::Variable(parser_var);
+    let mut base_expressions = Vec::new();
+    let mut post_expressions = Vec::new();
+
+    for expr in children {
+        match expr.kind {
+            PrattExprKind::Atom | PrattExprKind::Prefix => {
+                let rule_expr = match expr.expr {
+                    PrattExpr::Token(token) => RuleExpr::Token(token),
+                    PrattExpr::Rule(rule) => RuleExpr::Rule(rule),
+                };
+                base_expressions.push(rule_expr);
+            }
+            PrattExprKind::Postfix | PrattExprKind::Binary(_) => {
+                let rule_expr = match expr.expr {
+                    PrattExpr::Token(_) => unreachable!("Single token should be an Atom"),
+                    PrattExpr::Rule(rule) => match &compiled.rules[rule] {
+                        crate::compile::CompiledRule::PrattChild(child) => child,
+                        _ => unreachable!(),
+                    },
+                };
+
+                let RuleExpr::Sequence(seq) = rule_expr else {
+                    unreachable!("Only sequences can become anything other than Atom")
+                };
+                assert!(seq.len() > 1, "Malformed sequence");
+
+                let RuleExpr::PrattRecursion {
+                    pratt,
+                    binding_power,
+                } = seq[0]
+                else {
+                    unreachable!("Postfix/Binary must start with parent Expr")
+                };
+                assert_eq!(pratt, this);
+
+                // strip the leading Expr
+                post_expressions.push((expr, binding_power, &seq[1..]));
+            }
+        }
+    }
+
+    let base = match base_expressions.len() {
+        0 => panic!(),
+        1 => base_expressions.pop().unwrap(),
+        _ => RuleExpr::Choice(base_expressions),
+    };
+    let base = generate_expr(&base, parser_var, builder, converted, errors, cx);
+
+    body.IfBreakSelf(expr::Negate(base), expr::Constant_bool(false));
+
+    let mut block = builder.new_block_builder();
+    assert!(!post_expressions.is_empty());
+    let checkpoint = block.Let(expr::Call(cx.fn_make_checkpoint, vec![parser]));
+
+    let mut need_reset = false;
+    for (rule, binding_power, sequence) in post_expressions {
+        if need_reset {
+            block.Call(
+                cx.fn_restore_checkpoint,
+                vec![Expr::VariableAccess(checkpoint)],
+            );
+        }
+
+        let expr = match sequence {
+            [one] => one.clone(),
+            // FIXME do not allocate here
+            _ => RuleExpr::Sequence(sequence.to_vec()),
+        };
+
+        // failing to match a single token does not generate errors and does not advance the parser
+        need_reset = !matches!(expr, RuleExpr::Token(_));
+
+        let mut subblock = builder.new_block_builder();
+        subblock.IfBreakSelf(
+            expr::More(
+                expr::Variable(min_bp_var),
+                expr::Constant_u32(binding_power),
+            ),
+            expr::Empty(),
+        );
+
+        let mut pass = builder.new_block_builder();
+        {
+            if let PrattExpr::Rule(rule) = rule.expr {
+                let kind = cx.rule_data[rule].kind;
+                pass.Call(
+                    cx.fn_close_span,
+                    vec![expr::Constant_SpanKind(kind), expr::Variable(start_var)],
+                );
+            };
+            pass.Continue(block.get_handle());
+        }
+
+        let expr = generate_expr(&expr, parser_var, builder, converted, errors, cx);
+        subblock.If(expr, pass.finish());
+        block.push(subblock.finish());
+    }
+    block.BreakSelf(expr::Empty());
+    body.Loop(block.finish());
+    body.BreakSelf(expr::Constant_bool(true));
+
+    body.finish()
 }
 
 fn generate_expr(
     rule: &RuleExpr,
     parser_var: VariableHandle,
-    builder: &mut FunctionBuilder,
+    builder: &FunctionBuilder,
+    converted: &ConvertedFile,
+    errors: &mut Vec<SpannedError>,
     cx: &GenerationContext,
 ) -> Expr {
+    let parser = expr::Variable(parser_var);
     match rule {
-        RuleExpr::Token(handle) => Expr::Call {
-            // expect(parser, TokenKind)
-            fun: cx.fn_expect,
-            arguments: vec![Expr::Constant(ExprConstant::SpanKind(
-                cx.token_kinds[*handle],
-            ))],
-        },
-        RuleExpr::Rule(handle) => Expr::Call {
-            // rule1(parser)
-            fun: cx.rule_functions[*handle],
-            arguments: vec![Expr::VariableAccess(parser_var)],
-        },
+        RuleExpr::Token(handle) => {
+            // TODO report errors
+            expr::Call(
+                cx.fn_expect,
+                vec![expr::Constant_SpanKind(cx.token_kinds[*handle])],
+            )
+        }
+        RuleExpr::Rule(handle) => {
+            let args = match converted.rules[*handle].attributes.pratt {
+                true => vec![parser, expr::Constant_u32(0)],
+                false => vec![parser],
+            };
+            expr::Call(cx.rule_data[*handle].function, args)
+        }
         RuleExpr::Sequence(seq) => {
             // 'block: {
             //     if !rule1(parser) {
             //         break 'block false;
             //     }
             //     rule2(parser);
-            //     rule2(parser);
+            //     rule3(parser);
             //     break 'block true;
             // }
 
             assert!(!seq.is_empty());
-            let block = builder.new_block();
+            let mut block = builder.new_block_builder();
 
             let mut commited = true;
-            let mut statements = Vec::new();
             for a in seq {
-                let expr: Expr = generate_expr(a, parser_var, builder, cx);
-                let expr = if commited {
-                    expr
+                let expr: Expr = generate_expr(a, parser_var, builder, converted, errors, cx);
+                if commited {
+                    block.push(expr);
                 } else {
                     // TODO manual commits
                     commited = true;
-                    Expr::If {
-                        condition: Box::new(Expr::Negate(Box::new(expr))),
-                        pass: Box::new(Expr::Break(
-                            block,
-                            Box::new(Expr::Constant(ExprConstant::Bool(false))),
-                        )),
-                        otherwise: None,
-                    }
-                };
-                statements.push(expr);
+                    block.IfBreakSelf(expr::Negate(expr), expr::Constant_bool(false));
+                }
             }
-            statements.push(Expr::Break(
-                block,
-                Box::new(Expr::Constant(ExprConstant::Bool(true))),
-            ));
-
-            Expr::Block {
-                handle: block,
-                statements,
-            }
+            block.BreakSelf(expr::Constant_bool(true));
+            block.finish()
         }
         RuleExpr::Choice(seq) => {
             // 'block: {
@@ -318,50 +1162,24 @@ fn generate_expr(
             // }
 
             assert!(!seq.is_empty());
-            let block = builder.new_block();
+            let mut block = builder.new_block_builder();
+            let checkpoint = block.Let(expr::Call(cx.fn_make_checkpoint, vec![parser]));
 
-            let mut statements = Vec::new();
-            let checkpoint = builder.new_variable();
-            statements.push(Expr::DeclareVariable {
-                handle: checkpoint,
-                mutable: false,
-                value: Box::new(Expr::Call {
-                    fun: cx.fn_make_checkpoint,
-                    arguments: vec![Expr::VariableAccess(parser_var)],
-                }),
-            });
-            let mut first = true;
+            let mut need_reset = false;
             for a in seq {
-                if !first {
-                    statements.push(Expr::Call {
-                        fun: cx.fn_restore_checkpoint,
-                        arguments: vec![Expr::VariableAccess(checkpoint)],
-                    })
+                if need_reset {
+                    block.Call(
+                        cx.fn_restore_checkpoint,
+                        vec![Expr::VariableAccess(checkpoint)],
+                    );
                 }
-                first = false;
+                need_reset = !matches!(a, RuleExpr::Token(_));
 
-                let expr = generate_expr(a, parser_var, builder, cx);
-                let block = builder.new_block();
-
-                statements.push(Expr::If {
-                    condition: Box::new(expr),
-                    pass: Box::new(Expr::Break(
-                        block,
-                        Box::new(Expr::Constant(ExprConstant::Bool(true))),
-                    )),
-                    otherwise: None,
-                });
+                let expr = generate_expr(a, parser_var, builder, converted, errors, cx);
+                block.IfBreakSelf(expr, expr::Constant_bool(true));
             }
-
-            statements.push(Expr::Break(
-                block,
-                Box::new(Expr::Constant(ExprConstant::Bool(false))),
-            ));
-
-            Expr::Block {
-                handle: block,
-                statements,
-            }
+            block.BreakSelf(expr::Constant_bool(false));
+            block.finish()
         }
         RuleExpr::ZeroOrMore(a) => {
             // 'block: {
@@ -369,24 +1187,12 @@ fn generate_expr(
             //     break 'block true;
             // }
 
-            let block = builder.new_block();
+            let mut block = builder.new_block_builder();
 
-            let expr = generate_expr(a, parser_var, builder, cx);
-            let statements = vec![
-                Expr::While {
-                    condition: Box::new(expr),
-                    block: Box::new(Expr::Block {
-                        handle: builder.new_block(),
-                        statements: vec![],
-                    }),
-                },
-                Expr::Break(block, Box::new(Expr::Constant(ExprConstant::Bool(false)))),
-            ];
-
-            Expr::Block {
-                handle: block,
-                statements,
-            }
+            let expr = generate_expr(a, parser_var, builder, converted, errors, cx);
+            block.While(expr, expr::Empty());
+            block.BreakSelf(expr::Constant_bool(true));
+            block.finish()
         }
         RuleExpr::OneOrMore(a) => {
             // 'block: {
@@ -394,44 +1200,515 @@ fn generate_expr(
             //     while rule1(parser) {
             //         correct = true;
             //     }
+            //     if !correct {
+            //         report_error(parser);
+            //     }
             //     break 'block correct;
             // }
 
-            // TODO this doesn't create error spans
-            let outer_block = builder.new_block();
+            let mut block = builder.new_block_builder();
 
-            let while_block = builder.new_block();
-            let is_ok = builder.new_variable();
-            let expr = generate_expr(a, parser_var, builder, cx);
+            let expr = generate_expr(a, parser_var, builder, converted, errors, cx);
+            let correct = block.LetMut(expr::Constant_bool(false));
+            block.While(expr, expr::AssignVar(correct, expr::Constant_bool(true)));
+            block.If(
+                expr::Negate(expr::Variable(correct)),
+                expr::Call(
+                    cx.fn_report_err,
+                    vec![expr::Constant_str("Expected TODO kind name")],
+                ),
+            );
+            block.BreakSelf(expr::Variable(correct));
+            block.finish()
+        }
+        RuleExpr::Maybe(a) => {
+            // 'block: {
+            //     let checkpoint = make_checkpoint(parser);
+            //     if !rule1(parser) {
+            //         restore_checkpoint(parser, checkpoint);
+            //     }
+            //     break 'block true;
+            // }
 
-            let while_loop = Expr::While {
-                condition: Box::new(expr),
-                block: Box::new(Expr::Block {
-                    handle: while_block,
-                    statements: vec![Expr::AssignVariable {
-                        handle: is_ok,
-                        value: Box::new(Expr::Constant(ExprConstant::Bool(true))),
-                    }],
-                }),
-            };
+            let mut block = builder.new_block_builder();
+            let expr = generate_expr(a, parser_var, builder, converted, errors, cx);
+            if let RuleExpr::Token(_) = a.as_ref() {
+                block.push(expr);
+            } else {
+                let checkpoint = block.Let(expr::Call(cx.fn_make_checkpoint, vec![parser.clone()]));
+                block.If(
+                    expr::Negate(expr),
+                    expr::Call(
+                        cx.fn_restore_checkpoint,
+                        vec![parser, expr::Variable(checkpoint)],
+                    ),
+                );
+            }
+            block.BreakSelf(expr::Constant_bool(true));
+            block.finish()
+        }
+        RuleExpr::Any => {
+            // token_any(parser)
+            expr::Call(cx.fn_token_any, vec![parser])
+        }
+        RuleExpr::Not(token) => {
+            // token_not(parser, TokenKind)
 
-            Expr::Block {
-                handle: outer_block,
-                statements: vec![while_loop, Expr::VariableAccess(is_ok)],
+            if let RuleExpr::Token(token) = token.as_ref() {
+                expr::Call(
+                    cx.fn_token_not,
+                    vec![parser, expr::Constant_SpanKind(cx.token_kinds[*token])],
+                )
+            } else {
+                errors.push(SpannedError {
+                    span: StrSpan::empty(),
+                    err: "RuleExpr::Not expects a single token".to_owned(),
+                });
+                expr::Error()
             }
         }
-        RuleExpr::Maybe(_) => todo!(),
-        RuleExpr::InlineParameter(_) => todo!(),
-        RuleExpr::InlineCall(_) => todo!(),
-        RuleExpr::Any => todo!(),
-        RuleExpr::Not(_) => todo!(),
-        RuleExpr::SeparatedList { element, separator } => todo!(),
-        RuleExpr::ZeroSpace => todo!(),
-        RuleExpr::Empty => todo!(),
-        RuleExpr::Error => todo!(),
+        RuleExpr::SeparatedList { element, separator } => {
+            // 'block: loop {
+            //     if !rule1(parser) {
+            //         break 'block true;
+            //     }
+            //     if !rule2(parser) {
+            //         break 'block true;
+            //     }
+            // }
+
+            let mut block = builder.new_block_builder();
+            let element = generate_expr(element, parser_var, builder, converted, errors, cx);
+            let separator = generate_expr(separator, parser_var, builder, converted, errors, cx);
+
+            block.IfBreakSelf(expr::Negate(element), expr::Constant_bool(true));
+            block.IfBreakSelf(expr::Negate(separator), expr::Constant_bool(true));
+            expr::Loop(block.finish())
+        }
         RuleExpr::PrattRecursion {
             pratt,
             binding_power,
-        } => todo!(),
+        } => expr::Call(
+            cx.rule_data[*pratt].function,
+            vec![parser, expr::Constant_u32(*binding_power)],
+        ),
+        RuleExpr::ZeroSpace => todo!(),
+        // TODO this pattern matches without consuming anything, this will lead to infinite loops
+        // what do?
+        RuleExpr::Empty => expr::Constant_bool(true),
+        RuleExpr::Error => expr::Error(),
+        RuleExpr::InlineParameter(_) => unreachable!(),
+        RuleExpr::InlineCall(_) => unreachable!(),
+    }
+}
+
+// enum VariableState {
+//     Unitialized,
+//     OutOfScope,
+//     Unknown,
+//     Known(ExprConstant),
+// }
+
+// struct LiveVariables {
+//     variables: SecondaryVec<VariableHandle, (VariableState, ExprType)>,
+//     scope_stack: Vec<Vec<VariableHandle>>,
+//     cx: ConvertCtx<'static>,
+// }
+
+// impl LiveVariables {
+//     pub fn new() -> LiveVariables {
+//         Self {
+//             variables: SecondaryVec::new(),
+//             scope_stack: Vec::new(),
+//             cx: ConvertCtx::new(""),
+//         }
+//     }
+//     pub fn declare_variable(&mut self, handle: VariableHandle, ty: ExprType, expr: Option<&Expr>) {
+//         if let Some(_) = self.variables.get(handle) {
+//             self.cx
+//                 .error(StrSpan::empty(), "duplicate variable declaration");
+//         } else {
+//             self.variables
+//                 .insert(handle, (VariableState::Unitialized, ty));
+//             if let Some(expr) = expr {
+//                 self.assign_variable(handle, expr);
+//             }
+//         }
+//     }
+//     pub fn assign_variable(&mut self, handle: VariableHandle, expr: &Expr) {
+//         let value = eval_expr(expr, self);
+//         if let Some((var, ty)) = self.variables.get_mut(handle) {
+//             *var = match value {
+//                 Ok(val) => {
+//                     if val.ty() == *ty {
+//                         VariableState::Known(val)
+//                     } else {
+//                         self.cx.error(StrSpan::empty(), "types do not match");
+//                         VariableState::Unknown
+//                     }
+//                 }
+//                 _ => VariableState::Unknown,
+//             }
+//         } else {
+//             self.cx.error(StrSpan::empty(), "variable does not exist");
+//         }
+//     }
+//     pub fn get_variable(&self, handle: VariableHandle) -> Result<&ExprConstant, ExprEvalError> {
+//         let Some((var, _)) = self.variables.get(handle) else {
+//             self.cx.error(StrSpan::empty(), "variable does not exist");
+//             return Err(ExprEvalError::Error);
+//         };
+//         match var {
+//             VariableState::Unitialized => {
+//                 self.cx
+//                     .error(StrSpan::empty(), "accessing unitialized variable");
+//                 Err(ExprEvalError::Error)
+//             }
+//             VariableState::OutOfScope => Err(ExprEvalError::Error),
+//             VariableState::Unknown => Err(ExprEvalError::ValueUnknown),
+//             VariableState::Known(val) => Ok(val),
+//         }
+//     }
+// }
+
+// enum ExprEvalError {
+//     ValueUnknown,
+//     InvalidOperation,
+//     Error,
+// }
+
+// fn eval_expr(expr: &Expr, vars: &mut LiveVariables) -> Result<ExprConstant, ExprEvalError> {
+//     fn u32_binop(
+//         a: &Expr,
+//         b: &Expr,
+//         vars: &mut LiveVariables,
+//         fun: fn(u32, u32) -> bool,
+//     ) -> Result<ExprConstant, ExprEvalError> {
+//         let a = eval_expr(a, vars)?;
+//         let b = eval_expr(b, vars)?;
+//         match (a, b) {
+//             (ExprConstant::U32(a), ExprConstant::U32(b)) => Ok(ExprConstant::Bool(fun(a, b))),
+//             _ => Err(ExprEvalError::InvalidOperation),
+//         }
+//     }
+//     fn expr_equal(a: &Expr, b: &Expr, vars: &mut LiveVariables) -> Result<bool, ExprEvalError> {
+//         let a = eval_expr(a, vars)?;
+//         let b = eval_expr(b, vars)?;
+//         match (a, b) {
+//             (ExprConstant::Void, ExprConstant::Void) => Ok(true),
+//             (ExprConstant::Bool(a), ExprConstant::Bool(b)) => Ok(a == b),
+//             (ExprConstant::U32(a), ExprConstant::U32(b)) => Ok(a == b),
+//             (ExprConstant::SpanKind(a), ExprConstant::SpanKind(b)) => Ok(a == b),
+//             (ExprConstant::String(a), ExprConstant::String(b)) => Ok(a == b),
+//             _ => Err(ExprEvalError::InvalidOperation),
+//         }
+//     }
+
+//     match expr {
+//         Expr::Error => Err(ExprEvalError::Error),
+//         Expr::Empty => Ok(ExprConstant::Void),
+//         Expr::Negate(a) => match eval_expr(a, vars)? {
+//             ExprConstant::Bool(bool) => Ok(ExprConstant::Bool(!bool)),
+//             _ => Err(ExprEvalError::InvalidOperation),
+//         },
+//         Expr::LessOrEqual(a, b) => u32_binop(a, b, vars, |a, b| a <= b),
+//         Expr::MoreOrEqual(a, b) => u32_binop(a, b, vars, |a, b| a >= b),
+//         Expr::Less(a, b) => u32_binop(a, b, vars, |a, b| a <= b),
+//         Expr::More(a, b) => u32_binop(a, b, vars, |a, b| a <= b),
+//         Expr::Equal(a, b) => expr_equal(a, b, vars).map(ExprConstant::Bool),
+//         Expr::NotEqual(a, b) => expr_equal(a, b, vars).map(|bool| ExprConstant::Bool(!bool)),
+//         Expr::VariableAccess(handle) => todo!(),
+//         Expr::DeclareVariable {
+//             handle,
+//             mutable,
+//             value,
+//         } => todo!(),
+//         Expr::AssignVariable { handle, value } => todo!(),
+//         Expr::Constant(_) => todo!(),
+//         Expr::Call { fun, arguments } => todo!(),
+//         Expr::If {
+//             condition,
+//             pass,
+//             otherwise,
+//         } => todo!(),
+//         Expr::While { condition, block } => todo!(),
+//         Expr::Loop(_) => todo!(),
+//         Expr::Block { handle, statements } => todo!(),
+//         Expr::Break(a, b) => todo!(),
+//         Expr::Continue(_) => todo!(),
+//     }
+// }
+
+// fn handle_variables(expr: &Expr, variables: HandleVec<VariableHandle, VariableState>) {
+//     match expr {
+//         Expr::VariableAccess(_) => todo!(),
+//         Expr::DeclareVariable {
+//             handle,
+//             mutable,
+//             value,
+//         } => todo!(),
+//         Expr::AssignVariable { handle, value } => todo!(),
+
+//         Expr::Error => todo!(),
+//         Expr::Empty => todo!(),
+//         Expr::Negate(_) => todo!(),
+//         Expr::LessOrEqual(_, _) => todo!(),
+//         Expr::MoreOrEqual(_, _) => todo!(),
+//         Expr::Less(_, _) => todo!(),
+//         Expr::More(_, _) => todo!(),
+//         Expr::Equal(_, _) => todo!(),
+//         Expr::NotEqual(_, _) => todo!(),
+//         Expr::Argument(_) => todo!(),
+//         Expr::Constant(_) => todo!(),
+//         Expr::Call { fun, arguments } => todo!(),
+//         Expr::If {
+//             condition,
+//             pass,
+//             otherwise,
+//         } => todo!(),
+//         Expr::While { condition, block } => todo!(),
+//         Expr::Loop(_) => todo!(),
+//         Expr::Block { handle, statements } => todo!(),
+//         Expr::Break(_, _) => todo!(),
+//         Expr::Continue(_) => todo!(),
+//     }
+// }
+
+fn visit_exprs(
+    expr: &mut Expr,
+    fun: &mut dyn FnMut(&mut Expr) -> Result<(), ()>,
+) -> Result<(), ()> {
+    fun(expr)?;
+    match expr {
+        Expr::Error
+        | Expr::Empty
+        | Expr::Continue(_)
+        | Expr::VariableAccess(_)
+        | Expr::Constant(_) => Ok(()),
+        Expr::Negate(a)
+        | Expr::Loop(a)
+        | Expr::Break(_, a)
+        | Expr::AssignVariable { value: a, .. } => visit_exprs(a, fun),
+        Expr::LessOrEqual(a, b)
+        | Expr::MoreOrEqual(a, b)
+        | Expr::Less(a, b)
+        | Expr::More(a, b)
+        | Expr::Equal(a, b)
+        | Expr::NotEqual(a, b) => {
+            visit_exprs(a, fun)?;
+            visit_exprs(b, fun)
+        }
+        Expr::DeclareVariable {
+            handle,
+            mutable,
+            value,
+        } => {
+            if let Some(a) = value {
+                visit_exprs(a, fun)?;
+            }
+            Ok(())
+        }
+        Expr::Call { arguments, .. } => {
+            for a in arguments {
+                visit_exprs(a, fun)?;
+            }
+            Ok(())
+        }
+        Expr::If {
+            condition,
+            pass,
+            otherwise,
+        } => {
+            visit_exprs(condition, fun)?;
+            visit_exprs(pass, fun)?;
+            if let Some(a) = otherwise {
+                visit_exprs(a, fun)?;
+            }
+            Ok(())
+        }
+        Expr::While { condition, block } => {
+            visit_exprs(condition, fun)?;
+            visit_exprs(block, fun)
+        }
+        Expr::Block { handle, statements } => {
+            for a in statements {
+                visit_exprs(a, fun)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+// #[allow(unreachable_code)]
+// fn massage_expr(expr: &mut Expr, block: ) {
+//     _ = visit_exprs(expr, &mut |expr| {
+//         match expr {
+//             Expr::If {
+//                 condition,
+//                 pass,
+//                 otherwise,
+//             } => todo!(),
+//             Expr::Error => todo!(),
+//             Expr::Empty => todo!(),
+//             Expr::Negate(_) => todo!(),
+//             Expr::LessOrEqual(_, _) => todo!(),
+//             Expr::MoreOrEqual(_, _) => todo!(),
+//             Expr::Less(_, _) => todo!(),
+//             Expr::More(_, _) => todo!(),
+//             Expr::Equal(_, _) => todo!(),
+//             Expr::NotEqual(_, _) => todo!(),
+//             Expr::VariableAccess(_) => todo!(),
+//             Expr::DeclareVariable {
+//                 handle,
+//                 mutable,
+//                 value,
+//             } => todo!(),
+//             Expr::AssignVariable { handle, value } => todo!(),
+//             Expr::Constant(_) => todo!(),
+//             Expr::Call { fun, arguments } => todo!(),
+//             Expr::While { condition, block } => todo!(),
+//             Expr::Loop(_) => todo!(),
+//             Expr::Block { handle, statements } => todo!(),
+//             Expr::Break(_, _) => todo!(),
+//             Expr::Continue(_) => todo!(),
+//         }
+//         Ok(())
+//     });
+// }
+
+fn outline_expr(expr: &mut Expr, scope: &mut BlockBuilder, builder: &FunctionBuilder) {
+    _ = visit_exprs(expr, &mut |expr| {
+        match expr {
+            Expr::If { .. } | Expr::While { .. } | Expr::Loop(_) | Expr::Block { .. } => {
+                let handle = builder.new_variable();
+                let this = std::mem::replace(expr, Expr::VariableAccess(handle));
+                let mut decl = Expr::DeclareVariable {
+                    handle,
+                    mutable: false,
+                    value: Some(Box::new(this)),
+                };
+                massage_expr(&mut decl, scope, builder);
+            }
+            _ => {}
+        }
+        Ok(())
+    });
+}
+
+fn get_condition_truthy_value(expr: &mut Expr) -> Option<(bool, &mut Expr)> {
+    match expr {
+        Expr::Negate(a) => get_condition_truthy_value(a).map(|(bool, handle)| (!bool, handle)),
+        Expr::Block { .. } => Some((true, expr)),
+        _ => None,
+    }
+}
+
+fn massage_expr(expr: &mut Expr, scope: &mut BlockBuilder, builder: &FunctionBuilder) {
+    match expr {
+        Expr::If {
+            condition,
+            pass,
+            otherwise,
+        } => {
+            // constant fold simple cases
+            let known_bool = match condition.as_ref() {
+                Expr::Constant(ExprConstant::Bool(bool)) => Some(*bool),
+                Expr::Negate(negate) => {
+                    if let Expr::Constant(ExprConstant::Bool(bool)) = negate.as_ref() {
+                        Some(!*bool)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(bool) = known_bool {
+                let replacement = match bool {
+                    true => Some(&mut **pass),
+                    false => otherwise.as_deref_mut(),
+                };
+                if let Some(expr) = replacement {
+                    massage_expr(expr, scope, builder);
+                }
+                return;
+            } else {
+                let branches_inlinable = true /* TODO */;
+                let truth_value = branches_inlinable
+                    .then(|| get_condition_truthy_value(condition))
+                    .flatten();
+
+                if let Some((truth, condition)) = truth_value {
+                    let handle = match condition {
+                        Expr::Block { handle, .. } => *handle,
+                        _ => unreachable!(),
+                    };
+                    _ = visit_exprs(condition, &mut |expr| {
+                        if let Expr::Break(block, inner) = expr {
+                            if *block == handle {
+                                if let Expr::Constant(ExprConstant::Bool(bool)) = inner.as_ref() {
+                                    if *bool == truth {
+                                        *expr = pass.as_ref().clone();
+                                    } else {
+                                        match otherwise.as_deref() {
+                                            Some(otherwise) => *expr = otherwise.clone(),
+                                            None => {
+                                                *expr = Expr::Break(handle, Box::new(Expr::Empty))
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let inner = std::mem::replace(&mut **inner, Expr::Empty);
+                                    *expr = Expr::If {
+                                        condition: Box::new(inner),
+                                        pass: pass.clone(),
+                                        otherwise: otherwise.clone(),
+                                    }
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
+                    massage_expr(condition, scope, builder);
+                    return;
+                } else {
+                    outline_expr(condition, scope, builder);
+                    massage_scope(pass, builder);
+                    if let Some(otherwise) = otherwise {
+                        massage_scope(otherwise, builder);
+                    }
+                }
+            }
+        }
+        // FIXME outlining with while loops will need replacing them with simple loops
+        Expr::While { block, .. } | Expr::Loop(block) => massage_scope(block, builder),
+        Expr::Block { statements, .. } => massage_block(statements, builder),
+        _ => {}
+    }
+    scope.push(std::mem::replace(expr, Expr::Empty));
+}
+
+fn massage_body(body: &mut Expr, builder: &FunctionBuilder) {
+    let Expr::Block { statements, .. } = body else {
+        panic!()
+    };
+    massage_block(statements, builder);
+}
+
+fn massage_block(statements: &mut Vec<Expr>, builder: &FunctionBuilder) {
+    let mut scope = builder.new_block_builder();
+    for expr in statements.iter_mut() {
+        massage_expr(expr, &mut scope, builder);
+    }
+    *statements = scope.statements.sequence;
+}
+
+fn massage_scope(expr: &mut Expr, builder: &FunctionBuilder) {
+    let mut scope = builder.new_block_builder();
+    massage_expr(expr, &mut scope, builder);
+    match scope.sequence.len() {
+        0 => *expr = Expr::Empty,
+        1 => *expr = scope.sequence.pop().unwrap(),
+        _ => *expr = scope.finish(),
     }
 }

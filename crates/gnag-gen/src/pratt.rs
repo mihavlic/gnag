@@ -2,9 +2,13 @@ use crate::convert::{RuleHandle, TokenHandle};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrattExprKind {
+    /// '(' Expr ')'
     Atom,
+    /// '!' Expr
     Prefix,
+    /// Expr '!'
     Postfix,
+    /// Expr '+' Expr
     Binary(Associativity),
 }
 

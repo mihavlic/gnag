@@ -1,8 +1,11 @@
 use std::hash::Hasher;
 
 use anyhow::Context;
-use gnag::{ctx::SpanExt, NodeKind, StrSpan};
-use gnag_gen::convert::{AstItem, RuleExpr};
+use gnag::{ctx::SpanExt, handle::HandleVec, NodeKind, StrSpan};
+use gnag_gen::{
+    convert::{AstItem, RuleExpr},
+    generate::{ExprConstant, VariableHandle},
+};
 use lsp_types::{CompletionItemKind, GotoDefinitionResponse, SymbolKind};
 
 use crate::{
@@ -270,6 +273,8 @@ pub fn diagnostic(
     let converted = file.get_converted();
     let lowered = file.get_lowered();
     let compiled = file.get_compiled();
+
+    log::info!("{:#?}", lowered.errors);
 
     let hash = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

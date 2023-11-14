@@ -33,11 +33,11 @@ export function activate(cx: ExtensionContext): Promise<void> {
         initializationOptions: config,
     };
 
-    
+
     client = new LanguageClient("gnag-lsp", "Gnag Language Server", serverOptions, clientOptions);
-    
+
     client.outputChannel.appendLine("running server at '" + serverCommand + "'");
-    
+
     let showAst = registerLspVirtualDocument(cx, client, "showAst");
     let showIr = registerLspVirtualDocument(cx, client, "showIr");
     let showLoweredIr = registerLspVirtualDocument(cx, client, "showLoweredIr");
@@ -47,7 +47,7 @@ export function activate(cx: ExtensionContext): Promise<void> {
         commands.registerCommand("gnag-lsp.showIr", showIr),
         commands.registerCommand("gnag-lsp.showLoweredIr", showLoweredIr),
     );
-    
+
     return client.start();
 }
 
@@ -101,7 +101,7 @@ const debounce = <T extends (...args: any[]) => any>(
         return result;
     };
 };
-  
+
 
 export function registerLspVirtualDocument(cx: ExtensionContext, client: LanguageClient, command: string): () => void {
     const tdcp = new (class implements vscode.TextDocumentContentProvider {
@@ -163,13 +163,12 @@ export function registerLspVirtualDocument(cx: ExtensionContext, client: Languag
         ): Promise<string> {
             if (!this.activeGnagEditor) return "";
             // When the range based query is enabled we take the range of the selection
-            client.outputChannel.appendLine(`uri ${uri.query}, ${this.activeGnagEditor.selection.isEmpty}`);
-            const range = 
+            // client.outputChannel.appendLine(`uri ${uri.query}, ${this.activeGnagEditor.selection.isEmpty}`);
+            const range =
                 this.activeGnagEditor.selection.isEmpty
-                ? null
-                : client.code2ProtocolConverter.asRange(this.activeGnagEditor.selection);
+                    ? null
+                    : client.code2ProtocolConverter.asRange(this.activeGnagEditor.selection);
             const params = { textDocument: { uri: this.activeGnagEditor.document.uri.toString() }, range };
-            client.outputChannel.appendLine(`LSP ${command} firing!`);
             return client.sendRequest(`gnag-lsp/${command}`, params, ct);
         }
 
@@ -184,14 +183,10 @@ export function registerLspVirtualDocument(cx: ExtensionContext, client: Languag
 
     return async () => {
         const editor = vscode.window.activeTextEditor;
-        
-        // const rangeEnabled = !!editor && !editor.selection.isEmpty;
-        client.outputChannel.appendLine(`${command} firing!`);
-        // const uri = rangeEnabled ? tdcp.uri.with({query: "range=true"}) : tdcp.uri;
-        
+
         const document = await vscode.workspace.openTextDocument(tdcp.uri);
         tdcp.eventEmitter.fire(tdcp.uri);
-        
+
         void (await vscode.window.showTextDocument(document, {
             viewColumn: vscode.ViewColumn.Two,
             preserveFocus: true,

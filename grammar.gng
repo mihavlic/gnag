@@ -94,12 +94,12 @@ inline comma_list(element) {
     <separated_list element ','>
 }
 
-inline delimited(bra, ket, inside) {
-    bra (DelimitedExpr | <not ket>)* ket
-}
-
 inline DelimitedExpr {
     ParenDelimited | BraceDelimited | BracketDelimited
+}
+
+inline delimited(bra, ket) {
+    bra (DelimitedExpr | <not ket>)* ket
 }
 
 rule ParenDelimited {

@@ -88,16 +88,14 @@ impl CompiledRule {
     fn insert_pratt(&mut self, children: Vec<PrattChild>) {
         match self {
             CompiledRule::Unchanged => *self = CompiledRule::Pratt(children),
-            CompiledRule::PrattChild(_) => panic!(),
-            CompiledRule::Pratt(_) => panic!(),
+            CompiledRule::PrattChild(_) | CompiledRule::Pratt(_) => panic!(),
         }
     }
 }
 
 pub struct CompiledFile {
     pub error_token: Option<TokenHandle>,
-    // pub root_rule: Option<RuleHandle>,
-    pub rules: SecondaryVec<RuleHandle, RuleExpr>,
+    pub rules: HandleVec<RuleHandle, CompiledRule>,
     pub errors: Vec<SpannedError>,
 }
 
@@ -144,23 +142,23 @@ impl CompiledFile {
             hashset.drain().collect::<Vec<_>>()
         });
 
-        let mut data = SecondaryVec::new_preallocated(&lowered.rules);
+        let mut left_recursions = SecondaryVec::new_preallocated(&lowered.rules);
         let mut visited = lowered.rules.map_fill(false);
         let mut stack = Vec::new();
         for handle in lowered.rules.iter_keys() {
             find_prefix_cycles(
                 handle,
                 &prefix_children,
-                &mut data,
+                &mut left_recursions,
                 &mut visited,
                 &mut stack,
             );
             debug_assert!(stack.is_empty());
         }
 
-        for (handle, data) in data.iter_kv_mut() {
-            data.sort();
-            data.dedup();
+        for (handle, through) in left_recursions.iter_kv_mut() {
+            through.sort();
+            through.dedup();
 
             let ast = converted.get_rule_ast(handle);
 
@@ -169,7 +167,7 @@ impl CompiledFile {
                 CompiledRule::Unchanged => false,
             };
 
-            for &mut child in data {
+            for &mut child in through {
                 let name = &converted.rules[child].name;
                 if is_pratt {
                     cx.error(
@@ -187,7 +185,7 @@ impl CompiledFile {
 
         CompiledFile {
             error_token,
-            rules: SecondaryVec::new(),
+            rules: compiled,
             errors: cx.finish(),
         }
     }

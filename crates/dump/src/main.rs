@@ -1,7 +1,4 @@
-use std::{
-    env::args,
-    path::{Path, PathBuf},
-};
+use std::{env::args, path::PathBuf};
 
 use gnag::{ast::ParsedFile, SpannedError};
 use gnag_gen::{

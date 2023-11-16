@@ -1,10 +1,10 @@
 use std::{
     cell::Cell,
+    collections::HashMap,
     fmt::{Debug, Display, Write},
 };
 
 use gnag::{
-    ctx::ConvertCtx,
     handle::{HandleVec, SecondaryVec, TypedHandle},
     simple_handle, SpannedError, StrSpan,
 };
@@ -329,7 +329,13 @@ impl Expr {
                     for a in statements {
                         write!(w, "\n")?;
                         a.print(w)?;
-                        write!(w, ";")?;
+                        match a {
+                            Expr::If { .. }
+                            | Expr::While { .. }
+                            | Expr::Loop(_)
+                            | Expr::Block { .. } => {}
+                            _ => write!(w, ";")?,
+                        }
                     }
                     w.pop();
                     write!(w, "\n}}")
@@ -777,8 +783,11 @@ pub fn generate_functions(
     let fn_make_checkpoint = module.builtin_fn("checkpoint", &[parser], checkpoint);
     let fn_restore_checkpoint = module.builtin_fn("restore", &[parser, checkpoint], ExprType::Void);
     let fn_start_span = module.builtin_fn("start_span", &[parser], span_start);
-    let fn_close_span =
-        module.builtin_fn("close_span", &[parser, ExprType::SpanKind], ExprType::Void);
+    let fn_close_span = module.builtin_fn(
+        "close_span",
+        &[parser, span_start, ExprType::SpanKind],
+        ExprType::Void,
+    );
     let fn_report_err = module.builtin_fn("report_err", &[parser, ExprType::String], span_start);
     let fn_report_err_since = module.builtin_fn(
         "report_err_since",
@@ -851,7 +860,9 @@ pub fn generate_functions(
             generate_expr_function(expr, &function, data, converted, &mut errors, &cx)
         };
 
-        massage_body(&mut expr, &function);
+        let mut rewriting = RewriteCx::new(&function);
+        rewrite_scope(&mut expr, &mut rewriting);
+        rewriting.apply_renames(&mut expr);
         module.finish_fn(data.function, expr);
     }
 
@@ -879,8 +890,9 @@ fn generate_expr_function(
         pass.Call(
             cx.fn_close_span,
             vec![
-                expr::Constant_SpanKind(data.kind),
+                expr::Variable(parser_var),
                 expr::Variable(start_var),
+                expr::Constant_SpanKind(data.kind),
             ],
         );
         pass.Break(body.get_handle(), expr::Constant_bool(true));
@@ -1080,7 +1092,11 @@ fn generate_pratt_expr(
                 let kind = cx.rule_data[rule].kind;
                 pass.Call(
                     cx.fn_close_span,
-                    vec![expr::Constant_SpanKind(kind), expr::Variable(start_var)],
+                    vec![
+                        expr::Variable(parser_var),
+                        expr::Variable(start_var),
+                        expr::Constant_SpanKind(kind),
+                    ],
                 );
             };
             pass.Continue(block.get_handle());
@@ -1134,7 +1150,7 @@ fn generate_expr(
             assert!(!seq.is_empty());
             let mut block = builder.new_block_builder();
 
-            let mut commited = true;
+            let mut commited = false;
             for a in seq {
                 let expr: Expr = generate_expr(a, parser_var, builder, converted, errors, cx);
                 if commited {
@@ -1474,29 +1490,118 @@ fn generate_expr(
 //     }
 // }
 
-fn visit_exprs(
+struct ScopeData {
+    block_vec_start: u32,
+    handle: BlockHandle,
+}
+
+struct RewriteCx<'a> {
+    block_vec: BlockBuilder<'a>,
+    scopes: Vec<ScopeData>,
+    renamed_blocks: HashMap<BlockHandle, BlockHandle>,
+}
+
+impl<'a> RewriteCx<'a> {
+    fn new(builder: &'a FunctionBuilder) -> RewriteCx<'a> {
+        Self {
+            block_vec: BlockBuilder::new(builder),
+            scopes: Vec::new(),
+            renamed_blocks: HashMap::new(),
+        }
+    }
+    fn builder(&self) -> &FunctionBuilder {
+        self.block_vec.builder
+    }
+    fn block(&mut self) -> &mut BlockBuilder<'a> {
+        &mut self.block_vec
+    }
+    fn rename_block(&mut self, from: BlockHandle, to: BlockHandle) {
+        self.renamed_blocks.insert(from, to);
+    }
+    fn get_renamed_block(&mut self, handle: BlockHandle) -> BlockHandle {
+        match self.renamed_blocks.get(&handle).cloned() {
+            Some(found) => {
+                let next = self.get_renamed_block(found);
+                if found != next {
+                    self.renamed_blocks.insert(handle, next);
+                }
+                next
+            }
+            None => handle,
+        }
+    }
+    fn apply_renames(&mut self, expr: &mut Expr) {
+        visit_exprs_top_down(expr, |expr| {
+            if let Expr::Break(block, _) | Expr::Continue(block) = expr {
+                *block = self.get_renamed_block(*block);
+            }
+            Ok(())
+        });
+    }
+    fn enter_scope(&mut self, handle: BlockHandle) {
+        let scope = ScopeData {
+            block_vec_start: self.block_vec.sequence.len() as u32,
+            handle,
+        };
+        self.scopes.push(scope);
+    }
+    fn push_expr(&mut self, expr: Expr) {
+        self.block().push(expr);
+    }
+    #[must_use]
+    fn leave_scope(&mut self) -> Expr {
+        let scope = self.scopes.pop().unwrap();
+        let start = scope.block_vec_start as usize;
+        match self.block_vec.sequence.len() - start {
+            0 => Expr::Empty,
+            // 1 => self.block_vec.sequence.pop().unwrap(),
+            _ => {
+                let statements = self.block_vec.sequence.drain(start..).collect();
+                Expr::Block {
+                    handle: scope.handle,
+                    statements,
+                }
+            }
+        }
+    }
+}
+
+fn visit_exprs_top_down(expr: &mut Expr, mut fun: impl FnMut(&mut Expr) -> Result<(), ()>) {
+    visit_exprs_(expr, true, &mut fun);
+}
+
+fn visit_exprs_bottom_up(expr: &mut Expr, mut fun: impl FnMut(&mut Expr) -> Result<(), ()>) {
+    visit_exprs_(expr, false, &mut fun);
+}
+
+fn visit_exprs_(
     expr: &mut Expr,
+    top_down: bool,
     fun: &mut dyn FnMut(&mut Expr) -> Result<(), ()>,
 ) -> Result<(), ()> {
-    fun(expr)?;
+    if top_down {
+        fun(expr)?;
+    }
     match expr {
         Expr::Error
         | Expr::Empty
         | Expr::Continue(_)
         | Expr::VariableAccess(_)
-        | Expr::Constant(_) => Ok(()),
+        | Expr::Constant(_) => {}
         Expr::Negate(a)
         | Expr::Loop(a)
         | Expr::Break(_, a)
-        | Expr::AssignVariable { value: a, .. } => visit_exprs(a, fun),
+        | Expr::AssignVariable { value: a, .. } => {
+            visit_exprs_(a, top_down, fun)?;
+        }
         Expr::LessOrEqual(a, b)
         | Expr::MoreOrEqual(a, b)
         | Expr::Less(a, b)
         | Expr::More(a, b)
         | Expr::Equal(a, b)
         | Expr::NotEqual(a, b) => {
-            visit_exprs(a, fun)?;
-            visit_exprs(b, fun)
+            visit_exprs_(a, top_down, fun)?;
+            visit_exprs_(b, top_down, fun)?;
         }
         Expr::DeclareVariable {
             handle,
@@ -1504,90 +1609,53 @@ fn visit_exprs(
             value,
         } => {
             if let Some(a) = value {
-                visit_exprs(a, fun)?;
+                visit_exprs_(a, top_down, fun)?;
             }
-            Ok(())
         }
         Expr::Call { arguments, .. } => {
             for a in arguments {
-                visit_exprs(a, fun)?;
+                visit_exprs_(a, top_down, fun)?;
             }
-            Ok(())
         }
         Expr::If {
             condition,
             pass,
             otherwise,
         } => {
-            visit_exprs(condition, fun)?;
-            visit_exprs(pass, fun)?;
+            visit_exprs_(condition, top_down, fun)?;
+            visit_exprs_(pass, top_down, fun)?;
             if let Some(a) = otherwise {
-                visit_exprs(a, fun)?;
+                visit_exprs_(a, top_down, fun)?;
             }
-            Ok(())
         }
         Expr::While { condition, block } => {
-            visit_exprs(condition, fun)?;
-            visit_exprs(block, fun)
+            visit_exprs_(condition, top_down, fun)?;
+            visit_exprs_(block, top_down, fun)?;
         }
-        Expr::Block { handle, statements } => {
+        Expr::Block { statements, .. } => {
             for a in statements {
-                visit_exprs(a, fun)?;
+                visit_exprs_(a, top_down, fun)?;
             }
-            Ok(())
         }
     }
+    if !top_down {
+        fun(expr)?;
+    }
+    Ok(())
 }
 
-// #[allow(unreachable_code)]
-// fn massage_expr(expr: &mut Expr, block: ) {
-//     _ = visit_exprs(expr, &mut |expr| {
-//         match expr {
-//             Expr::If {
-//                 condition,
-//                 pass,
-//                 otherwise,
-//             } => todo!(),
-//             Expr::Error => todo!(),
-//             Expr::Empty => todo!(),
-//             Expr::Negate(_) => todo!(),
-//             Expr::LessOrEqual(_, _) => todo!(),
-//             Expr::MoreOrEqual(_, _) => todo!(),
-//             Expr::Less(_, _) => todo!(),
-//             Expr::More(_, _) => todo!(),
-//             Expr::Equal(_, _) => todo!(),
-//             Expr::NotEqual(_, _) => todo!(),
-//             Expr::VariableAccess(_) => todo!(),
-//             Expr::DeclareVariable {
-//                 handle,
-//                 mutable,
-//                 value,
-//             } => todo!(),
-//             Expr::AssignVariable { handle, value } => todo!(),
-//             Expr::Constant(_) => todo!(),
-//             Expr::Call { fun, arguments } => todo!(),
-//             Expr::While { condition, block } => todo!(),
-//             Expr::Loop(_) => todo!(),
-//             Expr::Block { handle, statements } => todo!(),
-//             Expr::Break(_, _) => todo!(),
-//             Expr::Continue(_) => todo!(),
-//         }
-//         Ok(())
-//     });
-// }
-
-fn outline_expr(expr: &mut Expr, scope: &mut BlockBuilder, builder: &FunctionBuilder) {
-    _ = visit_exprs(expr, &mut |expr| {
+fn outline_expr(expr: &mut Expr, rewriting: &mut RewriteCx) {
+    visit_exprs_top_down(expr, |expr| {
         match expr {
             Expr::If { .. } | Expr::While { .. } | Expr::Loop(_) | Expr::Block { .. } => {
-                let handle = builder.new_variable();
+                let handle = rewriting.builder().new_variable();
                 let this = std::mem::replace(expr, Expr::VariableAccess(handle));
                 let mut decl = Expr::DeclareVariable {
                     handle,
                     mutable: false,
                     value: Some(Box::new(this)),
                 };
-                massage_expr(&mut decl, scope, builder);
+                rewrite_expr(&mut decl, rewriting);
             }
             _ => {}
         }
@@ -1603,7 +1671,7 @@ fn get_condition_truthy_value(expr: &mut Expr) -> Option<(bool, &mut Expr)> {
     }
 }
 
-fn massage_expr(expr: &mut Expr, scope: &mut BlockBuilder, builder: &FunctionBuilder) {
+fn rewrite_expr(expr: &mut Expr, rewriting: &mut RewriteCx) {
     match expr {
         Expr::If {
             condition,
@@ -1629,7 +1697,7 @@ fn massage_expr(expr: &mut Expr, scope: &mut BlockBuilder, builder: &FunctionBui
                     false => otherwise.as_deref_mut(),
                 };
                 if let Some(expr) = replacement {
-                    massage_expr(expr, scope, builder);
+                    rewrite_expr(expr, rewriting);
                 }
                 return;
             } else {
@@ -1643,72 +1711,175 @@ fn massage_expr(expr: &mut Expr, scope: &mut BlockBuilder, builder: &FunctionBui
                         Expr::Block { handle, .. } => *handle,
                         _ => unreachable!(),
                     };
-                    _ = visit_exprs(condition, &mut |expr| {
+                    let leave = Expr::Break(handle, Box::new(Expr::Empty));
+
+                    _ = patch_to_escape(pass, &leave, rewriting.builder(), true);
+                    let otherwise = match otherwise {
+                        Some(expr) => {
+                            _ = patch_to_escape(expr, &leave, rewriting.builder(), true);
+                            expr
+                        }
+                        None => &leave,
+                    };
+
+                    visit_exprs_top_down(condition, |expr| {
                         if let Expr::Break(block, inner) = expr {
                             if *block == handle {
                                 if let Expr::Constant(ExprConstant::Bool(bool)) = inner.as_ref() {
                                     if *bool == truth {
                                         *expr = pass.as_ref().clone();
                                     } else {
-                                        match otherwise.as_deref() {
-                                            Some(otherwise) => *expr = otherwise.clone(),
-                                            None => {
-                                                *expr = Expr::Break(handle, Box::new(Expr::Empty))
-                                            }
-                                        }
+                                        *expr = otherwise.clone();
                                     }
                                 } else {
                                     let inner = std::mem::replace(&mut **inner, Expr::Empty);
                                     *expr = Expr::If {
                                         condition: Box::new(inner),
                                         pass: pass.clone(),
-                                        otherwise: otherwise.clone(),
+                                        otherwise: Some(Box::new(otherwise.clone())),
                                     }
                                 }
                             }
+                            Err(())
+                        } else {
+                            Ok(())
                         }
-                        Ok(())
                     });
-                    massage_expr(condition, scope, builder);
+                    rewrite_expr(condition, rewriting);
                     return;
                 } else {
-                    outline_expr(condition, scope, builder);
-                    massage_scope(pass, builder);
+                    outline_expr(condition, rewriting);
+                    rewrite_scope(pass, rewriting);
                     if let Some(otherwise) = otherwise {
-                        massage_scope(otherwise, builder);
+                        rewrite_scope(otherwise, rewriting);
                     }
                 }
             }
         }
         // FIXME outlining with while loops will need replacing them with simple loops
-        Expr::While { block, .. } | Expr::Loop(block) => massage_scope(block, builder),
-        Expr::Block { statements, .. } => massage_block(statements, builder),
+        Expr::While { block, .. } | Expr::Loop(block) => rewrite_scope(block, rewriting),
+        Expr::Block { .. } => rewrite_scope(expr, rewriting),
+        Expr::Break(_, a) => outline_expr(a, rewriting),
+        Expr::Continue(_) => {}
         _ => {}
     }
-    scope.push(std::mem::replace(expr, Expr::Empty));
+    rewriting.push_expr(std::mem::replace(expr, Expr::Error));
 }
 
-fn massage_body(body: &mut Expr, builder: &FunctionBuilder) {
-    let Expr::Block { statements, .. } = body else {
-        panic!()
+/// Appends `with` to places where the control flow ends
+fn patch_to_escape(
+    expr: &mut Expr,
+    with: &Expr,
+    builder: &FunctionBuilder,
+    add_block: bool,
+) -> Result<(), ()> {
+    match expr {
+        Expr::If {
+            condition,
+            otherwise,
+            ..
+        } => {
+            _ = patch_to_escape(condition, with, builder, true);
+            if let Some(some) = otherwise {
+                _ = patch_to_escape(some, with, builder, add_block);
+            } else {
+                *otherwise = Some(Box::new(with.clone()))
+            }
+            Ok(())
+        }
+        Expr::Block { statements, .. } => {
+            match statements.last() {
+                Some(Expr::Break(..) | Expr::Continue(_)) => {}
+                _ => {
+                    statements.push(with.clone());
+                }
+            }
+            Ok(())
+        }
+        Expr::Break(..) | Expr::Continue(_) => Ok(()),
+        _ => {
+            if add_block {
+                let handle = builder.new_block();
+                let inner = std::mem::replace(
+                    expr,
+                    Expr::Block {
+                        handle,
+                        statements: Vec::new(),
+                    },
+                );
+
+                let Expr::Block { statements, .. } = expr else {
+                    unreachable!()
+                };
+                statements.push(inner);
+                statements.push(with.clone());
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+    }
+}
+
+fn inline_block(parent: BlockHandle, statements: Vec<Expr>, rewriting: &mut RewriteCx<'_>) {
+    let mut parent_statements = statements;
+    'outer: loop {
+        for expr in &mut parent_statements {
+            rewrite_expr(expr, rewriting);
+        }
+        loop {
+            let BlockBuilder {
+                builder,
+                statements,
+                ..
+            } = rewriting.block();
+            match statements.sequence.as_mut_slice() {
+                [.., Expr::Block { .. }] => {
+                    let Expr::Block { handle, statements } =
+                        rewriting.block_vec.sequence.pop().unwrap()
+                    else {
+                        unreachable!()
+                    };
+                    rewriting.rename_block(handle, parent);
+                    parent_statements = statements;
+                    continue 'outer;
+                }
+                [.., block @ Expr::Block { .. }, leave @ (Expr::Break(_, _) | Expr::Continue(_))] =>
+                {
+                    let Expr::Block { handle, .. } = *block else {
+                        unreachable!()
+                    };
+                    // TODO do not traverse the whole tree every time
+                    visit_exprs_top_down(block, |expr| {
+                        if let Expr::Break(original, _) = expr {
+                            if *original == handle {
+                                *expr = leave.clone();
+                            }
+                            Err(())
+                        } else {
+                            Ok(())
+                        }
+                    });
+                    _ = patch_to_escape(block, leave, builder, true);
+                    statements.sequence.pop();
+                    continue;
+                }
+                _ => {}
+            }
+            break 'outer;
+        }
+    }
+}
+
+fn rewrite_scope(expr: &mut Expr, rewriting: &mut RewriteCx<'_>) {
+    if let Expr::Block { handle, statements } = expr {
+        rewriting.enter_scope(*handle);
+        inline_block(*handle, std::mem::take(statements), rewriting);
+    } else {
+        let handle = rewriting.builder().new_block();
+        rewriting.enter_scope(handle);
+        rewrite_expr(expr, rewriting);
     };
-    massage_block(statements, builder);
-}
 
-fn massage_block(statements: &mut Vec<Expr>, builder: &FunctionBuilder) {
-    let mut scope = builder.new_block_builder();
-    for expr in statements.iter_mut() {
-        massage_expr(expr, &mut scope, builder);
-    }
-    *statements = scope.statements.sequence;
-}
-
-fn massage_scope(expr: &mut Expr, builder: &FunctionBuilder) {
-    let mut scope = builder.new_block_builder();
-    massage_expr(expr, &mut scope, builder);
-    match scope.sequence.len() {
-        0 => *expr = Expr::Empty,
-        1 => *expr = scope.sequence.pop().unwrap(),
-        _ => *expr = scope.finish(),
-    }
+    *expr = rewriting.leave_scope();
 }

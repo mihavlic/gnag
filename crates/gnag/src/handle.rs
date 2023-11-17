@@ -357,3 +357,62 @@ impl<H: TypedHandle, T> FromIterator<(H, T)> for SecondaryVec<H, T> {
         vec
     }
 }
+
+pub struct HandleBitset<H> {
+    set: Vec<usize>,
+    spooky: PhantomData<H>,
+}
+
+impl<H> Clone for HandleBitset<H> {
+    fn clone(&self) -> Self {
+        Self {
+            set: self.set.clone(),
+            spooky: PhantomData,
+        }
+    }
+}
+
+impl<H: TypedHandle> HandleBitset<H> {
+    pub fn new() -> HandleBitset<H> {
+        Self {
+            set: Vec::new(),
+            spooky: PhantomData,
+        }
+    }
+    pub fn replace(&mut self, handle: H, value: bool) -> bool {
+        replace_impl(&mut self.set, handle.index(), value)
+    }
+    pub fn set(&mut self, handle: H, value: bool) {
+        replace_impl(&mut self.set, handle.index(), value);
+    }
+    pub fn insert(&mut self, handle: H) -> bool {
+        replace_impl(&mut self.set, handle.index(), true)
+    }
+    pub fn remove(&mut self, handle: H) -> bool {
+        let index = handle.index();
+        let word = index / std::mem::size_of::<usize>();
+
+        if word >= self.set.len() {
+            return false;
+        }
+
+        replace_impl(&mut self.set, index, false)
+    }
+}
+
+fn replace_impl(storage: &mut Vec<usize>, index: usize, value: bool) -> bool {
+    let word = index / std::mem::size_of::<usize>();
+    let bit = index % std::mem::size_of::<usize>();
+
+    if word >= storage.len() {
+        storage.resize(word + 1, 0);
+    }
+
+    let new = (value as usize) << bit;
+    let one = 1 << bit;
+    let mask = !one;
+
+    let prev = (storage[word] & one) == one;
+    storage[word] = new | (storage[word] & mask);
+    prev
+}

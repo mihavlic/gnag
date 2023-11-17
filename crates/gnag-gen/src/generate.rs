@@ -5,7 +5,7 @@ use std::{
 };
 
 use gnag::{
-    handle::{HandleVec, SecondaryVec, TypedHandle},
+    handle::{HandleCounter, HandleVec, SecondaryVec, TypedHandle},
     simple_handle, SpannedError, StrSpan,
 };
 
@@ -1882,4 +1882,110 @@ fn rewrite_scope(expr: &mut Expr, rewriting: &mut RewriteCx<'_>) {
     };
 
     *expr = rewriting.leave_scope();
+}
+
+simple_handle! {
+    pub CfgBlockHandle,
+    pub CfgVariableHandle
+}
+
+enum MonoOp {
+    Negate,
+}
+
+enum BinOp {
+    Equal,
+    NotEqual,
+    Less,
+    LessEq,
+    More,
+    MoreEq,
+}
+
+enum StatementValue {
+    Const(ExprConstant),
+    Call {
+        function: FunctionHandle,
+        arguments: Vec<CfgVariableHandle>,
+    },
+    MonoOp(MonoOp, CfgVariableHandle),
+    BinOp(BinOp, CfgVariableHandle, CfgVariableHandle),
+}
+
+enum Statement {
+    CreateVariable(CfgVariableHandle),
+    DestroyVariable(CfgVariableHandle),
+    AssignVariable(CfgVariableHandle, StatementValue),
+    Statement(StatementValue),
+}
+
+enum Terminator {
+    IfElse {
+        pass: CfgBlockHandle,
+        fail: Option<CfgBlockHandle>,
+    },
+    Break {
+        block: CfgBlockHandle,
+        value: Option<ExprConstant>,
+    },
+    Todo
+}
+
+struct CfgBlock {
+    statements: Vec<Statement>,
+    terminating_value: Option<ExprConstant>,
+    terminator: CfgBlockHandle,
+}
+
+impl CfgBlock {
+    fn add_create_variable(&mut self, builder: &mut CfgBuilder) -> CfgVariableHandle {
+        let handle = builder.new_variable_handle();
+        self.statements.push(Statement::CreateVariable(handle));
+        handle
+    }
+    fn add_destroy_variable(&mut self, variable: CfgVariableHandle) {
+        self.statements.push(Statement::DestroyVariable(variable));
+    }
+}
+
+struct CfgBuilder {
+    block_counter: HandleCounter<CfgBlockHandle>,
+    variable_counter: HandleCounter<CfgVariableHandle>,
+    blocks: HandleVec<CfgBlockHandle, CfgBlock>,
+    current_block: CfgBlockHandle,
+    scopes: Vec<Vec<CfgVariableHandle>>
+}
+
+impl CfgBuilder {
+    fn new_variable_handle(&mut self) -> CfgVariableHandle {
+        self.variable_counter.next()
+    }
+    fn new_block_handle(&mut self) -> CfgBlockHandle {
+        self.block_counter.next()
+    }
+    fn open_scope(&mut self) {
+        self.scopes.push(Vec::new())
+    }
+    fn create_variable(&mut self) -> CfgVariableHandle {
+        let handle = self.current_block().add_create_variable(self);
+        self.scopes.last_mut().unwrap().push(handle);
+        handle
+    }
+    fn close_scope(&mut self) {
+        let scope = self.scopes.pop().unwrap();
+        let block = self.current_block();
+        for var in scope {
+            block.add_destroy_variable(var);
+        }
+    }
+    fn current_block(&mut self) -> &mut CfgBlock {
+        &mut self.blocks[self.current_block]
+    }
+    fn connect_goto(&mut self, from: CfgBlockHandle, to: CfgBlockHandle)
+}
+
+fn ast_to_cfg(ast: &Expr, cfg: &mut CfgBuilder) {
+    let Expr::Block { handle, statements } = ast else {
+        panic!()
+    };
 }

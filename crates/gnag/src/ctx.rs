@@ -1,7 +1,4 @@
-use std::{
-    borrow::Borrow,
-    cell::{Cell, RefCell},
-};
+use std::{borrow::Borrow, cell::RefCell};
 
 use crate::{SpannedError, StrSpan};
 

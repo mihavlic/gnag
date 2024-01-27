@@ -4,13 +4,13 @@ tokenizer {
     @skip Comment r'//.*$'
     @error ErrorToken r'\S+'
     String {
-        let mut raw = false;
+        let mut raw = false ;
         if l.peek().unwrap() == b'r' {
-            raw = true;
-            l.next();
+            raw = true ;
+            l.next() ;
         }
 
-        let mut balance = 0;
+        let mut balance = 0 ;
         loop {
             match l.next() {
                 Some(b'#') => balance += 1,
@@ -23,18 +23,18 @@ tokenizer {
             match l.next() {
                 None => return None,
                 Some(b'\\') if !raw => {
-                    l.next();
+                    l.next() ;
                 }
                 Some(b'\'') => {
-                    let mut balance = balance;
+                    let mut balance = balance ;
                     loop {
                         if balance == 0 {
-                            return Literal;
+                            return Literal ;
                         }
                         if let Some(b'#') = l.next() {
-                            balance -= 1;
+                            balance -= 1 ;
                         } else {
-                            break;
+                            break ;
                         }
                     }
                 }
@@ -65,104 +65,35 @@ tokenizer {
     Dot '.'
 }
 
-@root
-rule File {
-    Item*
-}
+@root File = (Tokenizer | SynRule | Group)* ;
 
-rule Item {
-    Tokenizer | SynRule | Group
-}
+comma_list(element) = <separated_list element ','> ;
+delimited(bra, ket) = bra (<DelimitedExpr> | <not ket>)* ket ;
 
-rule AttributeValue {
-    String | Ident | Number
-}
+DelimitedExpr = ParenDelimited | BraceDelimited | BracketDelimited ;
+ParenDelimited = <delimited '(' ')'> ;
+BraceDelimited = <delimited '{' '}'> ;
+BracketDelimited = <delimited '[' ']'> ;
 
-rule AttributeExpr {
-    Ident ( '(' AttributeValue ')' )?
-}
+AttributeValue = String | Ident | Number ;
+AttributeExpr = Ident ( '(' AttributeValue ')' )? ;
+Attribute = '@' Ident ( '(' <comma_list AttributeExpr> ')' )? ;
 
-rule Attribute {
-    '@' Ident ( '(' <comma_list AttributeExpr> ')' )?
-}
+TokenRule = Attribute* Ident (String | BraceDelimited) ;
+Tokenizer = 'tokenizer' '{' TokenRule* '}' ;
 
-rule Tokenizer {
-    'tokenizer' '{' TokenRule* '}'
-}
+Parameters = '(' <comma_list Ident> ')' ;
+SynRule = Attribute* ('inline' | 'rule') Ident Parameters? '{' Expr '}' ;
 
-inline comma_list(element) {
-    <separated_list element ','>
-}
+Group = 'group' Ident '{' GroupItem* '}' ;
+GroupItem = Ident Ident ;
 
-inline DelimitedExpr {
-    ParenDelimited | BraceDelimited | BracketDelimited
-}
-
-inline delimited(bra, ket) {
-    bra (DelimitedExpr | <not ket>)* ket
-}
-
-rule ParenDelimited {
-    <delimited '(' ')'>
-}
-
-rule BraceDelimited {
-    <delimited '{' '}'>
-}
-
-rule BracketDelimited {
-    <delimited '[' ']'>
-}
-
-rule TokenRule {
-    Attribute* Ident (String | BraceDelimited)
-}
-
-rule SynRule {
-    Attribute* ('inline' | 'rule') Ident Parameters? '{' Expr '}'
-}
-
-rule Parameters {
-   '(' <comma_list Ident> ')'
-}
-
-@pratt
-rule Expr {
-    Ident | String | CallExpr | ParenExpr | PreExpr | PostExpr | PostName | SeqExpr | BinExpr
-}
-
-rule CallExpr {
-    '<' Ident Expr? '>'
-}
-
-rule ParenExpr {
-    '(' Expr ')'
-}
-
-rule PreExpr {
-    Attribute+ Expr
-}
-
-rule PostExpr {
-    Expr ('?' | '+')
-}
-
-rule PostName {
-    Expr ':' Ident ('.' Ident)?
-}
-
-rule SeqExpr {
-    Expr Expr+
-}
-
-rule BinExpr {
-    Expr '|' Expr
-}
-
-rule Group {
-    'group' Ident '{' GroupItem* '}' 
-}
-
-rule GroupItem {
-    Ident Ident
+pratt Expr {
+    CallExpr = '<' Ident Expr? '>' ;
+    ParenExpr = '(' Expr ')' ;
+    PreExpr = Attribute+ Expr ;
+    PostExpr = Expr ('?' | '*' | '+') ;
+    PostName = Expr ':' Ident ('.' Ident)? ;
+    SeqExpr = Expr Expr+ ;
+    BinExpr = Expr '|' Expr ;
 }

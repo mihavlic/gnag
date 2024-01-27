@@ -13,12 +13,14 @@ use gnag::{
 gnag::simple_handle! {
     pub TokenHandle,
     pub RuleHandle,
+    pub InlineHandle,
     pub AstItemHandle
 }
 
 pub enum AstItem {
     Token(ast::TokenRule, Option<TokenHandle>),
     Rule(ast::SynRule, Option<RuleHandle>),
+    Inline(ast::SynRule, Option<InlineHandle>),
 }
 
 impl AstItem {
@@ -26,12 +28,14 @@ impl AstItem {
         match self {
             AstItem::Token(a, _) => a.name,
             AstItem::Rule(a, _) => a.name,
+            AstItem::Inline(a, _) => a.name,
         }
     }
     pub fn span(&self) -> StrSpan {
         match self {
             AstItem::Token(a, _) => a.span,
             AstItem::Rule(a, _) => a.span,
+            AstItem::Inline(a, _) => a.span,
         }
     }
 }
@@ -71,15 +75,20 @@ pub struct RuleDef {
     pub ast: AstItemHandle,
     pub attributes: RuleAttributes,
     pub name: String,
-    pub inline: bool,
-    pub parameters: Vec<String>,
     pub expr: RuleExpr,
+}
+
+#[derive(Debug)]
+pub struct InlineDef {
+    pub parameters: Vec<String>,
+    pub body: RuleDef,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
     Token(TokenHandle),
     Rule(RuleHandle),
+    Inline(InlineHandle),
 }
 
 #[derive(Default)]
@@ -89,8 +98,36 @@ pub struct ConvertedFile {
 
     pub tokens: HandleVec<TokenHandle, TokenDef>,
     pub rules: HandleVec<RuleHandle, RuleDef>,
+    pub inlines: HandleVec<InlineHandle, InlineDef>,
 
     pub errors: Vec<SpannedError>,
+}
+
+fn add_ast_item(
+    cx: &mut ConvertCtx<'_>,
+
+    name_span: StrSpan,
+    ast_handle: AstItemHandle,
+    name_to_item: &mut HashMap<String, ItemKind>,
+    ast_items: &mut HandleVec<AstItemHandle, AstItem>,
+
+    push_fn: &mut dyn FnMut() -> ItemKind,
+) {
+    let name = name_span.resolve_owned(cx);
+    match name_to_item.entry(name) {
+        Entry::Occupied(_) => cx.error(name_span, "Duplicate item definition"),
+        Entry::Vacant(e) => {
+            let item_handle = push_fn();
+            e.insert(item_handle);
+            let ast_entry = &mut ast_items[ast_handle];
+            match (item_handle, ast_entry) {
+                (ItemKind::Token(handle), AstItem::Token(_, a)) => *a = Some(handle),
+                (ItemKind::Rule(handle), AstItem::Rule(_, a)) => *a = Some(handle),
+                (ItemKind::Inline(handle), AstItem::Inline(_, a)) => *a = Some(handle),
+                _ => unreachable!(),
+            };
+        }
+    }
 }
 
 impl ConvertedFile {
@@ -99,8 +136,10 @@ impl ConvertedFile {
 
         let mut name_to_item = HashMap::new();
         let mut ast_items = HandleVec::new();
+
         let mut ast_tokens = HandleVec::new();
         let mut ast_rules = HandleVec::new();
+        let mut ast_inlines = HandleVec::new();
 
         let mut convert_cx = ConvertCtx::new(src);
         let cx = &mut convert_cx;
@@ -109,36 +148,38 @@ impl ConvertedFile {
             match item {
                 ast::Item::Tokenizer(a) => {
                     for r in a.rules {
-                        let name_span = r.name;
-                        let name = name_span.resolve_owned(cx);
-                        let handle: AstItemHandle = ast_items.push(AstItem::Token(r, None));
-                        match name_to_item.entry(name) {
-                            Entry::Occupied(_) => cx.error(name_span, "Duplicate item definition"),
-                            Entry::Vacant(o) => {
-                                let ir_handle = ast_tokens.push(handle);
-                                o.insert(ItemKind::Token(ir_handle));
-                                match &mut ast_items[handle] {
-                                    AstItem::Token(_, ir) => *ir = Some(ir_handle),
-                                    _ => unreachable!(),
-                                };
-                            }
-                        }
+                        let handle = ast_items.push(AstItem::Token(r, None));
+                        add_ast_item(
+                            cx,
+                            r.name,
+                            handle,
+                            &mut name_to_item,
+                            &mut ast_items,
+                            &mut || ItemKind::Token(ast_tokens.push(handle)),
+                        );
                     }
                 }
                 ast::Item::SynRule(r) => {
-                    let name_span = r.name;
-                    let name = name_span.resolve_owned(cx);
-                    let handle: AstItemHandle = ast_items.push(AstItem::Rule(r, None));
-                    match name_to_item.entry(name) {
-                        Entry::Occupied(_) => cx.error(name_span, "Duplicate item definition"),
-                        Entry::Vacant(o) => {
-                            let ir_handle = ast_rules.push(handle);
-                            o.insert(ItemKind::Rule(ir_handle));
-                            match &mut ast_items[handle] {
-                                AstItem::Rule(_, ir) => *ir = Some(ir_handle),
-                                _ => unreachable!(),
-                            };
-                        }
+                    if r.inline {
+                        let handle = ast_items.push(AstItem::Inline(r, None));
+                        add_ast_item(
+                            cx,
+                            r.name,
+                            handle,
+                            &mut name_to_item,
+                            &mut ast_items,
+                            &mut || ItemKind::Inline(ast_inlines.push(handle)),
+                        );
+                    } else {
+                        let handle = ast_items.push(AstItem::Rule(r, None));
+                        add_ast_item(
+                            cx,
+                            r.name,
+                            handle,
+                            &mut name_to_item,
+                            &mut ast_items,
+                            &mut || ItemKind::Rule(ast_rules.push(handle)),
+                        );
                     }
                 }
             };
@@ -148,14 +189,19 @@ impl ConvertedFile {
             let AstItem::Token(ast, _) = &ast_items[handle] else {
                 unreachable!()
             };
-            token_ast_to_ir(cx, handle, ast)
+            convert_ast_token(cx, handle, ast)
         });
-
         let ir_rules = ast_rules.map(|handle| {
             let AstItem::Rule(ast, _) = &ast_items[handle] else {
                 unreachable!()
             };
-            ast_token_to_ir(cx, handle, ast, &ir_tokens, &name_to_item)
+            convert_ast_rule(cx, handle, ast, &[], &ir_tokens, &name_to_item)
+        });
+        let ir_inlines = ast_inlines.map(|handle| {
+            let AstItem::Inline(ast, _) = &ast_items[handle] else {
+                unreachable!()
+            };
+            convert_ast_inline(cx, handle, ast, &ir_tokens, &name_to_item)
         });
 
         ConvertedFile {
@@ -163,6 +209,7 @@ impl ConvertedFile {
             ast_items,
             tokens: ir_tokens,
             rules: ir_rules,
+            inlines: ir_inlines,
             errors: convert_cx.finish(),
         }
     }
@@ -194,23 +241,32 @@ impl ConvertedFile {
         match self.find_ast_item(pos)? {
             AstItem::Token(_, handle) => *handle,
             AstItem::Rule(_, _) => None,
+            AstItem::Inline(_, _) => None,
         }
     }
     pub fn find_rule_handle(&self, pos: u32) -> Option<RuleHandle> {
         match self.find_ast_item(pos)? {
             AstItem::Token(_, _) => None,
             AstItem::Rule(_, handle) => *handle,
+            AstItem::Inline(_, _) => None,
+        }
+    }
+    pub fn find_rule_inline(&self, pos: u32) -> Option<InlineHandle> {
+        match self.find_ast_item(pos)? {
+            AstItem::Token(_, _) => None,
+            AstItem::Rule(_, _) => None,
+            AstItem::Inline(_, handle) => *handle,
         }
     }
 }
 
-fn ast_token_to_ir(
+fn convert_ast_inline(
     cx: &ConvertCtx<'_>,
     handle: AstItemHandle,
     ast: &ast::SynRule,
     ir_tokens: &HandleVec<TokenHandle, TokenDef>,
     name_to_item: &HashMap<String, ItemKind>,
-) -> RuleDef {
+) -> InlineDef {
     let parameters = ast
         .paramaters
         .as_ref()
@@ -227,7 +283,19 @@ fn ast_token_to_ir(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let body = convert_ast_rule(cx, handle, ast, &parameters, ir_tokens, name_to_item);
 
+    InlineDef { parameters, body }
+}
+
+fn convert_ast_rule(
+    cx: &ConvertCtx<'_>,
+    handle: AstItemHandle,
+    ast: &ast::SynRule,
+    parameters: &[String],
+    ir_tokens: &HandleVec<TokenHandle, TokenDef>,
+    name_to_item: &HashMap<String, ItemKind>,
+) -> RuleDef {
     let mut attributes = RuleAttributes::default();
     for attr in &ast.attributes {
         match attr.name.resolve(cx) {
@@ -243,24 +311,15 @@ fn ast_token_to_ir(
         ast: handle,
         attributes,
         name: ast.name.resolve_owned(cx),
-        inline: ast.inline,
         expr: ast.expression.as_ref().map_or(RuleExpr::Empty, |e| {
             expression(cx, e, &parameters, ir_tokens, name_to_item)
         }),
-        parameters,
     };
-
-    if !rule.parameters.is_empty() && !rule.inline {
-        cx.error(
-            ast.paramaters.as_ref().unwrap().span,
-            "Templated rules must be inline",
-        );
-    }
 
     rule
 }
 
-fn token_ast_to_ir(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::TokenRule) -> TokenDef {
+fn convert_ast_token(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::TokenRule) -> TokenDef {
     let pattern = match ast.pattern {
         ast::TokenValue::String(span) => {
             if let Some((str, is_raw)) = ast::extract_str_literal(span.resolve(cx)) {
@@ -297,7 +356,7 @@ fn token_ast_to_ir(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::TokenR
 
 #[derive(Clone, Debug)]
 pub struct CallExpr {
-    pub rule: RuleHandle,
+    pub rule: InlineHandle,
     pub parameters: Vec<RuleExpr>,
     // TODO use a more consistent solution
     pub span: StrSpan,
@@ -305,78 +364,72 @@ pub struct CallExpr {
 
 #[derive(Clone, Debug)]
 pub enum RuleExpr {
-    // base nodes
+    Empty,
+    Error,
     Token(TokenHandle),
     Rule(RuleHandle),
-    // structuring nodes
+
     Sequence(Vec<RuleExpr>),
     Choice(Vec<RuleExpr>),
-    // repetition
-    ZeroOrMore(Box<RuleExpr>),
+    Loop(Box<RuleExpr>),
     OneOrMore(Box<RuleExpr>),
     Maybe(Box<RuleExpr>),
+
     // inline rules (eliminated during lowering)
     InlineParameter(usize),
     InlineCall(Box<CallExpr>),
+
     // builtins
     Any,
-    Not(Box<RuleExpr>),
+    Not(TokenHandle),
     SeparatedList {
         element: Box<RuleExpr>,
         separator: Box<RuleExpr>,
     },
-    ZeroSpace,
-    Empty,
-    Error,
-    // compilation annotated pratt recursion (used to differentiate normal recursion from pratt during left recursion checking)
-    PrattRecursion {
-        pratt: RuleHandle,
-        binding_power: u32,
-    },
 }
 
 impl RuleExpr {
-    pub const BUILTIN_RULES: &[&'static str] = &["any", "not", "separated_list", "zero_space"];
-    pub fn is_sequence(&self) -> bool {
-        matches!(self, Self::Sequence(_))
-    }
-    pub fn is_choice(&self) -> bool {
-        matches!(self, Self::Choice(_))
-    }
-    /// A helper function for [`Self::is_empty_nonrecursive()`] which only considers the current
-    /// node without traversing into its childern.
-    fn is_empty_leaf(&self) -> bool {
-        match self {
-            RuleExpr::Empty => true,
-            RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.is_empty(),
-            _ => false,
-        }
-    }
-    /// A version of [`Self::is_empty()`] which only considers its direct children, useful when
-    /// doing a [`Self::visit_nodes_bottom_up()`] to avoid quadratic complexity.
-    pub fn is_empty_nonrecursive(&self) -> bool {
-        self.is_empty_impl(Self::is_empty_leaf)
-    }
-    pub fn is_empty(&self) -> bool {
-        self.is_empty_impl(Self::is_empty)
-    }
-    fn is_empty_impl<F: Fn(&Self) -> bool>(&self, fun: F) -> bool {
-        match self {
-            RuleExpr::Empty => true,
-            RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.iter().all(fun),
-            RuleExpr::ZeroOrMore(a) | RuleExpr::OneOrMore(a) | RuleExpr::Maybe(a) => fun(a),
-            RuleExpr::Not(a) => !fun(a),
-            RuleExpr::SeparatedList { element, separator } => fun(element) && fun(separator),
-            RuleExpr::Token(_)
-            | RuleExpr::Rule(_)
-            | RuleExpr::InlineParameter(_)
-            | RuleExpr::InlineCall(_)
-            | RuleExpr::Any
-            | RuleExpr::ZeroSpace
-            | RuleExpr::Error
-            | RuleExpr::PrattRecursion { .. } => false,
-        }
-    }
+    pub const BUILTIN_RULES: &[&'static str] = &["any", "not", "separated_list"];
+    // pub fn is_sequence(&self) -> bool {
+    //     matches!(self, Self::Sequence(_))
+    // }
+    // pub fn is_choice(&self) -> bool {
+    //     matches!(self, Self::Choice(_))
+    // }
+    // /// A helper function for [`Self::is_empty_nonrecursive()`] which only considers the current
+    // /// node without traversing into its childern.
+    // fn is_empty_leaf(&self) -> bool {
+    //     match self {
+    //         RuleExpr::Empty => true,
+    //         RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.is_empty(),
+    //         _ => false,
+    //     }
+    // }
+    // /// A version of [`Self::is_empty()`] which only considers its direct children, useful when
+    // /// doing a [`Self::visit_nodes_bottom_up()`] to avoid quadratic complexity.
+    // pub fn is_empty_nonrecursive(&self) -> bool {
+    //     self.is_empty_impl(Self::is_empty_leaf)
+    // }
+    // pub fn is_empty(&self) -> bool {
+    //     self.is_empty_impl(Self::is_empty)
+    // }
+    // fn is_empty_impl<F: Fn(&Self) -> bool>(&self, fun: F) -> bool {
+    //     match self {
+    //         RuleExpr::Empty => true,
+    //         RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.iter().all(fun),
+    //         RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Maybe(a) => fun(a),
+    //         RuleExpr::Not(a) => !fun(a),
+    //         RuleExpr::SeparatedList { element, separator } => fun(element) && fun(separator),
+    //         RuleExpr::Token(_)
+    //         | RuleExpr::Rule(_)
+    //         | RuleExpr::InlineParameter(_)
+    //         | RuleExpr::InlineCall(_)
+    //         | RuleExpr::Any
+    //         | RuleExpr::ZeroSpace
+    //         | RuleExpr::Error
+    //         | RuleExpr::PrattRecursion { .. } => false,
+    //     }
+    // }
     pub fn visit_nodes_top_down(&self, mut fun: impl FnMut(&RuleExpr)) {
         self.visit_nodes_top_down_(&mut fun)
     }
@@ -392,21 +445,17 @@ impl RuleExpr {
                 element.visit_nodes_top_down_(fun);
                 separator.visit_nodes_top_down_(fun);
             }
-            RuleExpr::Not(a)
-            | RuleExpr::Maybe(a)
-            | RuleExpr::ZeroOrMore(a)
-            | RuleExpr::OneOrMore(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_top_down_(fun);
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::InlineCall(_)
+            | RuleExpr::Not(_)
             | RuleExpr::Any
-            | RuleExpr::ZeroSpace
             | RuleExpr::Empty
-            | RuleExpr::Error
-            | RuleExpr::PrattRecursion { .. } => {}
+            | RuleExpr::Error => {}
         }
     }
     pub fn visit_nodes_bottom_up(&self, mut fun: impl FnMut(&RuleExpr)) {
@@ -423,21 +472,17 @@ impl RuleExpr {
                 element.visit_nodes_bottom_up_(fun);
                 separator.visit_nodes_bottom_up_(fun);
             }
-            RuleExpr::Not(a)
-            | RuleExpr::Maybe(a)
-            | RuleExpr::ZeroOrMore(a)
-            | RuleExpr::OneOrMore(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_bottom_up_(fun);
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::InlineCall(_)
+            | RuleExpr::Not(_)
             | RuleExpr::Any
-            | RuleExpr::ZeroSpace
             | RuleExpr::Empty
-            | RuleExpr::Error
-            | RuleExpr::PrattRecursion { .. } => {}
+            | RuleExpr::Error => {}
         }
         fun(self);
     }
@@ -456,21 +501,17 @@ impl RuleExpr {
                 element.visit_nodes_top_down_mut_(fun);
                 separator.visit_nodes_top_down_mut_(fun);
             }
-            RuleExpr::Not(a)
-            | RuleExpr::Maybe(a)
-            | RuleExpr::ZeroOrMore(a)
-            | RuleExpr::OneOrMore(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_top_down_mut_(fun);
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::InlineCall(_)
+            | RuleExpr::Not(_)
             | RuleExpr::Any
-            | RuleExpr::ZeroSpace
             | RuleExpr::Empty
-            | RuleExpr::Error
-            | RuleExpr::PrattRecursion { .. } => {}
+            | RuleExpr::Error => {}
         }
     }
     pub fn visit_nodes_bottom_up_mut(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
@@ -487,74 +528,70 @@ impl RuleExpr {
                 element.visit_nodes_bottom_up_mut_(fun);
                 separator.visit_nodes_bottom_up_mut_(fun);
             }
-            RuleExpr::Not(a)
-            | RuleExpr::Maybe(a)
-            | RuleExpr::ZeroOrMore(a)
-            | RuleExpr::OneOrMore(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_bottom_up_mut_(fun);
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::InlineCall(_)
+            | RuleExpr::Not(_)
             | RuleExpr::Any
-            | RuleExpr::ZeroSpace
             | RuleExpr::Empty
-            | RuleExpr::Error
-            | RuleExpr::PrattRecursion { .. } => {}
+            | RuleExpr::Error => {}
         }
         fun(self);
     }
-    /// Visits all leaf nodes which may be visited by the grammar while no tokens have been consumed.
-    pub fn visit_prefix_leaves(&self, mut fun: impl FnMut(&RuleExpr) -> bool) {
-        self.visit_prefix_leaves_(&mut fun);
-    }
-    pub fn visit_prefix_leaves_(&self, fun: &mut dyn FnMut(&RuleExpr) -> bool) -> bool {
-        match self {
-            RuleExpr::Sequence(a) => {
-                if let Some(first) = a.first() {
-                    if first.visit_prefix_leaves_(fun) {
-                        return true;
-                    }
-                }
-                false
-            }
-            RuleExpr::Choice(a) => {
-                for e in a {
-                    if e.visit_prefix_leaves_(fun) {
-                        return true;
-                    }
-                }
-                false
-            }
-            RuleExpr::ZeroOrMore(a)
-            | RuleExpr::OneOrMore(a)
-            | RuleExpr::Maybe(a)
-            | RuleExpr::SeparatedList { element: a, .. } => a.visit_prefix_leaves_(fun),
-            RuleExpr::Token(_)
-            | RuleExpr::Rule(_)
-            | RuleExpr::InlineParameter(_)
-            | RuleExpr::InlineCall(_)
-            | RuleExpr::Any
-            | RuleExpr::Not(_)
-            | RuleExpr::ZeroSpace
-            | RuleExpr::Empty
-            | RuleExpr::Error
-            | RuleExpr::PrattRecursion { .. } => fun(self),
-        }
-    }
-    pub fn get_sequence_slice(&self) -> &[RuleExpr] {
-        match self {
-            Self::Sequence(a) => a.as_slice(),
-            _ => std::array::from_ref(self),
-        }
-    }
-    pub fn get_choice_slice(&self) -> &[RuleExpr] {
-        match self {
-            Self::Choice(a) => a.as_slice(),
-            _ => std::array::from_ref(self),
-        }
-    }
+    // /// Visits all leaf nodes which may be visited by the grammar while no tokens have been consumed.
+    // pub fn visit_prefix_leaves(&self, mut fun: impl FnMut(&RuleExpr) -> bool) {
+    //     self.visit_prefix_leaves_(&mut fun);
+    // }
+    // pub fn visit_prefix_leaves_(&self, fun: &mut dyn FnMut(&RuleExpr) -> bool) -> bool {
+    //     match self {
+    //         RuleExpr::Sequence(a) => {
+    //             if let Some(first) = a.first() {
+    //                 if first.visit_prefix_leaves_(fun) {
+    //                     return true;
+    //                 }
+    //             }
+    //             false
+    //         }
+    //         RuleExpr::Choice(a) => {
+    //             for e in a {
+    //                 if e.visit_prefix_leaves_(fun) {
+    //                     return true;
+    //                 }
+    //             }
+    //             false
+    //         }
+    //         RuleExpr::Loop(a)
+    //         | RuleExpr::OneOrMore(a)
+    //         | RuleExpr::Maybe(a)
+    //         | RuleExpr::SeparatedList { element: a, .. } => a.visit_prefix_leaves_(fun),
+    //         RuleExpr::Token(_)
+    //         | RuleExpr::Rule(_)
+    //         | RuleExpr::InlineParameter(_)
+    //         | RuleExpr::InlineCall(_)
+    //         | RuleExpr::Any
+    //         | RuleExpr::Not(_)
+    //         | RuleExpr::ZeroSpace
+    //         | RuleExpr::Empty
+    //         | RuleExpr::Error
+    //         | RuleExpr::PrattRecursion { .. } => fun(self),
+    //     }
+    // }
+    // pub fn get_sequence_slice(&self) -> &[RuleExpr] {
+    //     match self {
+    //         Self::Sequence(a) => a.as_slice(),
+    //         _ => std::array::from_ref(self),
+    //     }
+    // }
+    // pub fn get_choice_slice(&self) -> &[RuleExpr] {
+    //     match self {
+    //         Self::Choice(a) => a.as_slice(),
+    //         _ => std::array::from_ref(self),
+    //     }
+    // }
 }
 
 fn expression(
@@ -573,6 +610,10 @@ fn expression(
                 match name_to_item.get(name) {
                     Some(ItemKind::Token(t)) => RuleExpr::Token(*t),
                     Some(ItemKind::Rule(r)) => RuleExpr::Rule(*r),
+                    Some(ItemKind::Inline(_)) => {
+                        cx.error(*a, "Use <> syntax for inlines");
+                        RuleExpr::Error
+                    }
                     None => {
                         cx.error(*a, "Unknown item");
                         RuleExpr::Error
@@ -620,7 +661,7 @@ fn expression(
                 _ => vec![],
             };
 
-            let mut expect_count = |c: usize, ok: fn(&mut Vec<RuleExpr>) -> RuleExpr| {
+            let mut expect_count = |c: usize, ok: &dyn Fn(&mut Vec<RuleExpr>) -> RuleExpr| {
                 if arguments.len() != c {
                     cx.error(a.span, format_args!("expected {c} arguments"));
                     RuleExpr::Error
@@ -630,23 +671,28 @@ fn expression(
             };
 
             match name {
-                "any" => expect_count(0, |_| RuleExpr::Any),
-                "not" => expect_count(1, |args| RuleExpr::Not(Box::new(args.pop().unwrap()))),
-                "separated_list" => expect_count(2, |args| RuleExpr::SeparatedList {
+                "any" => expect_count(0, &|_| RuleExpr::Any),
+                "not" => expect_count(1, &|args| match args[0] {
+                    RuleExpr::Token(token) => RuleExpr::Not(token),
+                    _ => {
+                        cx.error(a.span, "Expected token");
+                        RuleExpr::Error
+                    }
+                }),
+                "separated_list" => expect_count(2, &|args| RuleExpr::SeparatedList {
                     separator: Box::new(args.pop().unwrap()),
                     element: Box::new(args.pop().unwrap()),
                 }),
-                "zero_space" => expect_count(0, |_| RuleExpr::ZeroSpace),
                 _ => match name_to_item.get(name) {
-                    Some(ItemKind::Token(_)) => {
-                        cx.error(a.name, "Expected rule");
-                        RuleExpr::Error
-                    }
-                    Some(ItemKind::Rule(rule)) => RuleExpr::InlineCall(Box::new(CallExpr {
+                    Some(ItemKind::Inline(rule)) => RuleExpr::InlineCall(Box::new(CallExpr {
                         rule: *rule,
                         parameters: arguments,
                         span: a.span,
                     })),
+                    Some(_) => {
+                        cx.error(a.name, "Expected inline");
+                        RuleExpr::Error
+                    }
                     None => {
                         cx.error(a.name, "Unknown item");
                         RuleExpr::Error
@@ -662,7 +708,7 @@ fn expression(
             let inner = Box::new(expression(cx, &a.expr, parameters, tokens, name_to_item));
             match a.kind {
                 ast::PostExprKind::Question => RuleExpr::Maybe(inner),
-                ast::PostExprKind::Star => RuleExpr::ZeroOrMore(inner),
+                ast::PostExprKind::Star => RuleExpr::Loop(inner),
                 ast::PostExprKind::Plus => RuleExpr::OneOrMore(inner),
             }
         }

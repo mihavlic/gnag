@@ -56,7 +56,7 @@ fn decide_pratt_expr(
         RuleExpr::Token(_)
         | RuleExpr::Rule(_)
         | RuleExpr::Choice(_)
-        | RuleExpr::ZeroOrMore(_)
+        | RuleExpr::Loop(_)
         | RuleExpr::OneOrMore(_)
         | RuleExpr::Maybe(_)
         | RuleExpr::Any

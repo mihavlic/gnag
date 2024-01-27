@@ -81,7 +81,7 @@ fn convert_regex_syntax_span(
     let start = u32::try_from(describe.find_offset(span.start.offset).unwrap()).unwrap();
     let mut end = u32::try_from(describe.find_offset(span.end.offset).unwrap()).unwrap();
 
-    // regex_syntax likes to make spand where start==end
+    // regex_syntax likes to make spans where start==end
     // which vscode visualizes as start-1..end
     // which looks bad
     if start == end {
@@ -177,15 +177,6 @@ fn lower_expr_node(
     cx: &mut LoweringCtx<'_, '_>,
 ) {
     match node {
-        _ if node.is_empty_nonrecursive() => {
-            *node = RuleExpr::Empty;
-        }
-        RuleExpr::Rule(rule) => {
-            let rule_ir = &cx.file.rules[*rule];
-            if rule_ir.inline {
-                *node = get_rule(*rule, rules, cx).clone();
-            }
-        }
         RuleExpr::InlineCall(call) => {
             let CallExpr {
                 rule,

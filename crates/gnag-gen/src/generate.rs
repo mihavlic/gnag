@@ -1197,7 +1197,7 @@ fn generate_expr(
             block.BreakSelf(expr::Constant_bool(false));
             block.finish()
         }
-        RuleExpr::ZeroOrMore(a) => {
+        RuleExpr::Loop(a) => {
             // 'block: {
             //     while rule1(parser) {}
             //     break 'block true;
@@ -1928,7 +1928,7 @@ enum Terminator {
         block: CfgBlockHandle,
         value: Option<ExprConstant>,
     },
-    Todo
+    Todo,
 }
 
 struct CfgBlock {
@@ -1953,7 +1953,7 @@ struct CfgBuilder {
     variable_counter: HandleCounter<CfgVariableHandle>,
     blocks: HandleVec<CfgBlockHandle, CfgBlock>,
     current_block: CfgBlockHandle,
-    scopes: Vec<Vec<CfgVariableHandle>>
+    scopes: Vec<Vec<CfgVariableHandle>>,
 }
 
 impl CfgBuilder {
@@ -1981,7 +1981,7 @@ impl CfgBuilder {
     fn current_block(&mut self) -> &mut CfgBlock {
         &mut self.blocks[self.current_block]
     }
-    fn connect_goto(&mut self, from: CfgBlockHandle, to: CfgBlockHandle)
+    fn connect_goto(&mut self, from: CfgBlockHandle, to: CfgBlockHandle) {}
 }
 
 fn ast_to_cfg(ast: &Expr, cfg: &mut CfgBuilder) {

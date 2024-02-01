@@ -229,6 +229,14 @@ impl ConvertedFile {
             unreachable!()
         }
     }
+    pub fn get_inline_ast(&self, handle: InlineHandle) -> &ast::SynRule {
+        let rule = &self.inlines[handle];
+        if let AstItem::Inline(ast, _) = &self.ast_items[rule.body.ast] {
+            ast
+        } else {
+            unreachable!()
+        }
+    }
     pub fn find_ast_item(&self, pos: u32) -> Option<&AstItem> {
         let items = self.ast_items.as_slice();
         let index = match items.binary_search_by_key(&pos, |a| a.span().start) {
@@ -257,6 +265,15 @@ impl ConvertedFile {
             AstItem::Rule(_, _) => None,
             AstItem::Inline(_, handle) => *handle,
         }
+    }
+    pub fn get_token_name(&self, handle: TokenHandle) -> &str {
+        &self.tokens[handle].name
+    }
+    pub fn get_rule_name(&self, handle: RuleHandle) -> &str {
+        &self.rules[handle].name
+    }
+    pub fn get_inline_name(&self, handle: InlineHandle) -> &str {
+        &self.inlines[handle].body.name
     }
 }
 
@@ -356,7 +373,7 @@ fn convert_ast_token(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::Toke
 
 #[derive(Clone, Debug)]
 pub struct CallExpr {
-    pub rule: InlineHandle,
+    pub template: InlineHandle,
     pub parameters: Vec<RuleExpr>,
     // TODO use a more consistent solution
     pub span: StrSpan,
@@ -381,7 +398,8 @@ pub enum RuleExpr {
 
     // builtins
     Any,
-    Not(TokenHandle),
+    // `Not` only supports tokens, but at this point it may also contain an InlineParameter, we will check this later
+    Not(Box<RuleExpr>),
     SeparatedList {
         element: Box<RuleExpr>,
         separator: Box<RuleExpr>,
@@ -389,7 +407,7 @@ pub enum RuleExpr {
 }
 
 impl RuleExpr {
-    pub const BUILTIN_RULES: &[&'static str] = &["any", "not", "separated_list"];
+    pub const BUILTIN_RULES: &'static [&'static str] = &["any", "not", "separated_list"];
     // pub fn is_sequence(&self) -> bool {
     //     matches!(self, Self::Sequence(_))
     // }
@@ -445,14 +463,17 @@ impl RuleExpr {
                 element.visit_nodes_top_down_(fun);
                 separator.visit_nodes_top_down_(fun);
             }
-            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
                 a.visit_nodes_top_down_(fun);
+            }
+            RuleExpr::InlineCall(call) => {
+                for a in &mut call.parameters {
+                    a.visit_nodes_top_down_(fun);
+                }
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
-            | RuleExpr::InlineCall(_)
-            | RuleExpr::Not(_)
             | RuleExpr::Any
             | RuleExpr::Empty
             | RuleExpr::Error => {}
@@ -472,14 +493,17 @@ impl RuleExpr {
                 element.visit_nodes_bottom_up_(fun);
                 separator.visit_nodes_bottom_up_(fun);
             }
-            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
                 a.visit_nodes_bottom_up_(fun);
+            }
+            RuleExpr::InlineCall(call) => {
+                for a in &mut call.parameters {
+                    a.visit_nodes_bottom_up_(fun);
+                }
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
-            | RuleExpr::InlineCall(_)
-            | RuleExpr::Not(_)
             | RuleExpr::Any
             | RuleExpr::Empty
             | RuleExpr::Error => {}
@@ -501,14 +525,17 @@ impl RuleExpr {
                 element.visit_nodes_top_down_mut_(fun);
                 separator.visit_nodes_top_down_mut_(fun);
             }
-            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
                 a.visit_nodes_top_down_mut_(fun);
+            }
+            RuleExpr::InlineCall(call) => {
+                for a in &mut call.parameters {
+                    a.visit_nodes_top_down_mut_(fun);
+                }
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
-            | RuleExpr::InlineCall(_)
-            | RuleExpr::Not(_)
             | RuleExpr::Any
             | RuleExpr::Empty
             | RuleExpr::Error => {}
@@ -528,14 +555,17 @@ impl RuleExpr {
                 element.visit_nodes_bottom_up_mut_(fun);
                 separator.visit_nodes_bottom_up_mut_(fun);
             }
-            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
                 a.visit_nodes_bottom_up_mut_(fun);
+            }
+            RuleExpr::InlineCall(call) => {
+                for a in &mut call.parameters {
+                    a.visit_nodes_bottom_up_mut_(fun);
+                }
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
-            | RuleExpr::InlineCall(_)
-            | RuleExpr::Not(_)
             | RuleExpr::Any
             | RuleExpr::Empty
             | RuleExpr::Error => {}
@@ -672,20 +702,14 @@ fn expression(
 
             match name {
                 "any" => expect_count(0, &|_| RuleExpr::Any),
-                "not" => expect_count(1, &|args| match args[0] {
-                    RuleExpr::Token(token) => RuleExpr::Not(token),
-                    _ => {
-                        cx.error(a.span, "Expected token");
-                        RuleExpr::Error
-                    }
-                }),
+                "not" => expect_count(1, &|args| RuleExpr::Not(Box::new(args.pop().unwrap()))),
                 "separated_list" => expect_count(2, &|args| RuleExpr::SeparatedList {
                     separator: Box::new(args.pop().unwrap()),
                     element: Box::new(args.pop().unwrap()),
                 }),
                 _ => match name_to_item.get(name) {
                     Some(ItemKind::Inline(rule)) => RuleExpr::InlineCall(Box::new(CallExpr {
-                        rule: *rule,
+                        template: *rule,
                         parameters: arguments,
                         span: a.span,
                     })),

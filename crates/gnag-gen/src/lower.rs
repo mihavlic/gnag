@@ -1,7 +1,8 @@
 use std::borrow::Borrow;
 
 use crate::convert::{
-    AstItem, CallExpr, ConvertedFile, RuleExpr, RuleHandle, TokenDef, TokenHandle, TokenPattern,
+    AstItem, CallExpr, ConvertedFile, InlineHandle, RuleExpr, RuleHandle, TokenDef, TokenHandle,
+    TokenPattern,
 };
 use gnag::{
     ctx::{ConvertCtx, SpanExt},
@@ -20,7 +21,7 @@ pub enum LoweredTokenPattern {
 pub struct LoweringCtx<'a, 'b> {
     inner: ConvertCtx<'a>,
     file: &'b ConvertedFile,
-    stack: Vec<RuleHandle>,
+    stack: Vec<InlineHandle>,
 }
 
 impl<'a, 'b> LoweringCtx<'a, 'b> {
@@ -55,16 +56,21 @@ impl LoweredFile {
     pub fn new(src: &str, file: &ConvertedFile) -> LoweredFile {
         let mut cx = LoweringCtx::new(src, file);
 
-        let tokens = file.tokens.map_ref(|token| lower_token(token, &mut cx));
-        let mut rules = SecondaryVec::new();
-
-        for handle in file.rules.iter_keys() {
-            get_rule(handle, &mut rules, &mut cx);
+        let mut inlines = SecondaryVec::new();
+        for inline in file.inlines.iter_keys() {
+            get_inline(inline, &mut inlines, &mut cx);
         }
+
+        let tokens = file.tokens.map_ref(|token| lower_token(token, &mut cx));
+        let rules = file.rules.map_ref(|rule| {
+            let mut expr = rule.expr.clone();
+            inline_calls(&mut expr, &mut inlines, &mut cx);
+            expr
+        });
 
         LoweredFile {
             tokens,
-            rules: HandleVec::try_from(rules).expect("All rules have been visited?"),
+            rules,
             errors: cx.finish(),
         }
     }
@@ -134,150 +140,80 @@ fn lower_token(token: &TokenDef, cx: &LoweringCtx) -> LoweredTokenPattern {
     }
 }
 
-fn get_rule<'a>(
-    handle: RuleHandle,
-    rules: &'a mut SecondaryVec<RuleHandle, RuleExpr>,
+fn get_inline<'a>(
+    handle: InlineHandle,
+    inlines: &'a mut SecondaryVec<InlineHandle, RuleExpr>,
     cx: &mut LoweringCtx,
 ) -> &'a RuleExpr {
     // NLL issue workaround https://github.com/rust-lang/rust/issues/54663#issuecomment-973936708
-    if rules.get(handle).is_some() {
-        return rules.get(handle).unwrap();
+    if inlines.get(handle).is_some() {
+        return inlines.get(handle).unwrap();
     }
 
-    let ir = &cx.file.rules[handle];
+    let ir = &cx.file.inlines[handle];
 
     if cx.stack.contains(&handle) {
         let prev = *cx.stack.last().unwrap();
-        let prev_ir = &cx.file.rules[prev];
-        let prev_ast = cx.file.get_rule_ast(prev);
+        let prev_name = cx.file.get_inline_name(prev);
+        let prev_ast = cx.file.get_inline_ast(prev);
 
         cx.error(
             prev_ast.span,
             format_args!(
                 "Rule {} recursively includes itself through {}",
-                prev_ir.name, ir.name
+                prev_name, ir.body.name
             ),
         );
     }
 
-    let mut expr = ir.expr.clone();
+    let mut expr = ir.body.expr.clone();
 
     cx.stack.push(handle);
-    expr.visit_nodes_bottom_up_mut(|node| {
-        lower_expr_node(rules, node, cx);
-    });
+    inline_calls(&mut expr, inlines, cx);
     cx.stack.pop();
 
-    rules.entry(handle).insert(expr)
+    inlines.entry(handle).insert(expr)
 }
 
-fn lower_expr_node(
-    rules: &mut SecondaryVec<RuleHandle, RuleExpr>,
-    node: &mut RuleExpr,
+fn inline_calls(
+    expr: &mut RuleExpr,
+    inlines: &mut SecondaryVec<InlineHandle, RuleExpr>,
     cx: &mut LoweringCtx<'_, '_>,
 ) {
-    match node {
-        RuleExpr::InlineCall(call) => {
+    expr.visit_nodes_bottom_up_mut(|node| {
+        if let RuleExpr::InlineCall(call) = node {
             let CallExpr {
-                rule,
+                template: handle,
                 parameters,
                 span,
             } = call.as_ref();
 
-            let mut parameters = parameters.clone();
-            for p in &mut parameters {
-                lower_expr_node(rules, p, cx);
-            }
+            // try to get the expanded body first because doing so can generate errors
+            let expanded = get_inline(*handle, inlines, cx);
 
-            let rule_ir = &cx.file.rules[*rule];
+            let rule_ir = &cx.file.inlines[*handle];
 
-            let expected = rule_ir.parameters.len();
-            let provided = parameters.len();
-
-            if !rule_ir.inline {
-                cx.error(*span, format_args!("Rule {} is not inline", rule_ir.name));
-
-                *node = RuleExpr::Error;
-            } else if expected != provided {
+            let expected_len = rule_ir.parameters.len();
+            let provided_len = parameters.len();
+            if expected_len != provided_len {
                 cx.error(
                     *span,
-                    format_args!("Expected {expected} arguments, got {provided}"),
+                    format_args!("Expected {expected_len} arguments, got {provided_len}"),
                 );
-
                 *node = RuleExpr::Error;
             } else {
-                let mut expr = get_rule(*rule, rules, cx).clone();
+                *node = expanded.clone();
                 if !parameters.is_empty() {
-                    expr.visit_nodes_top_down_mut(|node| {
+                    node.visit_nodes_top_down_mut(|node| {
                         if let &mut RuleExpr::InlineParameter(pos) = node {
                             *node = parameters
                                 .get(pos)
                                 .expect("InlineParameter out of bounds??")
                                 .clone();
-                        } else {
-                            // we need to rerun this on the nodes because we could have
-                            //  parameters A, B = Empty
-                            //  Expr = Sequence(A B)
-                            //    =>
-                            //  Expr = Sequence(Empty Empty)
-                            lower_expr_node(rules, node, cx);
                         }
                     })
                 }
-
-                *node = expr;
             }
-        }
-        RuleExpr::Sequence(a) => {
-            // we can do this instead of mutual recursion (as in file::binary_expression)
-            // because we've already processed any such nested equivalent expressions
-            // and any more are the result of inlining rules
-            // which are necessarily only one deep
-            if a.iter()
-                .any(|a| matches!(a, RuleExpr::Sequence(_) | RuleExpr::Empty))
-            {
-                let mut vec = Vec::new();
-                for expr in a.drain(..) {
-                    match expr {
-                        RuleExpr::Sequence(inner) => vec.extend(inner),
-                        RuleExpr::Empty => {}
-                        _ => vec.push(expr),
-                    }
-                }
-                *a = vec;
-            }
-
-            match a.len() {
-                0 => *node = RuleExpr::Empty,
-                1 => *node = a.pop().unwrap(),
-                _ => {}
-            }
-        }
-        RuleExpr::Choice(a) => {
-            if a.iter()
-                .any(|a| matches!(a, RuleExpr::Choice(_) | RuleExpr::Empty))
-            {
-                let mut vec = Vec::new();
-                for expr in a.drain(..) {
-                    match expr {
-                        RuleExpr::Choice(inner) => vec.extend(inner),
-                        // RuleExpr::Empty always matches without consuming anything so we can safely remove anything that would go after it
-                        RuleExpr::Empty => {
-                            vec.push(expr);
-                            break;
-                        }
-                        _ => vec.push(expr),
-                    }
-                }
-                *a = vec;
-            }
-
-            match a.len() {
-                0 => *node = RuleExpr::Empty,
-                1 => *node = a.pop().unwrap(),
-                _ => {}
-            }
-        }
-        _ => {}
-    }
+        };
+    });
 }

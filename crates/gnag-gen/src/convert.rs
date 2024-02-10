@@ -148,10 +148,11 @@ impl ConvertedFile {
             match item {
                 ast::Item::Tokenizer(a) => {
                     for r in a.rules {
+                        let name = r.name;
                         let handle = ast_items.push(AstItem::Token(r, None));
                         add_ast_item(
                             cx,
-                            r.name,
+                            name,
                             handle,
                             &mut name_to_item,
                             &mut ast_items,
@@ -160,11 +161,12 @@ impl ConvertedFile {
                     }
                 }
                 ast::Item::SynRule(r) => {
+                    let name = r.name;
                     if r.inline {
                         let handle = ast_items.push(AstItem::Inline(r, None));
                         add_ast_item(
                             cx,
-                            r.name,
+                            name,
                             handle,
                             &mut name_to_item,
                             &mut ast_items,
@@ -174,7 +176,7 @@ impl ConvertedFile {
                         let handle = ast_items.push(AstItem::Rule(r, None));
                         add_ast_item(
                             cx,
-                            r.name,
+                            name,
                             handle,
                             &mut name_to_item,
                             &mut ast_items,
@@ -467,7 +469,7 @@ impl RuleExpr {
                 a.visit_nodes_top_down_(fun);
             }
             RuleExpr::InlineCall(call) => {
-                for a in &mut call.parameters {
+                for a in &call.parameters {
                     a.visit_nodes_top_down_(fun);
                 }
             }
@@ -497,7 +499,7 @@ impl RuleExpr {
                 a.visit_nodes_bottom_up_(fun);
             }
             RuleExpr::InlineCall(call) => {
-                for a in &mut call.parameters {
+                for a in &call.parameters {
                     a.visit_nodes_bottom_up_(fun);
                 }
             }

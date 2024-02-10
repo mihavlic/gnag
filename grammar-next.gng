@@ -66,88 +66,34 @@ tokenizer {
     Dot '.'
 }
 
-@root
-rule File  {
-    (Tokenizer | SynRule | Group)*
-}
+@root File = (Tokenizer | SynRule | Group)* ;
 
-inline comma_list(element) {
-    <separated_list element ','>
-}
-inline delimited(bra, ket) {
-    bra (ParenDelimited | BraceDelimited | BracketDelimited | <not ket>)* ket
-}
+comma_list(element) = <separated_list element ','> ;
+delimited(bra, ket) = bra (ParenDelimited | BraceDelimited | BracketDelimited | <not ket>)* ket ;
 
-rule ParenDelimited {
-    <delimited '(' ')'>
-}
-rule BraceDelimited {
-    <delimited '{' '}'>
-}
-rule BracketDelimited {
-    <delimited '[' ']'>
-}
+ParenDelimited = <delimited '(' ')'> ;
+BraceDelimited = <delimited '{' '}'> ;
+BracketDelimited = <delimited '[' ']'> ;
 
-rule AttributeValue {
-    String | Ident | Number
-}
-rule AttributeExpr {
-    Ident ( '(' AttributeValue ')' )?
-}
-rule Attribute {
-    '@' Ident ( '(' <comma_list AttributeExpr> ')' )?
-}
+AttributeValue = String | Ident | Number ;
+AttributeExpr = Ident ( '(' AttributeValue ')' )? ;
+Attribute = '@' Ident ( '(' <comma_list AttributeExpr> ')' )? ;
 
-rule TokenRule {
-    Attribute* Ident (String | BraceDelimited)
-}
-rule Tokenizer {
-    'tokenizer' '{' TokenRule* '}'
-}
+TokenRule = Attribute* Ident (String | BraceDelimited) ;
+Tokenizer = 'tokenizer' '{' TokenRule* '}' ;
 
-rule Parameters {
-    '(' <comma_list Ident> ')'
-}
-rule SynRule {
-    Attribute* ('inline' | 'rule') Ident Parameters? '{' Expr '}'
-}
+Parameters = '(' <comma_list Ident> ')' ;
+SynRule = Attribute* ('inline' | 'rule') Ident Parameters? '{' Expr '}' ;
 
-rule Group {
-    'group' Ident '{' GroupItem* '}'
-}
-rule GroupItem {
-    Ident Ident
-}
+Group = 'group' Ident '{' GroupItem* '}' ;
+GroupItem = Ident Ident ;
 
-@pratt 
-rule Expr {
-    CallExpr
-  | ParenExpr
-  | PreExpr
-  | PostExpr
-  | PostName
-  | SeqExpr
-  | BinExpr
-}
-
-rule CallExpr {
-    '<' Ident Expr? '>'
-}
-rule ParenExpr {
-    '(' Expr ')'
-}
-rule PreExpr {
-    Attribute+ Expr
-}
-rule PostExpr {
-    Expr ('?' | '*' | '+')
-}
-rule PostName {
-    Expr ':' Ident ('.' Ident)?
-}
-rule SeqExpr {
-    Expr Expr+
-}
-rule BinExpr {
-    Expr '|' Expr
+pratt Expr {
+    CallExpr = '<' Ident Expr? '>' ;
+    ParenExpr = '(' Expr ')' ;
+    PreExpr = Attribute+ Expr ;
+    PostExpr = Expr ('?' | '*' | '+') ;
+    PostName = Expr ':' Ident ('.' Ident)? ;
+    SeqExpr = Expr Expr+ ;
+    BinExpr = Expr '|' Expr ;
 }

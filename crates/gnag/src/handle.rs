@@ -119,9 +119,25 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
         self.0.len()
     }
     pub fn push(&mut self, value: T) -> H {
-        let len = self.0.len();
+        let handle = self.next_handle();
         self.0.push(value);
+        handle
+    }
+    pub fn next_handle(&self) -> H {
+        let len = self.0.len();
         H::new(len)
+    }
+    pub fn first(&self) -> Option<&T> {
+        self.0.first()
+    }
+    pub fn first_mut(&mut self) -> Option<&mut T> {
+        self.0.first_mut()
+    }
+    pub fn last(&self) -> Option<&T> {
+        self.0.last()
+    }
+    pub fn last_mut(&mut self) -> Option<&mut T> {
+        self.0.last_mut()
     }
     pub fn get(&self, index: H) -> Option<&T> {
         self.0.get(index.index())
@@ -139,6 +155,11 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
         &self,
     ) -> impl Iterator<Item = (H, &T)> + Clone + ExactSizeIterator + DoubleEndedIterator {
         self.0.iter().enumerate().map(|(i, t)| (H::new(i), t))
+    }
+    pub fn iter_kv_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (H, &mut T)> + ExactSizeIterator + DoubleEndedIterator {
+        self.0.iter_mut().enumerate().map(|(i, t)| (H::new(i), t))
     }
     pub fn into_iter_kv(
         self,
@@ -214,7 +235,7 @@ impl<H: TypedHandle, T> SecondaryVec<H, T> {
     pub fn new() -> Self {
         SecondaryVec(Vec::new(), PhantomData)
     }
-    pub fn new_preallocated<T_>(primary: &HandleVec<H, T_>) -> Self {
+    pub fn with_capacity_for<T_>(primary: &HandleVec<H, T_>) -> Self {
         let n_none = (0..primary.len()).map(|_| None);
         SecondaryVec(n_none.collect(), PhantomData)
     }
@@ -257,6 +278,30 @@ impl<H: TypedHandle, T> SecondaryVec<H, T> {
     }
     pub fn contains(&self, index: H) -> bool {
         self.0.get(index.index()).is_some()
+    }
+    pub fn first(&self) -> Option<&T> {
+        match self.0.first() {
+            Some(some) => some.as_ref(),
+            None => None,
+        }
+    }
+    pub fn first_mut(&mut self) -> Option<&mut T> {
+        match self.0.first_mut() {
+            Some(some) => some.as_mut(),
+            None => None,
+        }
+    }
+    pub fn last(&self) -> Option<&T> {
+        match self.0.last() {
+            Some(some) => some.as_ref(),
+            None => None,
+        }
+    }
+    pub fn last_mut(&mut self) -> Option<&mut T> {
+        match self.0.last_mut() {
+            Some(some) => some.as_mut(),
+            None => None,
+        }
     }
     pub fn get(&self, index: H) -> Option<&T> {
         let get = self.0.get(index.index());

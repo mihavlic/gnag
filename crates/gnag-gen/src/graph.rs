@@ -1,8 +1,11 @@
-use std::fmt::{Display, Formatter, Write};
+use std::{
+    cmp::Ordering,
+    fmt::{Display, Formatter, Write},
+};
 
 use gnag::{
     ast::ParsedFile,
-    handle::{HandleCounter, HandleVec, SecondaryVec, TypedHandle},
+    handle::{HandleBitset, HandleCounter, HandleVec, SecondaryVec, TypedHandle},
     simple_handle,
 };
 
@@ -51,10 +54,28 @@ simple_handle! {
     pub NodeHandle
 }
 
-#[derive(Clone, Copy)]
-pub struct IncomingEdge {
-    pub from: NodeHandle,
-    pub is_fail: bool,
+impl Display for NodeHandle {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.index().fmt(f)
+    }
+}
+
+impl From<usize> for NodeHandle {
+    fn from(value: usize) -> Self {
+        NodeHandle(value.try_into().unwrap())
+    }
+}
+
+impl NodeHandle {
+    fn prev(self) -> Option<NodeHandle> {
+        self.0.checked_sub(1).map(NodeHandle)
+    }
+    fn next(self) -> NodeHandle {
+        NodeHandle(self.0 + 1)
+    }
+    fn bump(&mut self) {
+        self.0 += 1;
+    }
 }
 
 struct PegNode {
@@ -90,9 +111,15 @@ impl PegNode {
     }
 }
 
-struct PegEdges {
-    success: Vec<IncomingEdge>,
-    fail: Vec<IncomingEdge>,
+#[derive(Clone, Copy)]
+pub struct IncomingEdge {
+    pub from: NodeHandle,
+    pub is_fail: bool,
+}
+
+pub struct PegEdges {
+    pub success: Vec<IncomingEdge>,
+    pub fail: Vec<IncomingEdge>,
 }
 
 impl PegEdges {
@@ -104,20 +131,20 @@ impl PegEdges {
     }
 }
 
-struct GraphBuilder {
+pub struct GraphBuilder {
     nodes: HandleVec<NodeHandle, PegNode>,
     // TODO spans
     errors: Vec<String>,
 }
 
 impl GraphBuilder {
-    fn new() -> GraphBuilder {
+    pub fn new() -> GraphBuilder {
         GraphBuilder {
             nodes: HandleVec::new(),
             errors: Vec::new(),
         }
     }
-    fn connect_edges(
+    pub fn connect_edges(
         &mut self,
         node: NodeHandle,
         incoming: impl IntoIterator<Item = IncomingEdge>,
@@ -126,7 +153,7 @@ impl GraphBuilder {
             self.nodes[edge.from].connect_edge(edge.is_fail, node);
         }
     }
-    fn new_node(
+    pub fn new_node(
         &mut self,
         transition: Transition,
         incoming: impl IntoIterator<Item = IncomingEdge>,
@@ -135,20 +162,14 @@ impl GraphBuilder {
         self.connect_edges(handle, incoming);
         handle
     }
-    fn peek_next_node(&self) -> NodeHandle {
+    pub fn peek_next_node(&self) -> NodeHandle {
         self.nodes.next_handle()
     }
-    fn get_node(&self, node: NodeHandle) -> Option<&PegNode> {
+    pub fn get_node(&self, node: NodeHandle) -> Option<&PegNode> {
         self.nodes.get(node)
     }
-    fn iter_nodes(
-        &self,
-    ) -> impl Iterator<Item = (TapeOffset, &PegNode)> + Clone + ExactSizeIterator + DoubleEndedIterator
-    {
-        self.nodes.iter_kv().map(|(k, v)| (TapeOffset::from(k), v))
-    }
     #[allow(unused_must_use)]
-    fn debug_graphviz(
+    pub fn debug_graphviz(
         &self,
         buf: &mut dyn Write,
         subgraph: &str,
@@ -186,23 +207,23 @@ impl GraphBuilder {
         }
         writeln!(buf, "}}");
     }
-    fn debug_statements(&self, buf: &mut dyn Write, file: &ConvertedFile) {
+    pub fn debug_statements(&self, buf: &mut dyn Write, file: &ConvertedFile) {
         let need_label = self.analyze_control_flow();
 
         #[allow(unused_must_use)]
-        for (handle, node) in self.iter_nodes() {
-            let prev = handle.0.checked_sub(1).map(NodeHandle);
-            let next = TapeOffset::from(handle).next();
+        for (current, node) in self.nodes.iter_kv() {
+            let prev = current.prev();
+            let next = current.next();
 
             {
-                let label = need_label[handle];
+                let label = need_label[current];
                 let is_target = label.is_target;
                 let previous_is_reachable =
                     prev.map(|n| need_label[n].is_reachable).unwrap_or(true);
                 let is_dead = !label.is_reachable && (previous_is_reachable || is_target);
 
                 if is_target {
-                    write!(buf, "{}", handle.0);
+                    write!(buf, "{current}");
                 }
                 if is_dead {
                     if is_target {
@@ -223,7 +244,7 @@ impl GraphBuilder {
                     if jump == next {
                         write!(buf, " ↓");
                     } else {
-                        write!(buf, " {}", jump.0);
+                        write!(buf, " {jump}");
                     }
                 } else {
                     write!(buf, " _");
@@ -235,16 +256,16 @@ impl GraphBuilder {
             write!(buf, "\n");
         }
     }
-    fn analyze_control_flow(&self) -> HandleVec<TapeOffset, StatementLabel> {
+    pub fn analyze_control_flow(&self) -> HandleVec<NodeHandle, StatementLabel> {
         let mut need_label = self.nodes.map_fill(StatementLabel::default());
         if let Some(first) = need_label.first_mut() {
             first.is_reachable = true;
         }
 
-        for (current, node) in self.iter_nodes() {
+        for (current, node) in self.nodes.iter_kv() {
             let next = current.next();
             node.for_edges(|jump| {
-                if next != jump.into() {
+                if next != jump {
                     need_label[jump].is_target = true;
                 }
                 if need_label[current].is_reachable {
@@ -257,9 +278,9 @@ impl GraphBuilder {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-struct StatementLabel {
-    is_target: bool,
-    is_reachable: bool,
+pub struct StatementLabel {
+    pub is_target: bool,
+    pub is_reachable: bool,
 }
 
 #[allow(unused_must_use)]
@@ -440,10 +461,60 @@ impl GraphBuilder {
     }
 }
 
-#[derive(Clone, Default)]
-struct StatementJumps {
-    block_start: Option<NodeHandle>,
-    loop_end: Option<NodeHandle>,
+simple_handle! {
+    ScopeHandle
+}
+
+impl Display for ScopeHandle {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlowAction {
+    Break(ScopeHandle),
+    Continue(ScopeHandle),
+    Panic,
+    None,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BlockCondition {
+    condition: NodeHandle,
+    negate: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StatementBlock {
+    kind: ScopeKind,
+    condition: Option<BlockCondition>,
+}
+
+impl From<ScopeKind> for StatementBlock {
+    fn from(kind: ScopeKind) -> Self {
+        StatementBlock {
+            kind,
+            condition: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum Statement {
+    Open(ScopeHandle, StatementBlock),
+    Close(ScopeHandle),
+    Statement {
+        condition: NodeHandle,
+        success: FlowAction,
+        fail: FlowAction,
+    },
+}
+
+enum ScopeVisit<'a> {
+    Open(&'a ScopeNode),
+    Statement(NodeHandle),
+    Close(&'a ScopeNode),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -452,62 +523,12 @@ enum ScopeKind {
     Block,
 }
 
-simple_handle! {
-    TapeOffset, ScopeHandle
-}
-
-impl From<NodeHandle> for TapeOffset {
-    fn from(value: NodeHandle) -> Self {
-        TapeOffset(value.0)
-    }
-}
-
-impl From<usize> for TapeOffset {
-    fn from(value: usize) -> Self {
-        TapeOffset(value.try_into().unwrap())
-    }
-}
-
-impl TapeOffset {
-    fn prev(self) -> Option<TapeOffset> {
-        self.0.checked_sub(1).map(TapeOffset)
-    }
-    fn next(self) -> TapeOffset {
-        TapeOffset(self.0 + 1)
-    }
-    fn bump(&mut self) {
-        self.0 += 1;
-    }
-}
-
-enum CfgAction {
-    Break(ScopeHandle),
-    Continue(ScopeHandle),
-    None,
-}
-
-enum Statement {
-    Open(ScopeHandle),
-    Close(ScopeHandle),
-    Switch {
-        condition: NodeHandle,
-        success: CfgAction,
-        fail: CfgAction,
-    },
-}
-
-enum ScopeVisit<'a> {
-    Open(&'a ScopeNode),
-    Statement(TapeOffset),
-    Close(&'a ScopeNode),
-}
-
 #[derive(Debug)]
 struct ScopeNode {
     handle: ScopeHandle,
     kind: ScopeKind,
-    start: TapeOffset,
-    end: TapeOffset,
+    start: NodeHandle,
+    end: NodeHandle,
     children: Vec<ScopeNode>,
 }
 
@@ -519,7 +540,7 @@ impl ScopeNode {
         }
     }
     /// Assumes that `start <= end`
-    fn contains_range(&self, start: TapeOffset, end: TapeOffset) -> bool {
+    fn contains_range(&self, start: NodeHandle, end: NodeHandle) -> bool {
         self.start <= start && end <= self.end
     }
     /// Find the range of children whose ranges overlap start..end.
@@ -527,7 +548,7 @@ impl ScopeNode {
     /// Will enlarge the range in case of partial overlaps.
     ///
     /// # Examples
-    /// ```
+    /// ```ignore
     /// range = 1..4 //     <--------->
     /// children = [(0..1), (1..3), (3..5), (6..8)]
     /// range = 1..5 //     <------------>
@@ -540,28 +561,17 @@ impl ScopeNode {
     /// ```
     fn find_child_range(
         &self,
-        start: &mut TapeOffset,
-        end: &mut TapeOffset,
+        start: &mut NodeHandle,
+        end: &mut NodeHandle,
     ) -> std::ops::Range<usize> {
-        let mut start_index = 0;
-        let mut end_index = self.children.len();
+        let start_index = self.children.partition_point(|x| *start > x.end);
+        let end_index = self.children.partition_point(|x| *end > x.start);
 
-        for (i, child) in self.children.iter().enumerate() {
-            if *start < child.end {
-                start_index = i;
-                *start = (*start).min(child.start);
-                break;
-            }
+        if let Some(scope) = self.children.get(start_index) {
+            *start = (*start).min(scope.start);
         }
-
-        for (child, i) in self.children[start_index..].iter().zip(start_index..) {
-            if *end > child.start {
-                end_index = i + 1;
-                *end = (*end).max(child.end);
-            }
-            if *end <= child.start {
-                break;
-            }
+        if let Some(scope) = end_index.checked_sub(1).and_then(|i| self.children.get(i)) {
+            *end = (*end).max(scope.end);
         }
 
         start_index..end_index
@@ -569,8 +579,8 @@ impl ScopeNode {
     fn add_scope(
         &mut self,
         counter: &mut HandleCounter<ScopeHandle>,
-        start: TapeOffset,
-        end: TapeOffset,
+        start: NodeHandle,
+        end: NodeHandle,
         kind: ScopeKind,
     ) -> ScopeHandle {
         assert!(self.contains_range(start, end));
@@ -614,6 +624,19 @@ impl ScopeNode {
         self.children.insert(range.start, new);
         handle
     }
+    fn validate(&self, root: bool) {
+        match root {
+            true => assert!(self.start <= self.end),
+            false => assert!(self.start < self.end),
+        }
+        let mut end = self.start;
+        for child in &self.children {
+            assert!(end <= child.start);
+            child.validate(false);
+            end = child.end;
+        }
+        assert!(end <= self.end);
+    }
     fn visit_dfs(&self, mut fun: impl FnMut(ScopeVisit)) {
         self.visit_dfs_impl(&mut fun)
     }
@@ -634,7 +657,7 @@ impl ScopeNode {
         }
         fun(ScopeVisit::Close(self));
     }
-    fn find_scope_with_end(&self, end: TapeOffset) -> Option<ScopeHandle> {
+    fn find_scope_with_end(&self, end: NodeHandle) -> Option<ScopeHandle> {
         let mut this = self;
         'outer: loop {
             if self.end == end {
@@ -651,7 +674,7 @@ impl ScopeNode {
             return None;
         }
     }
-    fn find_scope_with_start(&self, start: TapeOffset) -> Option<ScopeHandle> {
+    fn find_scope_with_start(&self, start: NodeHandle) -> Option<ScopeHandle> {
         let mut this = self;
         'outer: loop {
             if self.start == start {
@@ -686,8 +709,7 @@ impl ScopeNode {
                 }
                 indent += 1;
             }
-            ScopeVisit::Statement(index) => {
-                let handle = NodeHandle::new(index.index());
+            ScopeVisit::Statement(handle) => {
                 let node = &graph.nodes[handle];
                 print_indent(buf, indent);
                 node.transition.display(buf, file);
@@ -702,33 +724,42 @@ impl ScopeNode {
     }
 }
 
-struct TapeStructuring {
-    statements: HandleVec<NodeHandle, StatementJumps>,
-    scopes: ScopeNode,
-    counter: HandleCounter<ScopeHandle>,
+#[derive(Clone, Default)]
+struct StatementJumps {
+    jump_forward: Option<ScopeHandle>,
+    back_edge: Option<ScopeHandle>,
 }
 
-impl TapeStructuring {
-    pub fn new(graph: &GraphBuilder) -> TapeStructuring {
-        let mut counter = HandleCounter::new();
-        let mut scopes = Self {
-            statements: graph.nodes.map_fill(StatementJumps::default()),
-            scopes: ScopeNode {
-                handle: counter.next(),
+struct GraphStructure {
+    scope: ScopeNode,
+    jump_table: HandleVec<NodeHandle, StatementJumps>,
+}
+
+impl GraphStructure {
+    pub fn new() -> GraphStructure {
+        Self {
+            scope: ScopeNode {
+                handle: ScopeHandle::new(0),
                 kind: ScopeKind::Block,
                 start: 0.into(),
-                end: graph.nodes.len().into(),
+                end: 0.into(),
                 children: vec![],
             },
-            counter,
-        };
-        scopes.build(graph);
-        scopes
+            jump_table: HandleVec::new(),
+        }
     }
-    fn add_scope(&mut self, start: TapeOffset, end: TapeOffset, kind: ScopeKind) -> ScopeHandle {
-        self.scopes.add_scope(&mut self.counter, start, end, kind)
+    fn reset(&mut self, handle: ScopeHandle, graph: &GraphBuilder) {
+        self.scope.handle = handle;
+        self.scope.kind = ScopeKind::Block;
+        self.scope.start = 0.into();
+        self.scope.end = graph.nodes.len().into();
+        self.scope.children.clear();
+
+        self.jump_table.clear();
+        self.jump_table
+            .resize(graph.nodes.len(), StatementJumps::default());
     }
-    fn build(&mut self, graph: &GraphBuilder) -> Vec<Statement> {
+    fn build(&mut self, graph: &GraphBuilder) {
         //                                start           0:                       loop {
         //                             ┌─►0──┐              Rule(A) ↓ 2                if !next(A) {
         //                            B│  │A │              Rule(B) 0 ↓                   break;
@@ -740,47 +771,365 @@ impl TapeStructuring {
 
         fn for_back_edges(
             (current, node): (NodeHandle, &PegNode),
-            mut fun: impl FnMut(TapeOffset, TapeOffset),
+            mut fun: impl FnMut(NodeHandle, NodeHandle),
         ) {
             node.for_edges(|to| {
                 if to <= current {
-                    fun(current.into(), to.into());
+                    fun(current, to);
                 }
             })
         }
 
         fn for_forward_jumps(
             (current, node): (NodeHandle, &PegNode),
-            mut fun: impl FnMut(TapeOffset, TapeOffset),
+            mut fun: impl FnMut(NodeHandle, NodeHandle),
         ) {
-            let next = TapeOffset::from(current).next();
+            let next = current.next();
             node.for_edges(|to| {
-                let to = TapeOffset::from(to);
                 if to > next {
-                    fun(current.into(), to);
+                    fun(current, to);
                 }
             })
         }
 
-        let mut loop_cache = SecondaryVec::with_capacity(graph.nodes.len());
+        let mut counter = HandleCounter::new();
+        self.reset(counter.next(), graph);
+
         for node in graph.nodes.iter_kv().rev() {
             for_back_edges(node, |from, to| {
-                loop_cache
-                    .entry(to)
-                    .get_or_insert_with(|| self.add_scope(to, from.next(), ScopeKind::Loop));
+                self.jump_table[to].back_edge.get_or_insert_with(|| {
+                    self.scope
+                        .add_scope(&mut counter, to, from.next(), ScopeKind::Loop)
+                });
             })
         }
 
-        let mut jump_cache = SecondaryVec::with_capacity(graph.nodes.len());
         for node in graph.nodes.iter_kv() {
             for_forward_jumps(node, |from, to| {
-                jump_cache
-                    .entry(to)
-                    .get_or_insert_with(|| self.add_scope(from, to, ScopeKind::Block));
+                self.jump_table[to].jump_forward.get_or_insert_with(|| {
+                    self.scope
+                        .add_scope(&mut counter, from, to, ScopeKind::Block)
+                });
             })
         }
 
-        vec![]
+        #[cfg(debug_assertions)]
+        self.scope.validate(true);
+    }
+    fn translate_jump(&self, jump: Option<NodeHandle>, next: NodeHandle) -> FlowAction {
+        if let Some(to) = jump {
+            let entry = &self.jump_table[to];
+            match to.cmp(&next) {
+                Ordering::Less => FlowAction::Continue(entry.back_edge.unwrap()),
+                Ordering::Equal => FlowAction::None,
+                Ordering::Greater => FlowAction::Break(entry.jump_forward.unwrap()),
+            }
+        } else {
+            FlowAction::Panic
+        }
+    }
+    pub fn emit_code(&mut self, conditional_blocks: bool, graph: &GraphBuilder) -> Vec<Statement> {
+        self.build(graph);
+        let reachable_statements = graph.analyze_control_flow();
+
+        let mut statements = Vec::new();
+
+        let mut last_statement = None;
+        let mut last_scope = None;
+        let mut first_loop = None;
+        let mut last_loop = None;
+
+        self.scope.visit_dfs(|event| match event {
+            ScopeVisit::Open(scope) => {
+                statements.push(Statement::Open(scope.handle, scope.kind.into()));
+            }
+            ScopeVisit::Statement(handle) => {
+                if !reachable_statements[handle].is_reachable {
+                    return;
+                }
+
+                let node = graph.get_node(handle).unwrap();
+                let next = handle.next();
+
+                if let Some(last) = last_statement {
+                    if let Some(first_loop) = first_loop {
+                        let Statement::Statement {
+                            condition: _,
+                            success,
+                            fail,
+                        } = &mut statements[last]
+                        else {
+                            unreachable!()
+                        };
+
+                        if let FlowAction::None = success {
+                            *success = FlowAction::Break(last_loop.unwrap());
+                        }
+                        if let FlowAction::None = fail {
+                            *fail = FlowAction::Break(last_loop.unwrap());
+                        }
+                        if let FlowAction::Continue(scope) = success {
+                            if *scope == first_loop {
+                                *success = FlowAction::None;
+                            }
+                        }
+                        if let FlowAction::Continue(scope) = fail {
+                            if *scope == first_loop {
+                                *fail = FlowAction::None;
+                            }
+                        }
+                    }
+                }
+
+                last_statement = Some(statements.len());
+                first_loop = None;
+                last_loop = None;
+                last_scope = None;
+
+                statements.push(Statement::Statement {
+                    condition: handle,
+                    success: self.translate_jump(node.success, next),
+                    fail: self.translate_jump(node.fail, next),
+                });
+            }
+            ScopeVisit::Close(scope) => {
+                statements.push(Statement::Close(scope.handle));
+
+                last_scope = Some(scope.handle);
+                if scope.kind == ScopeKind::Loop {
+                    first_loop.get_or_insert(scope.handle);
+                    last_loop = Some(scope.handle);
+                }
+            }
+        });
+
+        if !conditional_blocks {
+            return statements;
+        }
+
+        // we need to do this in a second pass because some ::Continue may be turned into ::None
+        // after we've passed over them in the main loop
+        let mut i = 0;
+        while i < statements.len() {
+            let open_index = i;
+            i += 1;
+
+            let next = statements.get(i).cloned();
+            if let Statement::Open(scope_handle, block) = &mut statements[open_index] {
+                if block.condition.is_some() {
+                    continue;
+                }
+
+                let Some(Statement::Statement {
+                    condition,
+                    success,
+                    fail,
+                }) = next
+                else {
+                    continue;
+                };
+
+                let eligible = match (success, fail) {
+                    (FlowAction::Break(scope), FlowAction::None) if scope == *scope_handle => {
+                        Some(true)
+                    }
+                    (FlowAction::None, FlowAction::Break(scope)) if scope == *scope_handle => {
+                        Some(false)
+                    }
+                    _ => None,
+                };
+
+                if let Some(negate) = eligible {
+                    block.condition = Some(BlockCondition { condition, negate });
+                    statements.remove(i);
+                }
+            }
+        }
+
+        statements
+    }
+}
+
+fn mark_used_labels<'a>(
+    statements: &'a [Statement],
+    stack: &mut Vec<(ScopeHandle, &'a StatementBlock)>,
+) -> HandleBitset<ScopeHandle> {
+    let mut bitset = HandleBitset::new();
+    for statement in statements {
+        match statement {
+            Statement::Open(handle, block) => {
+                stack.push((*handle, block));
+            }
+            Statement::Close(_) => _ = stack.pop(),
+            &Statement::Statement { success, fail, .. } => {
+                let &(current_scope, block) = stack.last().unwrap();
+                let force_label = block.kind == ScopeKind::Block;
+                if let FlowAction::Break(handle) | FlowAction::Continue(handle) = success {
+                    if current_scope != handle || force_label {
+                        bitset.insert(handle);
+                    }
+                }
+                if let FlowAction::Break(handle) | FlowAction::Continue(handle) = fail {
+                    if current_scope != handle || force_label {
+                        bitset.insert(handle);
+                    }
+                }
+            }
+        }
+    }
+
+    bitset
+}
+
+#[allow(unused_must_use)]
+fn display_code(
+    buf: &mut dyn Write,
+    statements: &[Statement],
+    graph: &GraphBuilder,
+    file: &ConvertedFile,
+) {
+    fn print_indent(buf: &mut dyn Write, indent: i32) {
+        for _ in 0..indent {
+            write!(buf, "    ");
+        }
+    }
+
+    let mut stack = Vec::new();
+    let used_labels = mark_used_labels(statements, &mut stack);
+
+    let mut indent = 0;
+    let mut i = 0;
+    while i < statements.len() {
+        let current = i;
+        i += 1;
+        match &statements[current] {
+            Statement::Open(handle, block) => {
+                print_indent(buf, indent);
+
+                let print_label = used_labels.contains(*handle);
+                if print_label && !(block.kind == ScopeKind::Block && block.condition.is_some()) {
+                    write!(buf, "'b{handle}: ");
+                }
+
+                match (block.kind, block.condition) {
+                    (ScopeKind::Loop, None) => _ = write!(buf, "loop {{"),
+                    (ScopeKind::Block, None) => _ = write!(buf, "{{"),
+                    (kind, Some(condition)) => {
+                        match kind {
+                            ScopeKind::Loop => _ = write!(buf, "while "),
+                            ScopeKind::Block => _ = write!(buf, "if "),
+                        }
+                        if condition.negate {
+                            write!(buf, "!");
+                        }
+                        graph
+                            .get_node(condition.condition)
+                            .unwrap()
+                            .transition
+                            .display(buf, file);
+
+                        write!(buf, " {{");
+                        if print_label && kind == ScopeKind::Block {
+                            write!(buf, " 'b{handle}: {{");
+                        }
+                    }
+                }
+
+                if let Some(Statement::Close(_)) = statements.get(i) {
+                    writeln!(buf, " }}");
+                    i += 1;
+                } else {
+                    indent += 1;
+                    stack.push((*handle, block));
+                    writeln!(buf);
+                }
+            }
+            &Statement::Statement {
+                condition,
+                success,
+                fail,
+            } => {
+                print_indent(buf, indent);
+                let transition = graph.get_node(condition).unwrap().transition;
+
+                fn print_action(
+                    buf: &mut dyn Write,
+                    action: FlowAction,
+                    prefix: &str,
+                    suffix: &str,
+                    stack: &[(ScopeHandle, &StatementBlock)],
+                ) {
+                    write!(buf, "{prefix}");
+                    match action {
+                        FlowAction::Break(_) => _ = write!(buf, "break"),
+                        FlowAction::Continue(_) => _ = write!(buf, "continue"),
+                        FlowAction::Panic => _ = write!(buf, "panic!()"),
+                        FlowAction::None => {}
+                    }
+                    if let FlowAction::Break(scope) | FlowAction::Continue(scope) = action {
+                        let (current_scope, block) = *stack.last().unwrap();
+                        let force_label = block.kind == ScopeKind::Block;
+                        if current_scope != scope || force_label {
+                            write!(buf, " 'b{scope}");
+                        }
+                    }
+                    writeln!(buf, "{suffix}");
+                }
+
+                if let Transition::CloseSpan(_) | Transition::ReturnFail = transition {
+                    transition.display(buf, file);
+                    writeln!(buf, ";");
+                    continue;
+                }
+
+                match (success, fail) {
+                    (FlowAction::None, FlowAction::None) => {
+                        transition.display(buf, file);
+                        writeln!(buf, ";");
+                    }
+                    (FlowAction::None, other) | (other, FlowAction::None) => {
+                        write!(buf, "if ");
+                        if success == FlowAction::None {
+                            write!(buf, "!");
+                        }
+                        transition.display(buf, file);
+                        writeln!(buf, " {{");
+
+                        print_indent(buf, indent);
+                        print_action(buf, other, "    ", ";", &stack);
+
+                        print_indent(buf, indent);
+                        writeln!(buf, "}}");
+                    }
+                    (success, fail) => {
+                        write!(buf, "match ");
+                        transition.display(buf, file);
+                        writeln!(buf, " {{");
+
+                        print_indent(buf, indent);
+                        print_action(buf, success, "    true => ", ",", &stack);
+                        print_indent(buf, indent);
+                        print_action(buf, fail, "    false => ", ",", &stack);
+
+                        print_indent(buf, indent);
+                        writeln!(buf, "}}");
+                    }
+                }
+            }
+            Statement::Close(_) => {
+                indent -= 1;
+                print_indent(buf, indent);
+
+                let (scope, block) = stack.pop().unwrap();
+                if used_labels.contains(scope)
+                    && block.kind == ScopeKind::Block
+                    && block.condition.is_some()
+                {
+                    write!(buf, "}}");
+                }
+                writeln!(buf, "}}");
+            }
+        }
     }
 }
 
@@ -790,7 +1139,7 @@ fn test_graph() {
     // let src = "
     //     rule A {}
     //     rule B {}
-    //     rule C { <separated_list A B> }
+    //     rule C { A* (B | C) }
     // ";
 
     let parsed = ParsedFile::new(src);
@@ -799,28 +1148,43 @@ fn test_graph() {
 
     let mut offset = 0;
     for (handle, expr) in lowered.rules.iter_kv() {
-        let mut builder = GraphBuilder::new();
+        let mut graph = GraphBuilder::new();
 
-        let result = builder.convert_expr(expr, vec![]);
-        builder.single_transition(result.success, Transition::CloseSpan(handle));
-        builder.single_transition(result.fail, Transition::ReturnFail);
+        let result = graph.convert_expr(expr, vec![]);
+        graph.single_transition(result.success, Transition::CloseSpan(handle));
+        graph.single_transition(result.fail, Transition::ReturnFail);
 
         let mut buf = String::new();
+        let _name = converted.rules[handle].name.as_str();
 
-        // let mut structuring = TapeStructuring::new(&builder);
-        // structuring.build(&builder);
-        // structuring
-        //     .scopes
-        //     .debug_display(&mut buf, &builder, &converted);
+        let mut structure = GraphStructure::new();
 
-        // let name = converted.rules[handle].name.as_str();
-        // _ = writeln!(buf, "rule {}", name);
-        // builder.debug_statements(&mut buf, &converted);
+        {
+            // structure.scope.debug_display(&mut buf, &graph, &converted);
+        }
 
-        _ = writeln!(buf);
-        builder.debug_graphviz(&mut buf, &converted.rules[handle].name, offset, &converted);
+        {
+            _ = write!(buf, "rule {_name} ");
+            let statements = structure.emit_code(true, &graph);
+            display_code(&mut buf, &statements, &graph, &converted);
+
+            // _ = write!(buf, "\n");
+            // structure.scope.debug_display(&mut buf, &graph, &converted);
+
+            // _ = writeln!(buf, "\n{:#?}", structure.scope);
+        }
+
+        {
+            // _ = writeln!(buf, "\nrule {_name}");
+            // graph.debug_statements(&mut buf, &converted);
+        }
+
+        {
+            // _ = writeln!(buf);
+            // builder.debug_graphviz(&mut buf, _name, offset, &converted);
+        }
 
         println!("{buf}");
-        offset += builder.nodes.len();
+        offset += graph.nodes.len();
     }
 }

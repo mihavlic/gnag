@@ -109,6 +109,12 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
             PhantomData,
         )
     }
+    pub fn resize(&mut self, new_len: usize, value: T)
+    where
+        T: Clone,
+    {
+        self.0.resize(new_len, value);
+    }
     pub fn with_capacity(capacity: usize) -> Self {
         HandleVec(Vec::with_capacity(capacity), PhantomData)
     }
@@ -442,6 +448,18 @@ impl<H: TypedHandle> HandleBitset<H> {
         }
 
         replace_impl(&mut self.set, index, false)
+    }
+    pub fn contains(&self, handle: H) -> bool {
+        let index = handle.index();
+        let word = index / std::mem::size_of::<usize>();
+        let bit = index % std::mem::size_of::<usize>();
+
+        if word >= self.set.len() {
+            return false;
+        }
+
+        let one = 1 << bit;
+        return (self.set[word] & one) == one;
     }
 }
 

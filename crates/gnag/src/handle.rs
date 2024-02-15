@@ -410,7 +410,7 @@ impl<H: TypedHandle, T> FromIterator<(H, T)> for SecondaryVec<H, T> {
 }
 
 pub struct HandleBitset<H> {
-    set: Vec<usize>,
+    set: Bitset,
     spooky: PhantomData<H>,
 }
 
@@ -426,21 +426,51 @@ impl<H> Clone for HandleBitset<H> {
 impl<H: TypedHandle> HandleBitset<H> {
     pub fn new() -> HandleBitset<H> {
         Self {
-            set: Vec::new(),
+            set: Bitset::new(),
             spooky: PhantomData,
         }
     }
     pub fn replace(&mut self, handle: H, value: bool) -> bool {
-        replace_impl(&mut self.set, handle.index(), value)
+        self.set.replace(handle.index(), value)
     }
     pub fn set(&mut self, handle: H, value: bool) {
-        replace_impl(&mut self.set, handle.index(), value);
+        self.set.set(handle.index(), value)
     }
     pub fn insert(&mut self, handle: H) -> bool {
-        replace_impl(&mut self.set, handle.index(), true)
+        self.set.insert(handle.index())
     }
     pub fn remove(&mut self, handle: H) -> bool {
-        let index = handle.index();
+        self.set.remove(handle.index())
+    }
+    pub fn contains(&self, handle: H) -> bool {
+        self.set.contains(handle.index())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct Bitset {
+    set: Vec<usize>,
+}
+
+impl Bitset {
+    pub fn new() -> Bitset {
+        Self { set: Vec::new() }
+    }
+    pub fn with_capacity(capacity: usize) -> Bitset {
+        Self {
+            set: Vec::with_capacity(capacity),
+        }
+    }
+    pub fn replace(&mut self, index: usize, value: bool) -> bool {
+        replace_impl(&mut self.set, index, value)
+    }
+    pub fn set(&mut self, index: usize, value: bool) {
+        replace_impl(&mut self.set, index, value);
+    }
+    pub fn insert(&mut self, index: usize) -> bool {
+        replace_impl(&mut self.set, index, true)
+    }
+    pub fn remove(&mut self, index: usize) -> bool {
         let word = index / std::mem::size_of::<usize>();
 
         if word >= self.set.len() {
@@ -449,8 +479,7 @@ impl<H: TypedHandle> HandleBitset<H> {
 
         replace_impl(&mut self.set, index, false)
     }
-    pub fn contains(&self, handle: H) -> bool {
-        let index = handle.index();
+    pub fn contains(&self, index: usize) -> bool {
         let word = index / std::mem::size_of::<usize>();
         let bit = index % std::mem::size_of::<usize>();
 

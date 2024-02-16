@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter, Write};
 
 use gnag::{
-    handle::{Bitset, HandleVec, TypedHandle},
+    handle::{Bitset, HandleBitset, HandleVec, TypedHandle},
     simple_handle,
 };
 
@@ -346,7 +346,7 @@ fn print_dot_edge(
 impl Graph {
     pub fn convert_expr(&mut self, expr: &RuleExpr, incoming: Vec<IncomingEdge>) -> PegEdges {
         match expr {
-            RuleExpr::Empty => PegEdges {
+            RuleExpr::Empty | RuleExpr::Commit => PegEdges {
                 success: incoming,
                 fail: vec![],
             },
@@ -358,21 +358,22 @@ impl Graph {
                 let mut fail = Vec::new();
                 let mut success = incoming;
 
-                let mut commit = false;
-                for rule in vec {
+                let commit = vec
+                    .iter()
+                    .position(|e| matches!(e, RuleExpr::Commit))
+                    .unwrap_or(0);
+
+                for (i, rule) in vec.iter().enumerate() {
                     let incoming = std::mem::take(&mut success);
                     let mut result = self.convert_expr(rule, incoming);
 
-                    let fail_dest = match commit {
+                    let fail_dest = match i > commit {
                         true => &mut success,
                         false => &mut fail,
                     };
 
                     fail_dest.append(&mut result.fail);
                     success.append(&mut result.success);
-
-                    // TODO user-controlled commit
-                    commit = true;
                 }
 
                 PegEdges { success, fail }

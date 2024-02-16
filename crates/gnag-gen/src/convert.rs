@@ -400,6 +400,7 @@ pub enum RuleExpr {
 
     // builtins
     Any,
+    Commit,
     // `Not` only supports tokens, but at this point it may also contain an InlineParameter, we will check this later
     Not(Box<RuleExpr>),
     SeparatedList {
@@ -477,6 +478,7 @@ impl RuleExpr {
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
+            | RuleExpr::Commit
             | RuleExpr::Empty
             | RuleExpr::Error => {}
         }
@@ -507,6 +509,7 @@ impl RuleExpr {
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
+            | RuleExpr::Commit
             | RuleExpr::Empty
             | RuleExpr::Error => {}
         }
@@ -539,6 +542,7 @@ impl RuleExpr {
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
+            | RuleExpr::Commit
             | RuleExpr::Empty
             | RuleExpr::Error => {}
         }
@@ -569,6 +573,7 @@ impl RuleExpr {
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
+            | RuleExpr::Commit
             | RuleExpr::Empty
             | RuleExpr::Error => {}
         }
@@ -704,6 +709,7 @@ fn expression(
 
             match name {
                 "any" => expect_count(0, &|_| RuleExpr::Any),
+                "commit" => expect_count(0, &|_| RuleExpr::Commit),
                 "not" => expect_count(1, &|args| RuleExpr::Not(Box::new(args.pop().unwrap()))),
                 "separated_list" => expect_count(2, &|args| RuleExpr::SeparatedList {
                     separator: Box::new(args.pop().unwrap()),

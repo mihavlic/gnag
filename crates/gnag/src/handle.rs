@@ -430,6 +430,12 @@ impl<H: TypedHandle> HandleBitset<H> {
             spooky: PhantomData,
         }
     }
+    pub fn with_capacity(capacity: usize) -> HandleBitset<H> {
+        Self {
+            set: Bitset::with_capacity(capacity),
+            spooky: PhantomData,
+        }
+    }
     pub fn replace(&mut self, handle: H, value: bool) -> bool {
         self.set.replace(handle.index(), value)
     }

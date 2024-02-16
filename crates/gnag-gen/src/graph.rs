@@ -121,20 +121,43 @@ impl PegEdges {
     }
 }
 
-#[derive(Default)]
+pub struct GraphPoints {
+    pub entry: NodeHandle,
+    pub success: NodeHandle,
+    pub fail: NodeHandle,
+}
+
 pub struct Graph {
     nodes: HandleVec<NodeHandle, PegNode>,
     // TODO spans
     errors: Vec<String>,
+    points: Option<GraphPoints>,
 }
 
 impl Graph {
     pub fn new(handle: RuleHandle, expr: &RuleExpr) -> Graph {
-        let mut graph = Graph::default();
+        let mut graph = Graph {
+            nodes: HandleVec::new(),
+            errors: Vec::new(),
+            points: None,
+        };
 
+        let entry = graph.peek_next_node();
         let result = graph.convert_expr(expr, vec![]);
-        graph.single_transition(result.success, Transition::CloseSpan(handle));
-        graph.single_transition(result.fail, Transition::ReturnFail);
+
+        if graph.get_node(entry).is_some() {
+            let success = graph.peek_next_node();
+            graph.single_transition(result.success, Transition::CloseSpan(handle));
+
+            let fail = graph.peek_next_node();
+            graph.single_transition(result.fail, Transition::ReturnFail);
+
+            graph.points = Some(GraphPoints {
+                entry,
+                success,
+                fail,
+            });
+        }
 
         graph
     }
@@ -258,30 +281,51 @@ impl Graph {
         }
     }
     pub fn analyze_reachability(&self) -> Reachability {
-        let mut need_label = Reachability::with_capacity(self.nodes.len());
+        let mut reachability = Reachability::with_capacity(self.nodes.len());
 
         if self.nodes.is_empty() {
-            return need_label;
+            return reachability;
         }
 
-        need_label.set_is_reachable(0.into());
+        reachability.set_is_reachable(0.into());
 
         for (current, node) in self.nodes.iter_kv() {
             let next = current.next();
             node.for_edges(|jump| {
                 if next != jump {
-                    need_label.set_is_target(jump);
+                    reachability.set_is_target(jump);
                 }
-                if need_label.is_reachable(current) {
-                    need_label.set_is_reachable(jump);
+                if reachability.is_reachable(current) {
+                    reachability.set_is_reachable(jump);
                 }
             });
         }
-        need_label
+        reachability
     }
-    pub fn analyze_state_changes(&self) -> Reachability {
-        todo!()
-    }
+    // /// returns a bitset of
+    // pub fn analyze_state_changes(&self) -> HandleBitset<NodeHandle> {
+    //     let mut is_empty = HandleBitset::with_capacity(self.nodes.len());
+
+    //     if self.nodes.is_empty() {
+    //         return is_empty;
+    //     }
+
+    //     let mut checkpoints = H
+    //     is_empty.set_is_reachable(0.into());
+
+    //     for (current, node) in self.nodes.iter_kv() {
+    //         let next = current.next();
+    //         node.for_edges(|jump| {
+    //             if next != jump {
+    //                 is_empty.set_is_target(jump);
+    //             }
+    //             if is_empty.is_reachable(current) {
+    //                 is_empty.set_is_reachable(jump);
+    //             }
+    //         });
+    //     }
+    //     is_empty
+    // }
 }
 
 pub struct Reachability {

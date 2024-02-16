@@ -418,6 +418,13 @@ pub fn display_code(
                         print_indent(buf, indent);
                         writeln!(buf, "}}");
                     }
+                    (success, fail) if success == fail => {
+                        transition.display(buf, file);
+                        writeln!(buf, ";");
+
+                        print_indent(buf, indent);
+                        print_action(buf, success, "", ";", &stack);
+                    }
                     (success, fail) => {
                         write!(buf, "match ");
                         transition.display(buf, file);

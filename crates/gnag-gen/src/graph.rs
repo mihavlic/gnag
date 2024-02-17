@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter, Write};
 
 use gnag::{
-    handle::{Bitset, HandleBitset, HandleVec, TypedHandle},
+    handle::{Bitset, HandleVec, TypedHandle},
     simple_handle,
 };
 

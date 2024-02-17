@@ -1,4 +1,10 @@
-rule PostExpr {
-    Expr '?' |
-    Expr '+'
-}
+rule A {}
+rule B {}
+rule C {}
+rule D {}
+rule E {}
+rule F {}
+rule G {}
+rule H {}
+rule I {}
+rule J { (A B C <commit>) | (D E F) }

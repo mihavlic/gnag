@@ -265,6 +265,9 @@ impl GraphStructuring {
 
         statements
     }
+    pub fn debug_scopes(&self, buf: &mut dyn Write, graph: &Graph, file: &ConvertedFile) {
+        self.tree.debug_display(buf, graph, file);
+    }
 }
 
 pub(crate) fn mark_used_labels<'a>(
@@ -454,59 +457,5 @@ pub fn display_code(
                 writeln!(buf, "}}");
             }
         }
-    }
-}
-
-#[test]
-fn test_graph() {
-    use crate::lower::LoweredFile;
-    use gnag::ast::ParsedFile;
-
-    let src = include_str!("../../../grammar.gng");
-    // let src = "
-    //     rule A {}
-    //     rule B {}
-    //     rule C { A* (B | C) }
-    // ";
-
-    let parsed = ParsedFile::new(src);
-    let converted = ConvertedFile::new(src, &parsed);
-    let lowered = LoweredFile::new(src, &converted);
-
-    let mut _offset = 0;
-    for (handle, expr) in lowered.rules.iter_kv() {
-        let mut buf = String::new();
-        let _name = converted.rules[handle].name.as_str();
-
-        let graph = Graph::new(handle, expr);
-        let structure = GraphStructuring::new(&graph);
-
-        {
-            // structure.scope.debug_display(&mut buf, &graph, &converted);
-        }
-
-        {
-            _ = write!(buf, "rule {_name} ");
-            let statements = structure.emit_code(true, &graph);
-            display_code(&mut buf, &statements, &graph, &converted);
-
-            // _ = write!(buf, "\n");
-            // structure.scope.debug_display(&mut buf, &graph, &converted);
-
-            // _ = writeln!(buf, "\n{:#?}", structure.scope);
-        }
-
-        {
-            // _ = writeln!(buf, "\nrule {_name}");
-            // graph.debug_statements(&mut buf, &converted);
-        }
-
-        {
-            // _ = writeln!(buf);
-            // builder.debug_graphviz(&mut buf, _name, offset, &converted);
-        }
-
-        println!("{buf}");
-        _offset += graph.get_nodes().len();
     }
 }

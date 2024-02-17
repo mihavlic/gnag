@@ -41,7 +41,7 @@ impl Transition {
 }
 
 simple_handle! {
-    pub NodeHandle
+    pub NodeHandle, pub NodePeekHandle
 }
 
 impl NodeHandle {
@@ -82,7 +82,7 @@ impl PegNode {
             fail: None,
         }
     }
-    fn connect_edge(&mut self, is_fail: bool, to: NodeHandle) {
+    fn add_outgoing_edge(&mut self, to: NodeHandle, is_fail: bool) {
         if is_fail {
             assert!(self.fail.is_none());
             self.fail = Some(to);
@@ -107,12 +107,13 @@ pub struct IncomingEdge {
     pub is_fail: bool,
 }
 
-pub struct PegEdges {
+pub struct PegResult {
+    pub entry: Option<NodeHandle>,
     pub success: Vec<IncomingEdge>,
     pub fail: Vec<IncomingEdge>,
 }
 
-impl PegEdges {
+impl PegResult {
     pub fn merged_edges(&self) -> Vec<IncomingEdge> {
         let mut vec = Vec::with_capacity(self.success.len() + self.fail.len());
         vec.extend_from_slice(&self.fail);
@@ -142,32 +143,39 @@ impl Graph {
             points: None,
         };
 
-        let entry = graph.peek_next_node();
         let result = graph.convert_expr(expr, vec![]);
 
-        if graph.get_node(entry).is_some() {
-            let success = graph.peek_next_node();
-            graph.single_transition(result.success, Transition::CloseSpan(handle));
-
-            let fail = graph.peek_next_node();
-            graph.single_transition(result.fail, Transition::ReturnFail);
+        if let Some(entry) = result.entry {
+            let success = graph.single_transition(result.success, Transition::CloseSpan(handle));
+            let fail = graph.single_transition(result.fail, Transition::ReturnFail);
 
             graph.points = Some(GraphPoints {
                 entry,
-                success,
-                fail,
+                success: success.entry.unwrap(),
+                fail: fail.entry.unwrap(),
             });
         }
 
         graph
     }
-    fn connect_edges(
+    fn connect_forward_edges(
         &mut self,
         node: NodeHandle,
         incoming: impl IntoIterator<Item = IncomingEdge>,
     ) {
         for edge in incoming {
-            self.nodes[edge.from].connect_edge(edge.is_fail, node);
+            assert!(edge.from < node);
+            self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
+        }
+    }
+    fn connect_backward_edges(
+        &mut self,
+        node: NodeHandle,
+        incoming: impl IntoIterator<Item = IncomingEdge>,
+    ) {
+        for edge in incoming {
+            assert!(edge.from >= node);
+            self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
         }
     }
     fn new_node(
@@ -176,17 +184,204 @@ impl Graph {
         incoming: impl IntoIterator<Item = IncomingEdge>,
     ) -> NodeHandle {
         let handle = self.nodes.push(PegNode::new(transition));
-        self.connect_edges(handle, incoming);
+        self.connect_forward_edges(handle, incoming);
         handle
     }
-    fn peek_next_node(&self) -> NodeHandle {
-        self.nodes.next_handle()
+    fn peek_next_node(&self) -> NodePeekHandle {
+        NodePeekHandle::new(self.nodes.next_handle().index())
+    }
+    fn verify_peek(&mut self, peek: NodePeekHandle) -> Option<NodeHandle> {
+        let next = NodeHandle(peek.0);
+        self.get_node(next).is_some().then_some(next)
     }
     pub fn get_node(&self, node: NodeHandle) -> Option<&PegNode> {
         self.nodes.get(node)
     }
     pub fn get_nodes(&self) -> &HandleVec<NodeHandle, PegNode> {
         &self.nodes
+    }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+    pub fn convert_expr_nonempty(
+        &mut self,
+        expr: &RuleExpr,
+        incoming: Vec<IncomingEdge>,
+        error: &str,
+    ) -> PegResult {
+        let mut result = self.convert_expr(expr, incoming);
+        if result.entry.is_none() {
+            self.errors.push(error.to_owned());
+            result = self.error_transition(result.merged_edges());
+        };
+        result
+    }
+    pub fn convert_expr(&mut self, expr: &RuleExpr, incoming: Vec<IncomingEdge>) -> PegResult {
+        match expr {
+            RuleExpr::Empty | RuleExpr::Commit => PegResult {
+                entry: None,
+                success: incoming,
+                fail: vec![],
+            },
+            // some error that has already been reported, pass it along in a dummy state transition
+            RuleExpr::Error => self.error_transition(incoming),
+            RuleExpr::Token(token) => self.single_transition(incoming, Transition::Token(*token)),
+            RuleExpr::Rule(rule) => self.single_transition(incoming, Transition::Rule(*rule)),
+            RuleExpr::Sequence(vec) => {
+                let mut fail = Vec::new();
+                let mut success = incoming;
+
+                let commit = vec
+                    .iter()
+                    .position(|e| matches!(e, RuleExpr::Commit))
+                    .unwrap_or(0);
+
+                let peek = self.peek_next_node();
+
+                for (i, rule) in vec.iter().enumerate() {
+                    let incoming = std::mem::take(&mut success);
+                    let mut result = self.convert_expr(rule, incoming);
+
+                    let fail_dest = match i > commit {
+                        true => &mut success,
+                        false => &mut fail,
+                    };
+
+                    fail_dest.append(&mut result.fail);
+                    success.append(&mut result.success);
+                }
+
+                PegResult {
+                    entry: self.verify_peek(peek),
+                    success,
+                    fail,
+                }
+            }
+            RuleExpr::Choice(vec) => {
+                let mut fail = incoming;
+                let mut success = Vec::new();
+
+                let peek = self.peek_next_node();
+
+                for rule in vec {
+                    let incoming = std::mem::take(&mut fail);
+                    let mut result = self.convert_expr(rule, incoming);
+
+                    fail = result.fail;
+                    success.append(&mut result.success);
+                }
+
+                PegResult {
+                    entry: self.verify_peek(peek),
+                    success,
+                    fail,
+                }
+            }
+            RuleExpr::Loop(expr) => {
+                // Loop('a')
+                //
+                //    ┌─►* root
+                // 'a'└──┤
+                //       │ fail
+                //       ▼
+                //       * done
+
+                let result = self.convert_expr_nonempty(
+                    expr,
+                    incoming,
+                    "Looped expressions cannot be empty",
+                );
+
+                // connect the looping edges to the start
+                self.connect_backward_edges(result.entry.unwrap(), result.success);
+
+                PegResult {
+                    entry: result.entry,
+                    success: result.fail,
+                    fail: vec![],
+                }
+            }
+            RuleExpr::OneOrMore(expr) => {
+                let lowered =
+                    RuleExpr::Sequence(vec![(**expr).clone(), RuleExpr::Loop(expr.clone())]);
+                self.convert_expr(&lowered, incoming)
+            }
+            RuleExpr::Maybe(expr) => {
+                let result = self.convert_expr(expr, incoming);
+                PegResult {
+                    entry: result.entry,
+                    success: result.merged_edges(),
+                    fail: vec![],
+                }
+            }
+            RuleExpr::Any => self.single_transition(incoming, Transition::Any),
+            RuleExpr::Not(expr) => {
+                if let RuleExpr::Token(token) = **expr {
+                    self.single_transition(incoming, Transition::Not(token))
+                } else {
+                    self.errors
+                        .push("RuleExpr::Not only works with tokens".to_owned());
+                    self.error_transition(incoming)
+                }
+            }
+            RuleExpr::SeparatedList { element, separator } => {
+                // SeparatedList('a', ',')
+                //
+                //      start
+                //   ┌─►*──┐
+                //  ,│  │a │
+                //   │  ▼  │
+                //   └──*  │fail
+                // fail │  │
+                //      ▼  │
+                // done *◄─┘
+
+                let element = self.convert_expr_nonempty(
+                    element,
+                    incoming,
+                    "Element expression cannot be empty",
+                );
+
+                let mut separator = self.convert_expr_nonempty(
+                    separator,
+                    element.success,
+                    "Separator expression cannot be empty",
+                );
+
+                let mut fail = element.fail;
+                fail.append(&mut separator.fail);
+
+                PegResult {
+                    entry: element.entry,
+                    success: fail,
+                    fail: vec![],
+                }
+            }
+            RuleExpr::InlineParameter(_) | RuleExpr::InlineCall(_) => {
+                unreachable!("These should have been eliminated during lowering")
+            }
+        }
+    }
+    fn error_transition(&mut self, incoming: Vec<IncomingEdge>) -> PegResult {
+        self.single_transition(incoming, Transition::Error)
+    }
+    fn single_transition(
+        &mut self,
+        incoming: Vec<IncomingEdge>,
+        transition: Transition,
+    ) -> PegResult {
+        let node = self.new_node(transition, incoming);
+        PegResult {
+            entry: Some(node),
+            success: vec![IncomingEdge {
+                from: node,
+                is_fail: false,
+            }],
+            fail: vec![IncomingEdge {
+                from: node,
+                is_fail: true,
+            }],
+        }
     }
     #[allow(unused_must_use)]
     pub fn debug_graphviz(
@@ -385,155 +580,4 @@ fn print_dot_edge(
         write!(buf, ",{style}");
     }
     write!(buf, "]\n");
-}
-
-impl Graph {
-    pub fn convert_expr(&mut self, expr: &RuleExpr, incoming: Vec<IncomingEdge>) -> PegEdges {
-        match expr {
-            RuleExpr::Empty | RuleExpr::Commit => PegEdges {
-                success: incoming,
-                fail: vec![],
-            },
-            // some error that has already been reported, pass it along in a dummy state transition
-            RuleExpr::Error => self.error_transition(incoming),
-            RuleExpr::Token(token) => self.single_transition(incoming, Transition::Token(*token)),
-            RuleExpr::Rule(rule) => self.single_transition(incoming, Transition::Rule(*rule)),
-            RuleExpr::Sequence(vec) => {
-                let mut fail = Vec::new();
-                let mut success = incoming;
-
-                let commit = vec
-                    .iter()
-                    .position(|e| matches!(e, RuleExpr::Commit))
-                    .unwrap_or(0);
-
-                for (i, rule) in vec.iter().enumerate() {
-                    let incoming = std::mem::take(&mut success);
-                    let mut result = self.convert_expr(rule, incoming);
-
-                    let fail_dest = match i > commit {
-                        true => &mut success,
-                        false => &mut fail,
-                    };
-
-                    fail_dest.append(&mut result.fail);
-                    success.append(&mut result.success);
-                }
-
-                PegEdges { success, fail }
-            }
-            RuleExpr::Choice(vec) => {
-                let mut fail = incoming;
-                let mut success = Vec::new();
-
-                for rule in vec {
-                    let incoming = std::mem::take(&mut fail);
-                    let mut result = self.convert_expr(rule, incoming);
-
-                    fail = result.fail;
-                    success.append(&mut result.success);
-                }
-
-                PegEdges { success, fail }
-            }
-            RuleExpr::Loop(expr) => {
-                // Loop('a')
-                //
-                //    ┌─►* root
-                // 'a'└──┤
-                //       │ fail
-                //       ▼
-                //       * done
-
-                let next = self.peek_next_node();
-                let mut result = self.convert_expr(expr, incoming);
-                self.verify_next_node_exists(next, &mut result);
-
-                // connect the looping edges to the start
-                self.connect_edges(next, result.success);
-
-                PegEdges {
-                    success: result.fail,
-                    fail: vec![],
-                }
-            }
-            RuleExpr::OneOrMore(expr) => {
-                let lowered =
-                    RuleExpr::Sequence(vec![(**expr).clone(), RuleExpr::Loop(expr.clone())]);
-                self.convert_expr(&lowered, incoming)
-            }
-            RuleExpr::Maybe(expr) => {
-                let result = self.convert_expr(expr, incoming);
-                PegEdges {
-                    success: result.merged_edges(),
-                    fail: vec![],
-                }
-            }
-            RuleExpr::Any => self.single_transition(incoming, Transition::Any),
-            RuleExpr::Not(expr) => {
-                if let RuleExpr::Token(token) = **expr {
-                    self.single_transition(incoming, Transition::Not(token))
-                } else {
-                    self.errors
-                        .push("RuleExpr::Not only works with tokens".to_owned());
-                    self.error_transition(incoming)
-                }
-            }
-            RuleExpr::SeparatedList { element, separator } => {
-                // SeparatedList('a', ',')
-                //      start
-                //   ┌─►*──┐
-                //  ,│  │a │
-                //   │  ▼  │
-                //   └──*  │fail
-                // fail │  │
-                //      ▼  │
-                // done *◄─┘
-
-                let next = self.peek_next_node();
-                let mut element = self.convert_expr(element, incoming);
-                self.verify_next_node_exists(next, &mut element);
-
-                let mut separator = self.convert_expr(separator, element.success);
-                self.connect_edges(next, separator.success);
-
-                let mut fail = element.fail;
-                fail.append(&mut separator.fail);
-
-                PegEdges {
-                    success: fail,
-                    fail: vec![],
-                }
-            }
-            RuleExpr::InlineParameter(_) | RuleExpr::InlineCall(_) => {
-                unreachable!("These should have been eliminated during lowering")
-            }
-        }
-    }
-    fn verify_next_node_exists(&mut self, next: NodeHandle, result: &mut PegEdges) {
-        if self.get_node(next).is_none() {
-            self.errors.push("Loop body generated no nodes".to_owned());
-            *result = self.error_transition(result.merged_edges());
-        }
-    }
-    fn error_transition(&mut self, incoming: Vec<IncomingEdge>) -> PegEdges {
-        self.single_transition(incoming, Transition::Error)
-    }
-    fn single_transition(
-        &mut self,
-        incoming: Vec<IncomingEdge>,
-        transition: Transition,
-    ) -> PegEdges {
-        let node = self.new_node(transition, incoming);
-        PegEdges {
-            success: vec![IncomingEdge {
-                from: node,
-                is_fail: false,
-            }],
-            fail: vec![IncomingEdge {
-                from: node,
-                is_fail: true,
-            }],
-        }
-    }
 }

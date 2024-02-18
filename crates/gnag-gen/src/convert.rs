@@ -17,6 +17,24 @@ gnag::simple_handle! {
     pub AstItemHandle
 }
 
+impl TokenHandle {
+    pub fn name(self, file: &ConvertedFile) -> &str {
+        file.tokens[self].name.as_str()
+    }
+}
+
+impl RuleHandle {
+    pub fn name(self, file: &ConvertedFile) -> &str {
+        file.rules[self].name.as_str()
+    }
+}
+
+impl InlineHandle {
+    pub fn name(self, file: &ConvertedFile) -> &str {
+        file.inlines[self].body.name.as_str()
+    }
+}
+
 pub enum AstItem {
     Token(ast::TokenRule, Option<TokenHandle>),
     Rule(ast::SynRule, Option<RuleHandle>),
@@ -579,6 +597,62 @@ impl RuleExpr {
         }
         fun(self);
     }
+    pub fn display(&self, buf: &mut dyn std::fmt::Write, file: &ConvertedFile) {
+        self.display_with_indent(buf, 0, file);
+    }
+    #[allow(unused_must_use)]
+    pub fn display_with_indent(
+        &self,
+        buf: &mut dyn std::fmt::Write,
+        indent: u32,
+        file: &ConvertedFile,
+    ) {
+        for _ in 0..indent {
+            write!(buf, "  ");
+        }
+        let display_slice = |buf: &mut dyn std::fmt::Write, name: &str, exprs: &[RuleExpr]| {
+            writeln!(buf, "{name}");
+            for expr in exprs {
+                expr.display_with_indent(buf, indent + 1, file);
+            }
+            Ok(())
+        };
+        let display_nested = |buf: &mut dyn std::fmt::Write, name: &str, expr: &RuleExpr| {
+            writeln!(buf, "{name}");
+            expr.display_with_indent(buf, indent + 1, file);
+            Ok(())
+        };
+
+        match self {
+            RuleExpr::Empty => writeln!(buf, "Empty"),
+            RuleExpr::Error => writeln!(buf, "Error"),
+            RuleExpr::Token(a) => writeln!(buf, "Token({})", a.name(file)),
+            RuleExpr::Rule(a) => writeln!(buf, "Rule({})", a.name(file)),
+            RuleExpr::Sequence(a) => display_slice(buf, "Sequence", a),
+            RuleExpr::Choice(a) => display_slice(buf, "Choice", a),
+            RuleExpr::Loop(a) => display_nested(buf, "Loop", a),
+            RuleExpr::OneOrMore(a) => display_nested(buf, "OneOrMore", a),
+            RuleExpr::Maybe(a) => display_nested(buf, "Maybe", a),
+            RuleExpr::InlineParameter(a) => writeln!(buf, "InlineParameter({a})"),
+            RuleExpr::InlineCall(a) => {
+                write!(buf, "InlineCall {}", a.template.name(file));
+                display_slice(buf, "", &a.parameters)
+            }
+            RuleExpr::Any => writeln!(buf, "Any"),
+            RuleExpr::Commit => writeln!(buf, "Commit"),
+            RuleExpr::Not(a) => display_nested(buf, "Not", a),
+            RuleExpr::SeparatedList { element, separator } => {
+                writeln!(buf, "SeparatedList");
+                element.display_with_indent(buf, indent + 1, file);
+                for _ in 0..=indent {
+                    write!(buf, "  ");
+                }
+                writeln!(buf, "---");
+                separator.display_with_indent(buf, indent + 1, file);
+                Ok(())
+            }
+        };
+    }
     // /// Visits all leaf nodes which may be visited by the grammar while no tokens have been consumed.
     // pub fn visit_prefix_leaves(&self, mut fun: impl FnMut(&RuleExpr) -> bool) {
     //     self.visit_prefix_leaves_(&mut fun);
@@ -749,9 +823,12 @@ fn expression(
             binary_expression(cx, expr, parameters, tokens, name_to_item, &mut vec);
             RuleExpr::Choice(vec)
         }
-        ast::Expression::SeqExpr(_) => {
-            let mut vec = Vec::new();
-            seq_expression(cx, expr, parameters, tokens, name_to_item, &mut vec);
+        ast::Expression::SeqExpr(seq) => {
+            let vec = seq
+                .exprs
+                .iter()
+                .map(|e| expression(cx, e, parameters, tokens, name_to_item))
+                .collect();
             RuleExpr::Sequence(vec)
         }
     }
@@ -766,35 +843,9 @@ fn binary_expression(
     vec: &mut Vec<RuleExpr>,
 ) {
     match expr {
-        ast::Expression::Paren(a) => {
-            binary_expression(cx, &a.expr, parameters, tokens, name_to_item, vec);
-        }
         ast::Expression::BinExpr(a) => {
             binary_expression(cx, &a.left, parameters, tokens, name_to_item, vec);
             binary_expression(cx, &a.right, parameters, tokens, name_to_item, vec);
-        }
-        _ => {
-            vec.push(expression(cx, expr, parameters, tokens, name_to_item));
-        }
-    }
-}
-
-fn seq_expression(
-    cx: &ConvertCtx,
-    expr: &ast::Expression,
-    parameters: &[String],
-    tokens: &HandleVec<TokenHandle, TokenDef>,
-    name_to_item: &HashMap<String, ItemKind>,
-    vec: &mut Vec<RuleExpr>,
-) {
-    match expr {
-        ast::Expression::Paren(a) => {
-            seq_expression(cx, &a.expr, parameters, tokens, name_to_item, vec);
-        }
-        ast::Expression::SeqExpr(a) => {
-            for expr in &a.exprs {
-                seq_expression(cx, expr, parameters, tokens, name_to_item, vec);
-            }
         }
         _ => {
             vec.push(expression(cx, expr, parameters, tokens, name_to_item));

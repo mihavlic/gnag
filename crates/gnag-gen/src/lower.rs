@@ -1,4 +1,7 @@
-use std::borrow::Borrow;
+use std::{
+    borrow::Borrow,
+    fmt::{Debug, Display},
+};
 
 use crate::convert::{
     AstItem, CallExpr, ConvertedFile, InlineHandle, RuleExpr, RuleHandle, TokenDef, TokenHandle,
@@ -16,6 +19,17 @@ pub enum LoweredTokenPattern {
     RustCode(String),
     Literal(Vec<u8>),
     Error,
+}
+
+impl Display for LoweredTokenPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Regex(a) => write!(f, "Regex({a})"),
+            Self::RustCode(a) => write!(f, "Regex({a:?})"),
+            Self::Literal(a) => write!(f, "Regex({:?})", String::from_utf8_lossy(a)),
+            Self::Error => write!(f, "Error"),
+        }
+    }
 }
 
 pub struct LoweringCtx<'a, 'b> {

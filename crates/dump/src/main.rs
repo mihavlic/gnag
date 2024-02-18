@@ -1,4 +1,8 @@
-use std::{env::args, fmt::Write, path::PathBuf};
+use std::{
+    env::args,
+    fmt::Write,
+    path::{Path, PathBuf},
+};
 
 use gnag::{ast::ParsedFile, SpannedError};
 use gnag_gen::{
@@ -9,58 +13,72 @@ use gnag_gen::{
 };
 use linemap::{LineMap, Utf16Pos};
 
-#[allow(unused_must_use)]
+trait IoError<T> {
+    fn pretty_error(self, path: &Path, message: &str) -> Result<T, ()>;
+}
+
+impl<T> IoError<T> for std::io::Result<T> {
+    fn pretty_error(self, path: &Path, message: &str) -> Result<T, ()> {
+        self.map_err(|e| {
+            let path = path.display();
+            eprintln!("{message} `{path}`\n  {e}");
+        })
+    }
+}
+
 fn main() {
+    if run().is_err() {
+        std::process::exit(1);
+    }
+}
+
+#[allow(unused_must_use)]
+fn run() -> Result<(), ()> {
     let mut args = args().skip(1).collect::<Vec<_>>();
 
+    let mut do_converted = false;
+    let mut do_lowered = false;
     let mut do_dot = false;
     let mut do_statements = false;
     let mut do_scopes = false;
     let mut do_code = false;
 
+    let mut none_enabled = true;
     args.retain(|arg| {
         match arg.as_str() {
+            "--converted" => do_converted = true,
+            "--lowered" => do_lowered = true,
             "--dot" => do_dot = true,
             "--statements" => do_statements = true,
             "--scopes" => do_scopes = true,
             "--code" => do_code = true,
             _ => return true,
         }
+        none_enabled = false;
         false
     });
-
-    if !(do_dot || do_statements || do_scopes || do_code) {
-        do_dot = true;
-        do_statements = true;
-        do_scopes = true;
-        do_code = true;
-    }
 
     match args.len() {
         0 => {
             eprintln!("No file provided");
-            std::process::exit(1);
+            return Err(());
         }
         1 => {}
         _ => {
             eprintln!("Only one file may be provided");
-            std::process::exit(1);
+            return Err(());
         }
     }
 
     let path: PathBuf = args.pop().unwrap().into();
-    let canonic = path.canonicalize().unwrap();
+    let canonic = path
+        .canonicalize()
+        .pretty_error(&path, "Failed to canonicalize")?;
 
     let current_dir = std::env::current_dir().unwrap();
     let file = canonic.strip_prefix(current_dir).unwrap();
 
-    let src = match std::fs::read_to_string(&path) {
-        Ok(ok) => ok,
-        Err(e) => {
-            eprintln!("Failed to read `{}`\n  {e}", path.display());
-            std::process::exit(1);
-        }
-    };
+    let src = std::fs::read_to_string(&path).pretty_error(&path, "Failed to read")?;
 
     let linemap = LineMap::new(&src);
     let report = |errors: &[SpannedError]| {
@@ -91,7 +109,34 @@ fn main() {
 
     let mut buf = String::new();
 
-    if do_dot {
+    if do_converted || none_enabled {
+        for (handle, token) in converted.tokens.iter_kv() {
+            writeln!(
+                buf,
+                "token {}: {:#?}",
+                handle.name(&converted),
+                token.pattern
+            );
+        }
+        for (handle, rule) in converted.rules.iter_kv() {
+            writeln!(buf, "\nrule {}:", handle.name(&converted),);
+            rule.expr.display_with_indent(&mut buf, 1, &converted);
+        }
+        writeln!(buf);
+    }
+
+    if do_lowered || none_enabled {
+        for (handle, token) in lowered.tokens.iter_kv() {
+            writeln!(buf, "token {}: {token}", handle.name(&converted));
+        }
+        for (handle, rule) in lowered.rules.iter_kv() {
+            writeln!(buf, "\nrule {}:", handle.name(&converted));
+            rule.display_with_indent(&mut buf, 1, &converted);
+        }
+        writeln!(buf);
+    }
+
+    if do_dot || none_enabled {
         let mut offset = 0;
         writeln!(buf, "digraph G {{");
         for (name, graph, _) in &finalish {
@@ -103,7 +148,7 @@ fn main() {
         writeln!(buf, "}}\n");
     }
 
-    if do_statements {
+    if do_statements || none_enabled {
         for (name, graph, _) in &finalish {
             writeln!(buf, "rule {name}");
             graph.debug_statements(&mut buf, &converted);
@@ -112,7 +157,7 @@ fn main() {
         }
     }
 
-    if do_scopes {
+    if do_scopes || none_enabled {
         for (_, graph, structure) in &finalish {
             structure.debug_scopes(&mut buf, &graph, &converted);
 
@@ -120,7 +165,7 @@ fn main() {
         }
     }
 
-    if do_code {
+    if do_code || none_enabled {
         for (name, graph, structure) in &finalish {
             write!(buf, "rule {name} ");
             let statements = structure.emit_code(true, &graph);
@@ -131,4 +176,5 @@ fn main() {
     }
 
     print!("{buf}");
+    Ok(())
 }

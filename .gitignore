@@ -2,3 +2,4 @@
 /Cargo.lock
 /addons/vscode/out/
 node_modules/
+/test.gng

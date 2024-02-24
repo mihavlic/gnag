@@ -2,8 +2,8 @@ use crate::convert::ConvertedFile;
 use crate::graph::Graph;
 use crate::graph::NodeHandle;
 use crate::graph::PegNode;
-use crate::graph::Reachability;
 use crate::graph::Transition;
+use crate::graph::TransitionEffects;
 use crate::scope_tree::ScopeHandle;
 use crate::scope_tree::ScopeKind;
 use crate::scope_tree::ScopeNode;
@@ -63,7 +63,6 @@ pub enum Statement {
 pub struct GraphStructuring {
     tree: ScopeNode,
     jump_table: HandleVec<NodeHandle, StatementJumps>,
-    reachability: Reachability,
 }
 
 impl GraphStructuring {
@@ -100,7 +99,6 @@ impl GraphStructuring {
             })
         }
 
-        let reachability = graph.analyze_reachability();
         let nodes = graph.get_nodes();
 
         let mut counter = HandleCounter::new();
@@ -108,33 +106,25 @@ impl GraphStructuring {
         let mut jump_table = nodes.map_fill(StatementJumps::default());
 
         for node in nodes.iter_kv().rev() {
-            if reachability.is_reachable(node.0) {
-                for_back_edges(node, |from, to| {
-                    jump_table[to].back_edge.get_or_insert_with(|| {
-                        tree.add_scope(&mut counter, to, from.next(), ScopeKind::Loop)
-                    });
+            for_back_edges(node, |from, to| {
+                jump_table[to].back_edge.get_or_insert_with(|| {
+                    tree.add_scope(&mut counter, to, from.next(), ScopeKind::Loop)
                 });
-            }
+            });
         }
 
         for node in nodes.iter_kv() {
-            if reachability.is_reachable(node.0) {
-                for_forward_jumps(node, |from, to| {
-                    jump_table[to].jump_forward.get_or_insert_with(|| {
-                        tree.add_scope(&mut counter, from, to, ScopeKind::Block)
-                    });
+            for_forward_jumps(node, |from, to| {
+                jump_table[to].jump_forward.get_or_insert_with(|| {
+                    tree.add_scope(&mut counter, from, to, ScopeKind::Block)
                 });
-            }
+            });
         }
 
         #[cfg(debug_assertions)]
         tree.validate(true);
 
-        Self {
-            tree,
-            jump_table,
-            reachability,
-        }
+        Self { tree, jump_table }
     }
     pub(crate) fn translate_jump(&self, jump: Option<NodeHandle>, next: NodeHandle) -> FlowAction {
         if let Some(to) = jump {
@@ -148,7 +138,7 @@ impl GraphStructuring {
             FlowAction::Panic
         }
     }
-    pub fn emit_code(&self, conditional_blocks: bool, graph: &Graph) -> Vec<Statement> {
+    pub fn emit_code(&self, create_while: bool, create_if: bool, graph: &Graph) -> Vec<Statement> {
         let mut statements = Vec::new();
 
         let mut last_statement = None;
@@ -161,10 +151,6 @@ impl GraphStructuring {
                 statements.push(Statement::Open(scope.handle, scope.kind.into()));
             }
             ScopeVisit::Statement(handle) => {
-                if !self.reachability.is_reachable(handle) {
-                    return;
-                }
-
                 let node = graph.get_node(handle).unwrap();
                 let next = handle.next();
 
@@ -220,7 +206,7 @@ impl GraphStructuring {
             }
         });
 
-        if !conditional_blocks {
+        if !create_while && !create_if {
             return statements;
         }
 
@@ -235,6 +221,12 @@ impl GraphStructuring {
             if let Statement::Open(scope_handle, block) = &mut statements[open_index] {
                 if block.condition.is_some() {
                     continue;
+                }
+
+                match block.kind {
+                    ScopeKind::Loop if !create_while => continue,
+                    ScopeKind::Block if !create_if => continue,
+                    _ => {}
                 }
 
                 let Some(Statement::Statement {
@@ -367,10 +359,11 @@ pub fn display_code(
             &Statement::Statement {
                 condition,
                 success,
-                fail,
+                mut fail,
             } => {
                 print_indent(buf, indent);
                 let transition = graph.get_node(condition).unwrap().transition;
+                let effects = transition.effects();
 
                 fn print_action(
                     buf: &mut dyn Write,
@@ -400,6 +393,12 @@ pub fn display_code(
                     transition.display(buf, file);
                     writeln!(buf, ";");
                     continue;
+                }
+
+                if effects == TransitionEffects::Infallible {
+                    // we set the fail branch to the same action to achieve the needed formatting
+                    assert!(fail == FlowAction::Panic);
+                    fail = success;
                 }
 
                 match (success, fail) {

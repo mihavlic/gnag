@@ -1,6 +1,5 @@
 use std::{
     env::args,
-    fmt::Write,
     path::{Path, PathBuf},
 };
 
@@ -29,6 +28,17 @@ impl<T> IoError<T> for std::io::Result<T> {
 fn main() {
     if run().is_err() {
         std::process::exit(1);
+    }
+}
+
+struct StdoutSink;
+
+impl std::fmt::Write for StdoutSink {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        use std::io::Write as _;
+        std::io::stdout()
+            .write_all(s.as_bytes())
+            .map_err(|_| std::fmt::Error)
     }
 }
 
@@ -96,85 +106,73 @@ fn run() -> Result<(), ()> {
     let lowered = LoweredFile::new(&src, &converted);
     report(&lowered.errors);
 
-    let finalish = lowered
-        .rules
-        .iter_kv()
-        .map(|(handle, expr)| {
-            let name = converted.rules[handle].name.as_str();
-            let graph = Graph::new(handle, expr);
-            let structure = GraphStructuring::new(&graph);
-            (name, graph, structure)
-        })
-        .collect::<Vec<_>>();
-
-    let mut buf = String::new();
-
     if do_converted || none_enabled {
         for (handle, token) in converted.tokens.iter_kv() {
-            writeln!(
-                buf,
-                "token {}: {:#?}",
-                handle.name(&converted),
-                token.pattern
-            );
+            println!("token {}: {:#?}", handle.name(&converted), token.pattern);
         }
         for (handle, rule) in converted.rules.iter_kv() {
-            writeln!(buf, "\nrule {}:", handle.name(&converted),);
-            rule.expr.display_with_indent(&mut buf, 1, &converted);
+            println!("\nrule {}:", handle.name(&converted),);
+            rule.expr
+                .display_with_indent(&mut StdoutSink, 1, &converted);
         }
-        writeln!(buf);
+        println!();
     }
 
     if do_lowered || none_enabled {
         for (handle, token) in lowered.tokens.iter_kv() {
-            writeln!(buf, "token {}: {token}", handle.name(&converted));
+            println!("token {}: {token}", handle.name(&converted));
         }
         for (handle, rule) in lowered.rules.iter_kv() {
-            writeln!(buf, "\nrule {}:", handle.name(&converted));
-            rule.display_with_indent(&mut buf, 1, &converted);
+            println!("\nrule {}:", handle.name(&converted));
+            rule.display_with_indent(&mut StdoutSink, 1, &converted);
         }
-        writeln!(buf);
+        println!();
     }
+
+    let graphs = lowered
+        .rules
+        .map_ref_with_key(|handle, expr| Graph::new(handle, expr));
 
     if do_dot || none_enabled {
         let mut offset = 0;
-        writeln!(buf, "digraph G {{");
-        for (name, graph, _) in &finalish {
-            graph.debug_graphviz(&mut buf, name, offset, &converted);
+        println!("digraph G {{");
+        for (handle, graph) in graphs.iter_kv() {
+            graph.debug_graphviz(&mut StdoutSink, handle.name(&converted), offset, &converted);
             offset += graph.get_nodes().len();
 
-            writeln!(buf);
+            println!();
         }
-        writeln!(buf, "}}\n");
+        println!("}}\n");
     }
 
     if do_statements || none_enabled {
-        for (name, graph, _) in &finalish {
-            writeln!(buf, "rule {name}");
-            graph.debug_statements(&mut buf, &converted);
+        for (handle, graph) in graphs.iter_kv() {
+            println!("rule {}", handle.name(&converted));
+            graph.debug_statements(&mut StdoutSink, &converted);
 
-            writeln!(buf);
+            println!();
         }
     }
 
-    if do_scopes || none_enabled {
-        for (_, graph, structure) in &finalish {
-            structure.debug_scopes(&mut buf, &graph, &converted);
+    let structures = graphs.map_ref(GraphStructuring::new);
 
-            writeln!(buf);
+    if do_scopes || none_enabled {
+        for ((_, structuring), graph) in structures.iter_kv().zip(graphs.iter()) {
+            structuring.debug_scopes(&mut StdoutSink, &graph, &converted);
+
+            println!();
         }
     }
 
     if do_code || none_enabled {
-        for (name, graph, structure) in &finalish {
-            write!(buf, "rule {name} ");
-            let statements = structure.emit_code(true, &graph);
-            display_code(&mut buf, &statements, &graph, &converted);
+        for ((handle, structuring), graph) in structures.iter_kv().zip(graphs.iter()) {
+            print!("rule {} ", handle.name(&converted));
+            let statements = structuring.emit_code(true, true, graph);
+            display_code(&mut StdoutSink, &statements, graph, &converted);
 
-            writeln!(buf);
+            println!();
         }
     }
 
-    print!("{buf}");
     Ok(())
 }

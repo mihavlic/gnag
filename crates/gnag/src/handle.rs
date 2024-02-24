@@ -49,8 +49,6 @@ impl<H: TypedHandle> HandleCounter<H> {
     }
 }
 
-pub struct HandleVec<H, T>(Vec<T>, PhantomData<H>);
-
 impl<H, T> Default for HandleVec<H, T> {
     fn default() -> Self {
         Self(Vec::default(), PhantomData)
@@ -83,7 +81,9 @@ impl<H, T> TryFrom<SecondaryVec<H, T>> for HandleVec<H, T> {
     }
 }
 
-impl<H: TypedHandle, T> HandleVec<H, T> {
+pub struct HandleVec<H, T>(Vec<T>, PhantomData<H>);
+
+impl<H, T> HandleVec<H, T> {
     pub fn new() -> Self {
         HandleVec(Vec::new(), PhantomData)
     }
@@ -97,23 +97,17 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
     pub fn map_ref<A>(&self, fun: impl FnMut(&T) -> A) -> HandleVec<H, A> {
         HandleVec(self.iter().map(fun).collect(), PhantomData)
     }
-    pub fn map_with_key<A>(self, mut fun: impl FnMut(H, T) -> A) -> HandleVec<H, A> {
-        HandleVec(
-            self.into_iter_kv().map(|(h, t)| fun(h, t)).collect(),
-            PhantomData,
-        )
-    }
-    pub fn map_ref_with_key<A>(&self, mut fun: impl FnMut(H, &T) -> A) -> HandleVec<H, A> {
-        HandleVec(
-            self.iter_kv().map(|(h, t)| fun(h, t)).collect(),
-            PhantomData,
-        )
-    }
     pub fn resize(&mut self, new_len: usize, value: T)
     where
         T: Clone,
     {
         self.0.resize(new_len, value);
+    }
+    pub fn fill(&mut self, value: T)
+    where
+        T: Clone,
+    {
+        self.0.fill(value);
     }
     pub fn with_capacity(capacity: usize) -> Self {
         HandleVec(Vec::with_capacity(capacity), PhantomData)
@@ -123,15 +117,6 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
     }
     pub fn len(&self) -> usize {
         self.0.len()
-    }
-    pub fn push(&mut self, value: T) -> H {
-        let handle = self.next_handle();
-        self.0.push(value);
-        handle
-    }
-    pub fn next_handle(&self) -> H {
-        let len = self.0.len();
-        H::new(len)
     }
     pub fn first(&self) -> Option<&T> {
         self.0.first()
@@ -145,17 +130,47 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
     pub fn last_mut(&mut self) -> Option<&mut T> {
         self.0.last_mut()
     }
-    pub fn get(&self, index: H) -> Option<&T> {
-        self.0.get(index.index())
-    }
-    pub fn get_mut(&mut self, index: H) -> Option<&mut T> {
-        self.0.get_mut(index.index())
-    }
     pub fn as_slice(&self) -> &[T] {
         &self.0
     }
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
+    }
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.0.iter_mut()
+    }
+    pub fn clear(&mut self) {
+        self.0.clear()
+    }
+}
+
+impl<H: TypedHandle, T> HandleVec<H, T> {
+    pub fn map_with_key<A>(self, mut fun: impl FnMut(H, T) -> A) -> HandleVec<H, A> {
+        HandleVec(
+            self.into_iter_kv().map(|(h, t)| fun(h, t)).collect(),
+            PhantomData,
+        )
+    }
+    pub fn map_ref_with_key<A>(&self, mut fun: impl FnMut(H, &T) -> A) -> HandleVec<H, A> {
+        HandleVec(
+            self.iter_kv().map(|(h, t)| fun(h, t)).collect(),
+            PhantomData,
+        )
+    }
+    pub fn push(&mut self, value: T) -> H {
+        let handle = self.next_handle();
+        self.0.push(value);
+        handle
+    }
+    pub fn next_handle(&self) -> H {
+        let len = self.0.len();
+        H::new(len)
+    }
+    pub fn get(&self, index: H) -> Option<&T> {
+        self.0.get(index.index())
+    }
+    pub fn get_mut(&mut self, index: H) -> Option<&mut T> {
+        self.0.get_mut(index.index())
     }
     pub fn iter_kv(
         &self,
@@ -176,9 +191,6 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
         &self,
     ) -> impl Iterator<Item = H> + Clone + ExactSizeIterator + DoubleEndedIterator {
         (0..self.len()).map(H::new)
-    }
-    pub fn clear(&mut self) {
-        self.0.clear()
     }
 }
 
@@ -225,7 +237,15 @@ impl<'a, H, T> IntoIterator for &'a HandleVec<H, T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.iter()
+    }
+}
+
+impl<'a, H, T> IntoIterator for &'a mut HandleVec<H, T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
@@ -436,6 +456,9 @@ impl<H: TypedHandle> HandleBitset<H> {
             spooky: PhantomData,
         }
     }
+    pub fn clear(&mut self) {
+        self.set.clear();
+    }
     pub fn replace(&mut self, handle: H, value: bool) -> bool {
         self.set.replace(handle.index(), value)
     }
@@ -466,6 +489,9 @@ impl Bitset {
         Self {
             set: Vec::with_capacity(capacity),
         }
+    }
+    pub fn clear(&mut self) {
+        self.set.clear();
     }
     pub fn replace(&mut self, index: usize, value: bool) -> bool {
         replace_impl(&mut self.set, index, value)

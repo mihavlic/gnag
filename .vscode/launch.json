@@ -26,60 +26,19 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'print'",
+            "name": "Debug executable 'dump'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=print",
-                    "--package=gnag"
+                    "--bin=dump"
                 ],
                 "filter": {
-                    "name": "print",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in executable 'print'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=print",
-                    "--package=gnag"
-                ],
-                "filter": {
-                    "name": "print",
+                    "name": "dump",
                     "kind": "bin"
                 }
             },
             "args": [
                 "test.gng"
-            ],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in executable 'print'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=print",
-                    "--package=gnag"
-                ],
-                "filter": {
-                    "name": "print",
-                    "kind": "bin"
-                }
-            },
-            "args": [
-                "grammar.gng"
             ],
             "cwd": "${workspaceFolder}"
         },
@@ -96,44 +55,6 @@
                 "filter": {
                     "name": "gnag-lsp",
                     "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in executable 'gnag-lsp'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=gnag-lsp",
-                    "--package=gnag-lsp"
-                ],
-                "filter": {
-                    "name": "gnag-lsp",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in library 'lsp'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=lsp"
-                ],
-                "filter": {
-                    "name": "lsp",
-                    "kind": "lib"
                 }
             },
             "args": [],

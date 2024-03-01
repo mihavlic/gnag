@@ -46,6 +46,7 @@ impl std::fmt::Write for StdoutSink {
 fn run() -> Result<(), ()> {
     let mut args = args().skip(1).collect::<Vec<_>>();
 
+    let mut do_ast = false;
     let mut do_converted = false;
     let mut do_lowered = false;
     let mut do_dot = false;
@@ -56,6 +57,7 @@ fn run() -> Result<(), ()> {
     let mut none_enabled = true;
     args.retain(|arg| {
         match arg.as_str() {
+            "--ast" => do_ast = true,
             "--converted" => do_converted = true,
             "--lowered" => do_lowered = true,
             "--dot" => do_dot = true,
@@ -105,6 +107,11 @@ fn run() -> Result<(), ()> {
     report(&converted.errors);
     let lowered = LoweredFile::new(&src, &converted);
     report(&lowered.errors);
+
+    if do_ast || none_enabled {
+        let string = parsed.root.pretty_print_with_file(&src, &parsed);
+        println!("{string}");
+    }
 
     if do_converted || none_enabled {
         for (handle, token) in converted.tokens.iter_kv() {

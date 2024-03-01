@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter, Write};
 
 use gnag::{
-    handle::{Bitset, HandleVec, TypedHandle},
+    handle::{Bitset, HandleBitset, HandleVec, SecondaryVec, TypedHandle},
     simple_handle,
 };
 
@@ -17,11 +17,30 @@ pub enum Transition {
     Any,
     Not(TokenHandle),
     // function start/end
+    RestoreState(NodeHandle),
     CloseSpan(RuleHandle),
     ReturnFail,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TransitionEffects {
+    Fallible,
+    Infallible,
+    Noreturn,
+}
+
 impl Transition {
+    pub fn effects(self) -> TransitionEffects {
+        match self {
+            Transition::Error
+            | Transition::Token(_)
+            | Transition::Rule(_)
+            | Transition::Any
+            | Transition::Not(_) => TransitionEffects::Fallible,
+            Transition::Fail | Transition::RestoreState(_) => TransitionEffects::Infallible,
+            Transition::ReturnFail | Transition::CloseSpan(_) => TransitionEffects::Noreturn,
+        }
+    }
     pub fn display(
         self,
         f: &mut dyn Write,
@@ -34,6 +53,7 @@ impl Transition {
             Transition::Rule(a) => write!(f, "Rule({})", file.rules[a].name),
             Transition::Any => write!(f, "Any"),
             Transition::Not(a) => write!(f, "Not({})", file.tokens[a].name),
+            Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
             Transition::CloseSpan(a) => write!(f, "CloseSpan({})", file.rules[a].name),
             Transition::ReturnFail => write!(f, "ReturnFail"),
         }
@@ -41,8 +61,11 @@ impl Transition {
 }
 
 simple_handle! {
-    pub NodeHandle, pub NodePeekHandle
+    pub NodeHandle
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NodePeekHandle(NodeHandle);
 
 impl NodeHandle {
     pub fn prev(self) -> Option<NodeHandle> {
@@ -68,6 +91,7 @@ impl From<usize> for NodeHandle {
     }
 }
 
+#[derive(Clone)]
 pub struct PegNode {
     pub transition: Transition,
     pub success: Option<NodeHandle>,
@@ -99,6 +123,14 @@ impl PegNode {
             fun(fail);
         }
     }
+    pub fn for_edges_mut(&mut self, mut fun: impl FnMut(&mut NodeHandle)) {
+        if let Some(success) = &mut self.success {
+            fun(success);
+        }
+        if let Some(fail) = &mut self.fail {
+            fun(fail);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -114,25 +146,25 @@ pub struct PegResult {
 }
 
 impl PegResult {
-    pub fn merged_edges(&self) -> Vec<IncomingEdge> {
+    pub fn merged_edges(self) -> Vec<IncomingEdge> {
         let mut vec = Vec::with_capacity(self.success.len() + self.fail.len());
         vec.extend_from_slice(&self.fail);
         vec.extend_from_slice(&self.success);
         vec
     }
-}
-
-pub struct GraphPoints {
-    pub entry: NodeHandle,
-    pub success: NodeHandle,
-    pub fail: NodeHandle,
+    pub fn can_fail(&self) -> bool {
+        !self.fail.is_empty()
+    }
+    pub fn can_succeed(&self) -> bool {
+        !self.success.is_empty()
+    }
 }
 
 pub struct Graph {
     nodes: HandleVec<NodeHandle, PegNode>,
     // TODO spans
     errors: Vec<String>,
-    points: Option<GraphPoints>,
+    entry: Option<NodeHandle>,
 }
 
 impl Graph {
@@ -140,58 +172,43 @@ impl Graph {
         let mut graph = Graph {
             nodes: HandleVec::new(),
             errors: Vec::new(),
-            points: None,
+            entry: None,
         };
 
         let result = graph.convert_expr(expr, vec![]);
 
         if let Some(entry) = result.entry {
-            let success = graph.single_transition(result.success, Transition::CloseSpan(handle));
-            let fail = graph.single_transition(result.fail, Transition::ReturnFail);
-
-            graph.points = Some(GraphPoints {
-                entry,
-                success: success.entry.unwrap(),
-                fail: fail.entry.unwrap(),
-            });
+            graph.entry = Some(entry);
+            let _success = graph.single_transition(&result.success, Transition::CloseSpan(handle));
+            let _fail = graph.single_transition(&result.fail, Transition::ReturnFail);
         }
+
+        let mut bitset = HandleBitset::new();
+        let mut bitset2 = HandleBitset::new();
+        // reorder does not move the entry
+        graph.reorder(&mut bitset, &mut bitset2);
 
         graph
     }
-    fn connect_forward_edges(
-        &mut self,
-        node: NodeHandle,
-        incoming: impl IntoIterator<Item = IncomingEdge>,
-    ) {
-        for edge in incoming {
-            assert!(edge.from < node);
-            self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
-        }
-    }
-    fn connect_backward_edges(
-        &mut self,
-        node: NodeHandle,
-        incoming: impl IntoIterator<Item = IncomingEdge>,
-    ) {
+    fn connect_backward_edges(&mut self, node: NodeHandle, incoming: &[IncomingEdge]) {
         for edge in incoming {
             assert!(edge.from >= node);
             self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
         }
     }
-    fn new_node(
-        &mut self,
-        transition: Transition,
-        incoming: impl IntoIterator<Item = IncomingEdge>,
-    ) -> NodeHandle {
-        let handle = self.nodes.push(PegNode::new(transition));
-        self.connect_forward_edges(handle, incoming);
-        handle
+    fn new_node(&mut self, transition: Transition, incoming: &[IncomingEdge]) -> NodeHandle {
+        let node = self.nodes.push(PegNode::new(transition));
+        for edge in incoming {
+            assert!(edge.from < node);
+            self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
+        }
+        node
     }
     fn peek_next_node(&self) -> NodePeekHandle {
-        NodePeekHandle::new(self.nodes.next_handle().index())
+        NodePeekHandle(self.nodes.next_handle())
     }
     fn verify_peek(&mut self, peek: NodePeekHandle) -> Option<NodeHandle> {
-        let next = NodeHandle(peek.0);
+        let next = peek.0;
         self.get_node(next).is_some().then_some(next)
     }
     pub fn get_node(&self, node: NodeHandle) -> Option<&PegNode> {
@@ -203,20 +220,20 @@ impl Graph {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
-    pub fn convert_expr_nonempty(
+    fn convert_expr_nonempty(
         &mut self,
         expr: &RuleExpr,
         incoming: Vec<IncomingEdge>,
         error: &str,
     ) -> PegResult {
-        let mut result = self.convert_expr(expr, incoming);
+        let result = self.convert_expr(expr, incoming);
         if result.entry.is_none() {
             self.errors.push(error.to_owned());
-            result = self.error_transition(result.merged_edges());
+            return self.error_transition(&result.merged_edges());
         };
         result
     }
-    pub fn convert_expr(&mut self, expr: &RuleExpr, incoming: Vec<IncomingEdge>) -> PegResult {
+    fn convert_expr(&mut self, expr: &RuleExpr, incoming: Vec<IncomingEdge>) -> PegResult {
         match expr {
             RuleExpr::Empty | RuleExpr::Commit => PegResult {
                 entry: None,
@@ -224,31 +241,58 @@ impl Graph {
                 fail: vec![],
             },
             // some error that has already been reported, pass it along in a dummy state transition
-            RuleExpr::Error => self.error_transition(incoming),
-            RuleExpr::Token(token) => self.single_transition(incoming, Transition::Token(*token)),
-            RuleExpr::Rule(rule) => self.single_transition(incoming, Transition::Rule(*rule)),
+            RuleExpr::Error => self.error_transition(&incoming),
+            RuleExpr::Token(token) => self.single_transition(&incoming, Transition::Token(*token)),
+            RuleExpr::Rule(rule) => self.single_transition(&incoming, Transition::Rule(*rule)),
             RuleExpr::Sequence(vec) => {
                 let mut fail = Vec::new();
+                let mut fail_reset = Vec::new();
                 let mut success = incoming;
 
-                let commit = vec
-                    .iter()
-                    .position(|e| matches!(e, RuleExpr::Commit))
-                    .unwrap_or(0);
+                let mut commit_index = vec.iter().position(|e| matches!(e, RuleExpr::Commit));
+                let mut entry = None;
 
                 let peek = self.peek_next_node();
-
                 for (i, rule) in vec.iter().enumerate() {
                     let incoming = std::mem::take(&mut success);
                     let mut result = self.convert_expr(rule, incoming);
 
-                    let fail_dest = match i > commit {
-                        true => &mut success,
-                        false => &mut fail,
-                    };
+                    let consumed_any = entry.is_some();
+                    if let Some(first) = result.entry {
+                        entry.get_or_insert(first);
+                    }
 
-                    fail_dest.append(&mut result.fail);
+                    let is_comitted = commit_index.map(|index| i > index).unwrap_or(false);
+
+                    // if no commit point was specified, commit as soon as the sequence can fail
+                    //
+                    // for example
+                    // ( A? B C )
+                    //       ^
+                    // we commit after B, if we committed after the first member by default
+                    // we could commit without consuming anything
+                    if commit_index.is_none() && result.can_fail() {
+                        commit_index = Some(i);
+                    }
+
+                    if is_comitted {
+                        success.append(&mut result.fail);
+                    } else {
+                        if consumed_any {
+                            fail_reset.append(&mut result.fail);
+                        } else {
+                            fail.append(&mut result.fail);
+                        }
+                    }
                     success.append(&mut result.success);
+                }
+
+                if let Some(entry) = entry {
+                    if !fail_reset.is_empty() {
+                        let mut restore =
+                            self.single_transition(&fail_reset, Transition::RestoreState(entry));
+                        fail.append(&mut restore.success);
+                    }
                 }
 
                 PegResult {
@@ -262,7 +306,6 @@ impl Graph {
                 let mut success = Vec::new();
 
                 let peek = self.peek_next_node();
-
                 for rule in vec {
                     let incoming = std::mem::take(&mut fail);
                     let mut result = self.convert_expr(rule, incoming);
@@ -293,7 +336,7 @@ impl Graph {
                 );
 
                 // connect the looping edges to the start
-                self.connect_backward_edges(result.entry.unwrap(), result.success);
+                self.connect_backward_edges(result.entry.unwrap(), &result.success);
 
                 PegResult {
                     entry: result.entry,
@@ -314,14 +357,14 @@ impl Graph {
                     fail: vec![],
                 }
             }
-            RuleExpr::Any => self.single_transition(incoming, Transition::Any),
+            RuleExpr::Any => self.single_transition(&incoming, Transition::Any),
             RuleExpr::Not(expr) => {
                 if let RuleExpr::Token(token) = **expr {
-                    self.single_transition(incoming, Transition::Not(token))
+                    self.single_transition(&incoming, Transition::Not(token))
                 } else {
                     self.errors
                         .push("RuleExpr::Not only works with tokens".to_owned());
-                    self.error_transition(incoming)
+                    self.error_transition(&incoming)
                 }
             }
             RuleExpr::SeparatedList { element, separator } => {
@@ -362,26 +405,130 @@ impl Graph {
             }
         }
     }
-    fn error_transition(&mut self, incoming: Vec<IncomingEdge>) -> PegResult {
+    fn error_transition(&mut self, incoming: &[IncomingEdge]) -> PegResult {
         self.single_transition(incoming, Transition::Error)
     }
     fn single_transition(
         &mut self,
-        incoming: Vec<IncomingEdge>,
+        incoming: &[IncomingEdge],
         transition: Transition,
     ) -> PegResult {
         let node = self.new_node(transition, incoming);
+        let effects = transition.effects();
         PegResult {
             entry: Some(node),
-            success: vec![IncomingEdge {
-                from: node,
-                is_fail: false,
-            }],
-            fail: vec![IncomingEdge {
-                from: node,
-                is_fail: true,
-            }],
+            success: match effects {
+                TransitionEffects::Fallible | TransitionEffects::Infallible => vec![IncomingEdge {
+                    from: node,
+                    is_fail: false,
+                }],
+                TransitionEffects::Noreturn => vec![],
+            },
+            fail: match effects {
+                TransitionEffects::Fallible => vec![IncomingEdge {
+                    from: node,
+                    is_fail: true,
+                }],
+                TransitionEffects::Infallible | TransitionEffects::Noreturn => vec![],
+            },
         }
+    }
+    fn visit_edges_dfs(
+        &self,
+        handle: NodeHandle,
+        explored: &mut HandleBitset<NodeHandle>,
+        scratch: &mut HandleBitset<NodeHandle>,
+        //                           parent       child     is_backward_edge
+        mut fun: impl FnMut(Option<NodeHandle>, NodeHandle, bool) -> bool,
+    ) {
+        fn dyn_impl(
+            graph: &Graph,
+            parent: Option<NodeHandle>,
+            child: NodeHandle,
+            explored: &mut HandleBitset<NodeHandle>,
+            on_stack: &mut HandleBitset<NodeHandle>,
+            fun: &mut dyn FnMut(Option<NodeHandle>, NodeHandle, bool) -> bool,
+        ) {
+            let is_explored = explored.contains(child);
+            let is_back_edge = on_stack.contains(child);
+            let should_enter = fun(parent, child, is_back_edge);
+
+            if should_enter && !is_back_edge && !is_explored {
+                explored.insert(child);
+                on_stack.insert(child);
+
+                graph.get_node(child).unwrap().for_edges(|node| {
+                    dyn_impl(graph, Some(child), node, explored, on_stack, fun);
+                });
+
+                on_stack.remove(child);
+            }
+        }
+
+        explored.clear();
+        scratch.clear();
+        dyn_impl(self, None, handle, explored, scratch, &mut fun);
+    }
+    /// Reorder the nodes into a new topological order where success edge children are placed
+    /// directly after their parents (Backward edges are preserved), which leads to more natural generated code.
+    ///
+    /// Also eliminates unreachable nodes.
+    fn reorder(
+        &mut self,
+        reachable: &mut HandleBitset<NodeHandle>,
+        scratch: &mut HandleBitset<NodeHandle>,
+    ) {
+        let Some(entry) = self.entry else {
+            return;
+        };
+
+        // count the number of incoming forward edges
+        //  A   B
+        //   \ /
+        // ┌─►C    C has 2 parents
+        // └──┘
+        let mut parent_count = self.nodes.map_fill(0);
+        self.visit_edges_dfs(entry, reachable, scratch, |_, child, is_backward_edge| {
+            if !is_backward_edge {
+                parent_count[child] += 1;
+            }
+            true
+        });
+
+        assert_eq!(parent_count[entry], 1);
+
+        // old_node -> new_node
+        let mut renames = SecondaryVec::new();
+        // new_node -> old_node
+        let mut collect = HandleVec::new();
+
+        // iterate the graph in topological order, storing the visited sequence
+        self.visit_edges_dfs(entry, reachable, scratch, |_, child, is_backward_edge| {
+            if !is_backward_edge {
+                let parents = &mut parent_count[child];
+                *parents -= 1;
+
+                if *parents == 0 {
+                    let new_handle = collect.push(child);
+                    let prev = renames.insert(child, new_handle);
+                    assert!(prev.is_none());
+
+                    return true;
+                }
+            }
+            false
+        });
+
+        // collect nodes in the new order
+        let new_nodes = collect.map(|source| {
+            let mut new = self.get_node(source).unwrap().clone();
+            new.for_edges_mut(|child| {
+                *child = renames[*child];
+            });
+            new
+        });
+
+        self.nodes = new_nodes;
     }
     #[allow(unused_must_use)]
     pub fn debug_graphviz(
@@ -397,33 +544,41 @@ impl Graph {
             let offset_index = k.index() + index_offset;
             writeln!(buf, "    v{offset_index}[label={}]", k.index());
 
+            let effects = v.transition.effects();
+
             if v.success == v.fail {
+                let style = match effects {
+                    TransitionEffects::Noreturn => "color=orange",
+                    _ => "color=purple",
+                };
                 print_dot_edge(
                     buf,
                     k,
                     v.success,
                     v.transition,
-                    Some("color=purple"),
+                    Some(style),
                     index_offset,
                     file,
                 );
             } else {
                 print_dot_edge(buf, k, v.success, v.transition, None, index_offset, file);
-                print_dot_edge(
-                    buf,
-                    k,
-                    v.fail,
-                    Transition::Fail,
-                    Some("color=red"),
-                    index_offset,
-                    file,
-                );
+                if effects == TransitionEffects::Fallible {
+                    print_dot_edge(
+                        buf,
+                        k,
+                        v.fail,
+                        Transition::Fail,
+                        Some("color=red"),
+                        index_offset,
+                        file,
+                    );
+                }
             }
         }
         writeln!(buf, "}}");
     }
     pub fn debug_statements(&self, buf: &mut dyn Write, file: &ConvertedFile) {
-        let reachability = self.analyze_reachability();
+        let reachability = self.analyze_flow_targets();
 
         let mut previous_reachable = None;
 
@@ -475,8 +630,8 @@ impl Graph {
             write!(buf, "\n");
         }
     }
-    pub fn analyze_reachability(&self) -> Reachability {
-        let mut reachability = Reachability::with_capacity(self.nodes.len());
+    pub fn analyze_flow_targets(&self) -> FlowTargets {
+        let mut reachability = FlowTargets::with_capacity(self.nodes.len());
 
         if self.nodes.is_empty() {
             return reachability;
@@ -497,42 +652,18 @@ impl Graph {
         }
         reachability
     }
-    // /// returns a bitset of
-    // pub fn analyze_state_changes(&self) -> HandleBitset<NodeHandle> {
-    //     let mut is_empty = HandleBitset::with_capacity(self.nodes.len());
-
-    //     if self.nodes.is_empty() {
-    //         return is_empty;
-    //     }
-
-    //     let mut checkpoints = H
-    //     is_empty.set_is_reachable(0.into());
-
-    //     for (current, node) in self.nodes.iter_kv() {
-    //         let next = current.next();
-    //         node.for_edges(|jump| {
-    //             if next != jump {
-    //                 is_empty.set_is_target(jump);
-    //             }
-    //             if is_empty.is_reachable(current) {
-    //                 is_empty.set_is_reachable(jump);
-    //             }
-    //         });
-    //     }
-    //     is_empty
-    // }
 }
 
-pub struct Reachability {
+pub struct FlowTargets {
     set: Bitset,
 }
 
-impl Reachability {
-    pub fn new() -> Reachability {
-        Reachability { set: Bitset::new() }
+impl FlowTargets {
+    pub fn new() -> FlowTargets {
+        FlowTargets { set: Bitset::new() }
     }
-    pub fn with_capacity(capacity: usize) -> Reachability {
-        Reachability {
+    pub fn with_capacity(capacity: usize) -> FlowTargets {
+        FlowTargets {
             set: Bitset::with_capacity(capacity * 2),
         }
     }

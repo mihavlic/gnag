@@ -750,9 +750,10 @@ fn expression(
                 RuleExpr::Error
             }
         }
-        ast::Expression::Paren(a) => {
-            return expression(cx, &a.expr, parameters, tokens, name_to_item)
-        }
+        ast::Expression::Paren(a) => match &a.expr {
+            Some(e) => expression(cx, e, parameters, tokens, name_to_item),
+            None => RuleExpr::Empty,
+        },
         ast::Expression::PreExpr(a) => {
             _ = expression(cx, &a.expr, parameters, tokens, name_to_item);
             cx.error(a.span, "TODO Expression attributes");

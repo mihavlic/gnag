@@ -242,7 +242,8 @@ pub struct PreExpr {
 #[derive(Debug)]
 pub struct ParenExpr {
     pub span: StrSpan,
-    pub expr: Box<Expression>,
+    // FIXME this is ugly
+    pub expr: Option<Box<Expression>>,
 }
 #[derive(Debug)]
 pub struct CallExpr {
@@ -297,7 +298,7 @@ impl Expression {
     pub fn visit(&self, fun: &mut dyn FnMut(&Expression)) {
         fun(self);
         match self {
-            Expression::Paren(a) => a.expr.visit(fun),
+            Expression::Paren(a) => _ = a.expr.as_ref().map(|e| e.visit(fun)),
             Expression::PreExpr(a) => a.expr.visit(fun),
             Expression::CallExpr(a) => {
                 if let Some(e) = &a.args {
@@ -368,7 +369,7 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
             }
             return Some(Expression::Paren(ParenExpr {
                 span,
-                expr: Box::new(expr?),
+                expr: expr.map(Box::new),
             }));
         }
         NodeKind::Tree(TreeKind::CallExpr) => {

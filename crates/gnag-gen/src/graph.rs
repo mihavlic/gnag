@@ -183,10 +183,11 @@ impl Graph {
             let _fail = graph.single_transition(&result.fail, Transition::ReturnFail);
         }
 
-        let mut bitset = HandleBitset::new();
+        let mut reachable = HandleBitset::new();
         let mut bitset2 = HandleBitset::new();
         // reorder does not move the entry
-        graph.reorder(&mut bitset, &mut bitset2);
+        graph.reorder(&mut reachable, &mut bitset2);
+        graph.merge_state_resets(&mut reachable, &mut bitset2);
 
         graph
     }
@@ -468,6 +469,117 @@ impl Graph {
         explored.clear();
         scratch.clear();
         dyn_impl(self, None, handle, explored, scratch, &mut fun);
+    }
+    /// Maps the state of the parser through the graph and transitively propagates state resets
+    /// to the earliest checkpoint.
+    ///
+    /// The target pattern is what results from `( A A <commit> | B B <commit> )`
+    /// when `B B` fails, it resets to the checkpoint of when it tried to match - after `A A` failed.
+    /// But `A A` also resets state after its failure, the states at the start of `A A` and
+    /// `B B` are equal, so we can use only one checkpoint.
+    ///
+    /// ```ignore
+    ///  // left edges omitted
+    ///  // reset(node) means reset parser to the state at the beginning of node
+    ///
+    ///          │
+    ///    ... ──A
+    ///          │ success transition
+    ///    ... ──B
+    ///          │ fail
+    ///          C
+    ///          │ reset(A)
+    ///    ... ──D
+    ///          │ success transition
+    ///    ... ──E
+    ///          │ fail
+    ///          F
+    ///          │ reset(D)
+    ///
+    /// // turned into
+    ///
+    ///          │
+    ///    ... ──A
+    ///          │ success transition
+    ///    ... ──B
+    ///          │ fail
+    ///          C
+    ///          │ reset(A)
+    ///    ... ──D
+    ///          │ success transition
+    ///    ... ──E
+    ///          │ fail
+    ///          F
+    ///          │ reset(A) // <<<<<<<<<<<<<<<<<<
+    /// ```
+    fn merge_state_resets(
+        &mut self,
+        reachable: &mut HandleBitset<NodeHandle>,
+        scratch: &mut HandleBitset<NodeHandle>,
+    ) {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum InitialState {
+            None,
+            Original(NodeHandle),
+            Sameas(NodeHandle),
+        }
+
+        impl InitialState {
+            fn same_as(&mut self, this: NodeHandle, same_as: NodeHandle) {
+                if *self == InitialState::None || *self == InitialState::Sameas(same_as) {
+                    *self = InitialState::Sameas(same_as);
+                } else {
+                    self.original(this);
+                }
+            }
+            fn original(&mut self, this: NodeHandle) {
+                *self = InitialState::Original(this);
+            }
+        }
+
+        let Some(entry) = self.entry else {
+            return;
+        };
+
+        let nodes = self.get_nodes();
+        let mut states = nodes.map_fill(InitialState::None);
+
+        states[entry].original(entry);
+
+        for (handle, node) in nodes.iter_kv() {
+            if !reachable.contains(handle) {
+                continue;
+            }
+
+            if let Some(child) = node.success {
+                if let Transition::RestoreState(state) = node.transition {
+                    states[child].same_as(child, state);
+                } else {
+                    states[child].original(child);
+                }
+            }
+            if let Some(child) = node.fail {
+                states[child].same_as(child, handle);
+            }
+        }
+
+        self.visit_edges_dfs(entry, reachable, scratch, |_, child, _| {
+            if let InitialState::Sameas(node) = states[child] {
+                states[child] = states[node];
+            }
+            true
+        });
+
+        for node in &mut self.nodes {
+            if let Transition::RestoreState(to) = node.transition {
+                let InitialState::Original(state) = states[to] else {
+                    unreachable!(
+                        "Original nodes should have been propagated to all reachable nodes"
+                    );
+                };
+                node.transition = Transition::RestoreState(state);
+            }
+        }
     }
     /// Reorder the nodes into a new topological order where success edge children are placed
     /// directly after their parents (Backward edges are preserved), which leads to more natural generated code.

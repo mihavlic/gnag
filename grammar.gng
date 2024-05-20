@@ -1,153 +1,73 @@
-// comment!
-tokenizer {
-    @skip Whitespace r'\s+'
-    @skip Comment r'//.*$'
-    @error ErrorToken r'\S+'
-    String {
-        let mut raw = false ;
-        if l.peek().unwrap() == b'r' {
-            raw = true ;
-            l.next() ;
-        }
+tokens {
+    Newline = '\n'
+    
+    @skip
+    Whitespace = r'[ \t]+'
+    @skip
+    Comment = r'//.*$'
+    @error
+    ErrorToken = r'\S+'
 
-        let mut balance = 0 ;
-        loop {
-            match l.next() {
-                Some(b'#') => balance += 1,
-                Some(b'\'') => break,
-                _ => return None,
-            }
-        }
+    String = 'r'? <string_like '\''> # TODO
 
-        loop {
-            match l.next() {
-                None => return None,
-                Some(b'\\') if !raw => {
-                    l.next() ;
-                }
-                Some(b'\'') => {
-                    let mut balance = balance ;
-                    loop {
-                        if balance == 0 {
-                            return Literal ;
-                        }
-                        if let Some(b'#') = l.next() {
-                            balance -= 1 ;
-                        } else {
-                            break ;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+    InlineKeyword = 'inline'
+    TokenizerKeyword = 'tokenizer'
+    RuleKeyword = 'rule'
+    PrattKeyword = 'pratt'
+    GroupKeyword = 'group'
+    Ident = r'\w+' # <class_word>
+    Number = r'[0-9]+' # <charset '0-9'>+
+    LCurly = '{'
+    RCurly = '}'
+    LParen = '('
+    RParen = ')'
+    LBracket = '['
+    RBracket = ']'
+    LAngle = '<'
+    RAngle = '>'
+    Question = '?'
+    Pipe = '|'
+    Star = '*'
+    Plus = '+'
+    At = '@'
+    Colon = ':'
+    Comma = ','
+    Dot = '.'
+    Equals = '='
+}
+
+rules {
+    @root
+    File = (Newline | Tokens | Rules)*
+
+    Tokens = 'tokens' <brace_delimited_lines Token>
+    Rules = 'rules' <brace_delimited_lines Rule>
+
+    Attribute = '@' Ident Newline?
+    Token = Attribute* Ident '=' (String | RegexString) Newline?
+
+    Parameters = '(' <comma_list Ident> ')'
+    Rule = Attribute* Ident Parameters? '=' Expr Newline?
+
+    # Group = 'group' Ident '{' GroupItem* '}'
+    # GroupItem = Ident Ident
+
+    Expr = pratt {
+        Atom = Ident | String | RegexString
+        CallExpr = '<' Ident Expr? '>'
+        ParenExpr = '(' Expr ')'
+        PrattExpr = 'pratt' <brace_delimited_lines Rule>
+
+        PostExpr = Expr ('?' | '*' | '+')
+        SeqExpr = Expr Expr+
+        BinExpr = Expr '|' Expr
     }
-    InlineKeyword 'inline'
-    TokenizerKeyword 'tokenizer'
-    RuleKeyword 'rule'
-    GroupKeyword 'group'
-    Ident r'\w+'
-    Number '[0-9]+'
-    LCurly '{'
-    RCurly '}'
-    LParen '('
-    RParen ')'
-    LBracket '['
-    RBracket ']'
-    LAngle '<'
-    RAngle '>'
-    Question '?'
-    Pipe '|'
-    Star '*'
-    Plus '+'
-    At '@'
-    Colon ':'
-    Comma ','
-    Dot '.'
-}
 
-@root
-rule File  {
-    (Tokenizer | SynRule | Group)*
-}
+    # delimited(bra, ket) = bra (ParenDelimited | BraceDelimited | BracketDelimited | <not ket>)* ket
+    # ParenDelimited = <delimited '(' ')'>
+    # BraceDelimited = <delimited '{' '}'>
+    # BracketDelimited = <delimited '[' ']'>
 
-inline comma_list(element) {
-    <separated_list element ','>
-}
-inline delimited(bra, ket) {
-    bra (ParenDelimited | BraceDelimited | BracketDelimited | <not ket>)* ket
-}
-
-rule ParenDelimited {
-    <delimited '(' ')'>
-}
-rule BraceDelimited {
-    <delimited '{' '}'>
-}
-rule BracketDelimited {
-    <delimited '[' ']'>
-}
-
-rule AttributeValue {
-    String | Ident | Number
-}
-rule AttributeExpr {
-    Ident ( '(' AttributeValue ')' )?
-}
-rule Attribute {
-    '@' Ident ( '(' <comma_list AttributeExpr> ')' )?
-}
-
-rule TokenRule {
-    Attribute* Ident (String | BraceDelimited)
-}
-rule Tokenizer {
-    'tokenizer' '{' TokenRule* '}'
-}
-
-rule Parameters {
-    '(' <comma_list Ident> ')'
-}
-rule SynRule {
-    Attribute* ('inline' | 'rule') Ident Parameters? '{' Expr '}'
-}
-
-rule Group {
-    'group' Ident '{' GroupItem* '}'
-}
-rule GroupItem {
-    Ident Ident
-}
-
-@pratt 
-rule Expr {
-    CallExpr
-  | ParenExpr
-  | PreExpr
-  | PostExpr
-  | PostName
-  | SeqExpr
-  | BinExpr
-}
-
-rule CallExpr {
-    '<' Ident Expr? '>'
-}
-rule ParenExpr {
-    '(' Expr ')'
-}
-rule PreExpr {
-    Attribute+ Expr
-}
-rule PostExpr {
-    Expr ('?' | '*' | '+')
-}
-rule PostName {
-    Expr ':' Ident ('.' Ident)?
-}
-rule SeqExpr {
-    Expr Expr+
-}
-rule BinExpr {
-    Expr '|' Expr
+    brace_delimited_lines(statement) = Newline* '{' (Newline | statement)* '}'
+    comma_list(element) = <separated_list element ','>
 }

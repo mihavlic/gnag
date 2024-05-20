@@ -13,14 +13,14 @@ use std::ops::{Index, Range};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[rustfmt::skip]
 pub enum TokenKind {
-    Comment, Whitespace,
+    Comment, Newline, Whitespace,
 
     Ident, Literal, Number,
     ErrorToken,
   
     LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
-    InlineKeyword, TokenizerKeyword, RuleKeyword,
-    At, Comma, Pipe, Colon, Question, Plus, Star
+    TokensKeyword, RulesKeyword, PrattKeyword,
+    At, Comma, Dot, Pipe, Colon, Question, Plus, Star, Equals
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,24 +29,19 @@ pub enum TreeKind {
     File,
       ErrorTree,
       Attribute,
-        AttributeExpr,
-        AttributeValue,
-      Tokenizer,
+      Tokens,
         TokenRule,
-      SynRule,
-        Parameters,
+      Rules,
+        SynRule,
+            Parameters,
       SynExpr,
-        PreExpr,
         AtomExpr,
         ParenExpr,
         CallExpr,
+        PostExpr,
         BinExpr,
         SeqExpr,
-        PostExpr,
-        PostName,
-      ParenDelimited,
-      CurlyDelimited,
-      BracketDelimited,
+        PrattExpr
 }
 
 use ast::ParsedFile;
@@ -565,91 +560,54 @@ pub fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
     while !l.is_empty() {
         let pos = l.pos();
         let kind = match l.next().unwrap() {
-            b'\t' | b'\n' | b'\x0C' | b'\r' | b' ' => {
-                l.restore_pos(pos);
-                l.consume_while(|c| c.is_ascii_whitespace());
+            b'\n' => Newline,
+            b' ' | b'\t' | b'\r' => {
+                l.consume_while(|c| b" \t\r".contains(&c));
                 Whitespace
             }
-            b'/' if l.peek() == Some(b'/') => {
-                l.next();
-                l.restore_pos(pos);
+            b'#' => {
                 l.consume_while(|c| c != b'\n');
                 Comment
             }
-            b'@' => At,
-            b',' => Comma,
-            b'|' => Pipe,
-            b':' => Colon,
-            b'?' => Question,
-            b'+' => Plus,
-            b'*' => Star,
-            b'(' => LParen,
-            b')' => RParen,
             b'{' => LCurly,
             b'}' => RCurly,
+            b'(' => LParen,
+            b')' => RParen,
             b'[' => LBracket,
             b']' => RBracket,
             b'<' => LAngle,
             b'>' => RAngle,
+            b'?' => Question,
+            b'|' => Pipe,
+            b'*' => Star,
+            b'+' => Plus,
+            b'@' => At,
+            b':' => Colon,
+            b',' => Comma,
+            b'.' => Dot,
+            b'=' => Equals,
             _ => 'choice: {
                 l.restore_pos(pos);
-                if l.sequence(b"inline") {
-                    break 'choice InlineKeyword;
+                if l.sequence(b"tokens") {
+                    break 'choice TokensKeyword;
                 }
-                if l.sequence(b"rule") {
-                    break 'choice RuleKeyword;
+                if l.sequence(b"rules") {
+                    break 'choice RulesKeyword;
                 }
-                if l.sequence(b"tokenizer") {
-                    break 'choice TokenizerKeyword;
+                if l.sequence(b"pratt") {
+                    break 'choice PrattKeyword;
                 }
-                'skip: {
-                    let mut raw = false;
-                    if l.peek().unwrap() == b'r' {
-                        raw = true;
-                        l.next();
-                    }
-
-                    let mut balance = 0;
-                    loop {
-                        match l.next() {
-                            Some(b'#') => balance += 1,
-                            Some(b'\'') => break,
-                            _ => break 'skip,
-                        }
-                    }
-
-                    'done: loop {
-                        match l.next() {
-                            None => break 'skip,
-                            Some(b'\\') if !raw => {
-                                l.next();
-                                // let _ = match l.next() {
-                                //     Some(b'\\') => '\\',
-                                //     Some(b'n') => '\n',
-                                //     Some(b't') => '\t',
-                                //     Some(b'0') => '\0',
-                                //     _ => break 'skip,
-                                // };
-                            }
-                            Some(b'\'') => {
-                                let mut balance = balance;
-                                loop {
-                                    if balance == 0 {
-                                        break 'done;
-                                    }
-                                    if let Some(b'#') = l.next() {
-                                        balance -= 1;
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            }
+                let is_regex = l.consume(b'r');
+                if l.consume(b'\'') {
+                    while let Some(next) = l.next() {
+                        match next {
+                            b'\\' if !is_regex => _ = l.next(),
+                            b'\'' => break 'choice Literal,
                             _ => {}
                         }
                     }
-
-                    break 'choice Literal;
                 }
+
                 l.restore_pos(pos);
                 if !l
                     .consume_while(|c| matches!(c, b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'))
@@ -682,9 +640,6 @@ pub fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SpanStart(u32);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct SpanIndex(u32);
 
 #[derive(Clone, Copy)]
 pub struct ParserCheckpoint {
@@ -997,20 +952,24 @@ impl<'a> RecoverMethod for StepRecoverUntil<'a> {
     }
 }
 
-// @always_valid
-// (Tokenizer | GrammarRule)*:files
+// @root
+// File = (Newline | Tokens | Rules)*
 pub fn file(p: &mut Parser) -> bool {
-    let r = StepRecoverUntil(&[TokenizerKeyword, RuleKeyword]);
+    let r = StepRecoverUntil(&[TokensKeyword, RulesKeyword]);
     let m = p.open();
     while !p.eof() {
         'choice: {
             let checkpoint = p.checkpoint();
-            if tokenizer(p) {
+            if p.token(Newline) {
+                break 'choice;
+            }
+
+            if tokens(p) {
                 break 'choice;
             }
 
             p.restore(checkpoint);
-            if syn_rule(p) {
+            if rules(p) {
                 break 'choice;
             }
 
@@ -1022,63 +981,52 @@ pub fn file(p: &mut Parser) -> bool {
     true
 }
 
-// 'tokenizer' '{' TokenRule*:rules '}'
-fn tokenizer(p: &mut Parser) -> bool {
+fn brace_delimited_lines(p: &mut Parser, fun: fn(&mut Parser) -> bool) {
+    while p.token(Newline) {}
+    p.token(LCurly);
+    loop {
+        let checkpoint = p.checkpoint();
+        if p.token(Newline) {
+            continue;
+        }
+        if fun(p) {
+            continue;
+        }
+        p.restore(checkpoint);
+        break;
+    }
+    p.token(RCurly);
+}
+
+// Tokens = 'tokens' '{' (Newline | Token)* '}'
+fn tokens(p: &mut Parser) -> bool {
     let m = p.open();
 
-    if !p.token(TokenizerKeyword) {
+    if !p.token(TokensKeyword) {
         return false;
     }
 
-    p.expect(LCurly);
-    while token_rule(p) {}
-    p.expect(RCurly);
+    brace_delimited_lines(p, token);
 
-    p.close(m, TreeKind::Tokenizer);
+    p.close(m, TreeKind::Tokens);
     true
 }
 
-// (Number | Ident):value
-fn attribute_value(p: &mut Parser) -> bool {
+// Rules = 'rules' '{' (Newline | Rule)* '}'
+fn rules(p: &mut Parser) -> bool {
     let m = p.open();
 
-    'choice: {
-        if p.token(Number) {
-            break 'choice;
-        }
-        if p.token(Ident) {
-            break 'choice;
-        }
-        return false;
-    };
-
-    p.close(m, TreeKind::AttributeValue);
-    true
-}
-
-// Ident:name ( '(' AttributeValue:value ')' )?
-fn attribute_expr(p: &mut Parser) -> bool {
-    let m = p.open();
-
-    if !p.token(Ident) {
+    if !p.token(RulesKeyword) {
         return false;
     }
 
-    'optional: {
-        if !p.token(LParen) {
-            break 'optional;
-        }
+    brace_delimited_lines(p, rule);
 
-        attribute_value(p);
-
-        p.expect(RParen);
-    }
-
-    p.close(m, TreeKind::AttributeExpr);
+    p.close(m, TreeKind::Rules);
     true
 }
 
-// '@' Ident:name ( '(' <separated_list AttributeExpr ','> ')' )?
+// Attribute = '@' Ident
 fn attribute(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -1086,144 +1034,29 @@ fn attribute(p: &mut Parser) -> bool {
         return false;
     }
     p.expect(Ident);
-    'optional: {
-        if !p.token(LParen) {
-            break 'optional;
-        }
-        loop {
-            if !attribute_expr(p) {
-                break;
-            }
-            if !p.token(Comma) {
-                break;
-            }
-        }
-        p.expect(RParen);
-    }
+    p.token(Newline);
 
     p.close(m, TreeKind::Attribute);
     true
 }
 
-// <delimited '(' ')' DelimitedExpr>
-fn paren_delimited(p: &mut Parser) -> bool {
-    let m = p.open();
-    if !p.token(LParen) {
-        return false;
-    }
-    while !p.eof() {
-        if delimited_expr(p) {
-            continue;
-        }
-        if p.token(RParen) {
-            break;
-        }
-        p.advance();
-    }
-    p.close(m, TreeKind::ParenDelimited);
-    true
-}
-
-// <delimited '{' '}' DelimitedExpr>
-fn curly_delimited(p: &mut Parser) -> bool {
-    let m = p.open();
-    if !p.token(LCurly) {
-        return false;
-    }
-    while !p.eof() {
-        if delimited_expr(p) {
-            continue;
-        }
-        if p.token(RCurly) {
-            break;
-        }
-        p.advance();
-    }
-    p.close(m, TreeKind::CurlyDelimited);
-    true
-}
-
-// <delimited '[' ']' DelimitedExpr>
-fn bracket_delimited(p: &mut Parser) -> bool {
-    let m = p.open();
-    if !p.token(LBracket) {
-        return false;
-    }
-    while !p.eof() {
-        if delimited_expr(p) {
-            continue;
-        }
-        if p.token(RBracket) {
-            break;
-        }
-        p.advance();
-    }
-    p.close(m, TreeKind::BracketDelimited);
-    true
-}
-
-// ParenDelimited | BraceDelimited | BracketDelimited
-fn delimited_expr(p: &mut Parser) -> bool {
-    let checkpoint = p.checkpoint();
-    if paren_delimited(p) {
-        return true;
-    }
-    if curly_delimited(p) {
-        return true;
-    }
-    if bracket_delimited(p) {
-        return true;
-    }
-    p.restore(checkpoint);
-    false
-}
-
-// Attribute:attributes* Ident:name <commit> (Literal:value | <balanced_soup>)
-fn token_rule(p: &mut Parser) -> bool {
+// Token = Attribute* Ident '=' String
+fn token(p: &mut Parser) -> bool {
     let m = p.open();
 
     while attribute(p) {}
     if !p.token(Ident) {
         return false;
     }
-    'choice: {
-        let checkpoint = p.checkpoint();
-        if p.token(Literal) {
-            break 'choice;
-        }
-        p.restore(checkpoint);
-        if delimited_expr(p) {
-            break 'choice;
-        }
-        return false;
-    }
+    p.expect(Equals);
+    p.expect(Literal);
+    p.token(Newline);
 
     p.close(m, TreeKind::TokenRule);
     true
 }
 
-// Attribute* ('inline' | 'rule') Ident Parameters? '{' SynExpr '}'
-fn syn_rule(p: &mut Parser) -> bool {
-    let m = p.open();
-
-    while attribute(p) {}
-
-    if !p.token(InlineKeyword) {
-        if !p.token(RuleKeyword) {
-            return false;
-        }
-    }
-    p.expect(Ident);
-    parameters(p);
-    p.expect(LCurly);
-    expr(p, 0);
-    p.expect(RCurly);
-
-    p.close(m, TreeKind::SynRule);
-    true
-}
-
-// '(' <separated_list Ident ','> ')'
+// Parameters = '(' <comma_list Ident> ')'
 fn parameters(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -1244,44 +1077,40 @@ fn parameters(p: &mut Parser) -> bool {
     true
 }
 
-/// ```ignore
-/// @pratt
-/// rule Expr {
-///   Ident | Literal | PreExpr | BinExpr | PostExpr
-/// }
-///
-/// rule PreExpr {
-///   Attribute+ Expr
-/// }
-///
-/// rule AtomExpr {
-///   '<' Ident Expr '>' |
-///   '(' Expr ')'
-/// }
-///
-/// rule SeqExpr {
-///     // incredible
-///     Expr Expr+
-/// }
-///
-/// rule BinExpr {
-///   Expr '|' Expr
-/// }
-///
-/// rule PostExpr {
-///   Expr '?' |
-///   Expr '+' |
-///   Expr Expr
-/// }
-///
-/// ```
-const _: u32 = 0;
+// Rule = Attribute* Ident Parameters? '=' Expr
+fn rule(p: &mut Parser) -> bool {
+    let m = p.open();
+
+    while attribute(p) {}
+
+    if !p.token(Ident) {
+        return false;
+    }
+
+    parameters(p);
+
+    p.token(Equals);
+    expr(p, 0);
+    p.token(Newline);
+
+    p.close(m, TreeKind::SynRule);
+    true
+}
+
+// Expr = pratt {
+//     Atom = Ident | String | RegexString
+//     CallExpr = '<' Ident Expr? '>'
+//     ParenExpr = '(' Expr ')'
+//     PrattExpr = 'pratt' '{' (Newline | Rule)* '}'
+//
+//     PostExpr = Expr ('?' | '*' | '+')
+//     SeqExpr = Expr Expr+
+//     BinExpr = Expr '|' Expr
+// }
 
 // atom bp
 //  '<'  _ _
 //  '('  _ _
-// prefix bp
-//  '@'  _ 4
 // postfix bp
 //  '?'  5 _
 //  '+'  5 _
@@ -1300,26 +1129,23 @@ fn base_expr(p: &mut Parser) -> bool {
             p.advance();
             p.close(m, TreeKind::AtomExpr);
         }
-        At => {
-            while attribute(p) {}
-            // bp table lookup
-            expr(p, 4);
-            p.close(m, TreeKind::PreExpr);
-        }
         LParen => {
             p.advance();
-            // bp table lookup
             expr(p, 0);
-            p.token(RParen);
+            p.expect(RParen);
             p.close(m, TreeKind::ParenExpr);
         }
         LAngle => {
             p.advance();
-            p.token(Ident);
-            // bp table lookup
+            p.expect(Ident);
             expr(p, 0);
-            p.token(RAngle);
+            p.expect(RAngle);
             p.close(m, TreeKind::CallExpr);
+        }
+        PrattKeyword => {
+            p.advance();
+            brace_delimited_lines(p, rule);
+            p.close(m, TreeKind::PrattExpr);
         }
         _ => return false,
     }
@@ -1334,18 +1160,6 @@ fn expr(p: &mut Parser, min_bp: u8) -> bool {
     }
     while let Some(peek) = p.peek() {
         match peek {
-            Colon => {
-                // bp table lookup
-                let bp = (5, ());
-                if bp.0 <= min_bp {
-                    break;
-                }
-
-                p.advance();
-                p.expect(Ident);
-                p.close(m, TreeKind::PostName);
-                continue;
-            }
             Question | Plus | Star => {
                 // bp table lookup
                 let bp = (5, ());
@@ -1397,13 +1211,13 @@ fn expr(p: &mut Parser, min_bp: u8) -> bool {
 
 #[test]
 fn node_find() {
-    let str = "rule A { B }";
+    let str = "rules { A = B | C }";
 
     let mut lexer = Lexer::new(str.as_bytes());
 
     let (tokens, trivia) = lex(&mut lexer);
     let mut parser = crate::Parser::new(str, tokens, trivia);
-    _ = crate::file(&mut parser);
+    rule(&mut parser);
 
     let mut arena = Vec::new();
     let root = parser.build_tree(&mut arena);
@@ -1411,8 +1225,8 @@ fn node_find() {
     assert_eq!(
         root.find_leaf(0, &arena),
         Some(&Node {
-            kind: NodeKind::Token(RuleKeyword),
-            span: StrSpan { start: 0, end: 4 },
+            kind: NodeKind::Token(RulesKeyword),
+            span: StrSpan { start: 0, end: 5 },
             children: 0..0
         })
     );

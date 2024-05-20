@@ -33,15 +33,15 @@ impl ParsedFile {
 }
 
 #[derive(Debug)]
-pub enum Item {
-    Tokenizer(Tokenizer),
-    SynRule(SynRule),
-}
-
-#[derive(Debug)]
 pub struct File {
     pub span: StrSpan,
     pub items: Vec<Item>,
+}
+
+#[derive(Debug)]
+pub enum Item {
+    Tokens(Tokens),
+    Rules(Rules),
 }
 
 pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
@@ -51,12 +51,8 @@ pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
 
     for c in tree.children(arena) {
         match c.kind {
-            NodeKind::Tree(TreeKind::Tokenizer) => {
-                items.extend(tokenizer(c, arena).map(Item::Tokenizer))
-            }
-            NodeKind::Tree(TreeKind::SynRule) => {
-                items.extend(syn_rule(c, arena).map(Item::SynRule))
-            }
+            NodeKind::Tree(TreeKind::Tokens) => items.extend(tokens(c, arena).map(Item::Tokens)),
+            NodeKind::Tree(TreeKind::Rules) => items.extend(rules(c, arena).map(Item::Rules)),
             _ => {}
         }
     }
@@ -68,13 +64,13 @@ pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
 }
 
 #[derive(Debug)]
-pub struct Tokenizer {
+pub struct Tokens {
     pub span: StrSpan,
     pub rules: Vec<TokenRule>,
 }
 
-fn tokenizer(tree: &Node, arena: &[Node]) -> Option<Tokenizer> {
-    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Tokenizer));
+fn tokens(tree: &Node, arena: &[Node]) -> Option<Tokens> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Tokens));
 
     let mut rules = Vec::new();
 
@@ -85,7 +81,31 @@ fn tokenizer(tree: &Node, arena: &[Node]) -> Option<Tokenizer> {
         }
     }
 
-    Some(Tokenizer {
+    Some(Tokens {
+        span: tree.span,
+        rules,
+    })
+}
+
+#[derive(Debug)]
+pub struct Rules {
+    pub span: StrSpan,
+    pub rules: Vec<SynRule>,
+}
+
+fn rules(tree: &Node, arena: &[Node]) -> Option<Rules> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Rules));
+
+    let mut rules = Vec::new();
+
+    for c in tree.children(arena) {
+        match c.kind {
+            NodeKind::Tree(TreeKind::SynRule) => rules.extend(rule(c, arena)),
+            _ => {}
+        }
+    }
+
+    Some(Rules {
         span: tree.span,
         rules,
     })
@@ -117,8 +137,8 @@ fn attribute(tree: &Node, arena: &[Node]) -> Option<Attribute> {
 
 #[derive(Debug)]
 pub enum TokenValue {
-    String(StrSpan),
-    RustCode(StrSpan),
+    String,
+    Regex,
 }
 
 #[derive(Debug)]
@@ -126,7 +146,7 @@ pub struct TokenRule {
     pub span: StrSpan,
     pub name: StrSpan,
     pub attributes: Vec<Attribute>,
-    pub pattern: TokenValue,
+    pub pattern: StrSpan,
 }
 
 fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
@@ -140,10 +160,7 @@ fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
         match c.kind {
             NodeKind::Tree(TreeKind::Attribute) => attrs.extend(attribute(c, arena)),
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
-            NodeKind::Token(TokenKind::Literal) => value = Some(TokenValue::String(c.span)),
-            NodeKind::Tree(
-                TreeKind::ParenDelimited | TreeKind::CurlyDelimited | TreeKind::BracketDelimited,
-            ) => value = Some(TokenValue::RustCode(c.span)),
+            NodeKind::Token(TokenKind::Literal) => value = Some(c.span),
             _ => {}
         }
     }
@@ -190,7 +207,7 @@ pub struct SynRule {
     pub expression: Option<Expression>,
 }
 
-fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
+fn rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
     assert_eq!(tree.kind, NodeKind::Tree(TreeKind::SynRule));
 
     let mut attributes = Vec::new();
@@ -202,14 +219,13 @@ fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
     for c in tree.children(arena) {
         match c.kind {
             NodeKind::Tree(
-                TreeKind::PreExpr
-                | TreeKind::AtomExpr
+                TreeKind::AtomExpr
                 | TreeKind::ParenExpr
+                | TreeKind::PrattExpr
                 | TreeKind::CallExpr
                 | TreeKind::BinExpr
                 | TreeKind::SeqExpr
-                | TreeKind::PostExpr
-                | TreeKind::PostName,
+                | TreeKind::PostExpr,
             ) => {
                 if let Some(e) = expression(c, arena) {
                     expr = Some(e);
@@ -218,7 +234,6 @@ fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
             NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(c, arena)),
             NodeKind::Tree(TreeKind::Parameters) => params = parameters(c, arena),
             NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
-            NodeKind::Token(TokenKind::InlineKeyword) => inline = true,
             _ => {}
         }
     }
@@ -226,7 +241,7 @@ fn syn_rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
     Some(SynRule {
         span: tree.span,
         name: name?,
-        inline,
+        inline: params.is_some(),
         paramaters: params,
         attributes,
         expression: expr,
@@ -280,18 +295,31 @@ pub struct SeqExpr {
     pub span: StrSpan,
     pub exprs: Vec<Expression>,
 }
+#[derive(Debug)]
+pub struct PrattExpr {
+    pub span: StrSpan,
+    pub exprs: Vec<SynRule>,
+}
+
+// Atom = Ident | String | RegexString
+// CallExpr = '<' Ident Expr? '>'
+// ParenExpr = '(' Expr ')'
+// PostExpr = Expr ('?' | '*' | '+')
+// SeqExpr = Expr Expr+
+// BinExpr = Expr '|' Expr
+// PrattExpr = 'pratt' '{' (Newline | Rule)* '}'
 
 #[derive(Debug)]
 pub enum Expression {
     Ident(StrSpan),
     Literal(StrSpan),
+
     Paren(ParenExpr),
-    PreExpr(PreExpr),
     CallExpr(CallExpr),
-    PostName(PostName),
     PostExpr(PostExpr),
     BinExpr(BinExpr),
     SeqExpr(SeqExpr),
+    PrattExpr(PrattExpr),
 }
 
 impl Expression {
@@ -299,13 +327,11 @@ impl Expression {
         fun(self);
         match self {
             Expression::Paren(a) => _ = a.expr.as_ref().map(|e| e.visit(fun)),
-            Expression::PreExpr(a) => a.expr.visit(fun),
             Expression::CallExpr(a) => {
                 if let Some(e) = &a.args {
                     e.visit(fun);
                 }
             }
-            Expression::PostName(a) => a.expr.visit(fun),
             Expression::PostExpr(a) => a.expr.visit(fun),
             Expression::BinExpr(a) => {
                 a.left.visit(fun);
@@ -316,7 +342,14 @@ impl Expression {
                     e.visit(fun);
                 }
             }
-            _ => {}
+            Expression::PrattExpr(a) => {
+                for rule in &a.exprs {
+                    if let Some(e) = &rule.expression {
+                        e.visit(fun);
+                    }
+                }
+            }
+            Expression::Ident(_) | Expression::Literal(_) => {}
         }
     }
 }
@@ -334,26 +367,6 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
                     _ => {}
                 }
             }
-        }
-        NodeKind::Tree(TreeKind::PreExpr) => {
-            let mut attributes = Vec::new();
-            let mut expr = None;
-            for c in tree.children(arena) {
-                match c.kind {
-                    NodeKind::Tree(TreeKind::Attribute) => attributes.extend(attribute(c, arena)),
-                    NodeKind::Tree(_) => {
-                        if let Some(e) = expression(c, arena) {
-                            expr = Some(e);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            return Some(Expression::PreExpr(PreExpr {
-                span,
-                attributes,
-                expr: Box::new(expr?),
-            }));
         }
         NodeKind::Tree(TreeKind::ParenExpr) => {
             let mut expr = None;
@@ -390,26 +403,6 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
                 span,
                 name: name?,
                 args: args.map(Box::new),
-            }));
-        }
-        NodeKind::Tree(TreeKind::PostName) => {
-            let mut name = None;
-            let mut expr = None;
-            for c in tree.children(arena) {
-                match c.kind {
-                    NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
-                    NodeKind::Tree(_) => {
-                        if let Some(e) = expression(c, arena) {
-                            expr = Some(e);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            return Some(Expression::PostName(PostName {
-                span,
-                name: name?,
-                expr: Box::new(expr?),
             }));
         }
         NodeKind::Tree(TreeKind::PostExpr) => {
@@ -471,6 +464,20 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
             }
             return Some(Expression::SeqExpr(SeqExpr { span, exprs }));
         }
+        NodeKind::Tree(TreeKind::PrattExpr) => {
+            let mut exprs = Vec::new();
+            for c in tree.children(arena) {
+                match c.kind {
+                    NodeKind::Tree(_) => {
+                        if let Some(e) = rule(c, arena) {
+                            exprs.push(e);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Some(Expression::PrattExpr(PrattExpr { span, exprs }));
+        }
         _ => {}
     }
 
@@ -517,26 +524,17 @@ pub fn extract_str_literal_impl<'a, U: ExtractedStringAccumulator<'a>>(
 
     let mut l = Lexer::new(src.as_bytes());
 
-    let mut raw = false;
-    if l.peek().unwrap() == b'r' {
-        raw = true;
-        l.next();
-    }
+    let raw = l.consume(b'r');
 
-    let mut balance = 0;
-    loop {
-        match l.next() {
-            Some(b'#') => balance += 1,
-            Some(b'\'') => break,
-            _ => return None,
-        }
+    if !l.consume(b'\'') {
+        return None;
     }
 
     let mut start = l.pos();
     let mut end = start;
 
     string.begin_content(start as usize);
-    'done: loop {
+    loop {
         match l.next() {
             None => return None,
             Some(b'\\') if !raw => {
@@ -544,11 +542,11 @@ pub fn extract_str_literal_impl<'a, U: ExtractedStringAccumulator<'a>>(
                 // do not push the starting \
                 catchup.end -= 1;
 
-                let escaped = match l.next().unwrap() {
-                    b'\\' => Some('\\'),
-                    b'n' => Some('\n'),
-                    b't' => Some('\t'),
-                    b'0' => Some('\0'),
+                let escaped = match l.next() {
+                    Some(b'\\') => Some('\\'),
+                    Some(b'n') => Some('\n'),
+                    Some(b't') => Some('\t'),
+                    Some(b'0') => Some('\0'),
                     _ => None,
                 };
 
@@ -563,17 +561,7 @@ pub fn extract_str_literal_impl<'a, U: ExtractedStringAccumulator<'a>>(
             Some(b'\'') => {
                 // do not include the ending '
                 end = l.pos() - 1;
-                let mut balance = balance;
-                loop {
-                    if balance == 0 {
-                        break 'done;
-                    }
-                    if let Some(b'#') = l.next() {
-                        balance -= 1;
-                    } else {
-                        break;
-                    }
-                }
+                break;
             }
             _ => {}
         }

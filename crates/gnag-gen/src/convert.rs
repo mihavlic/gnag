@@ -80,7 +80,7 @@ pub struct TokenDef {
     pub pattern: TokenPattern,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RuleAttributes {
     pub root: bool,
     pub pratt: bool,
@@ -88,7 +88,7 @@ pub struct RuleAttributes {
     pub right_assoc: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuleDef {
     pub ast: AstItemHandle,
     pub attributes: RuleAttributes,
@@ -164,10 +164,11 @@ impl ConvertedFile {
 
         for item in file_ast.items {
             match item {
-                ast::Item::Tokenizer(a) => {
+                ast::Item::Tokens(a) => {
                     for r in a.rules {
                         let name = r.name;
                         let handle = ast_items.push(AstItem::Token(r, None));
+
                         add_ast_item(
                             cx,
                             name,
@@ -178,27 +179,28 @@ impl ConvertedFile {
                         );
                     }
                 }
-                ast::Item::SynRule(r) => {
-                    let name = r.name;
-                    if r.inline {
-                        let handle = ast_items.push(AstItem::Inline(r, None));
+                ast::Item::Rules(a) => {
+                    for r in a.rules {
+                        let name = r.name;
+                        let inline = r.inline;
+
+                        let handle = ast_items.push(match inline {
+                            true => AstItem::Inline(r, None),
+                            false => AstItem::Rule(r, None),
+                        });
+
+                        let mut push_fn = || match inline {
+                            true => ItemKind::Inline(ast_inlines.push(handle)),
+                            false => ItemKind::Rule(ast_rules.push(handle)),
+                        };
+
                         add_ast_item(
                             cx,
                             name,
                             handle,
                             &mut name_to_item,
                             &mut ast_items,
-                            &mut || ItemKind::Inline(ast_inlines.push(handle)),
-                        );
-                    } else {
-                        let handle = ast_items.push(AstItem::Rule(r, None));
-                        add_ast_item(
-                            cx,
-                            name,
-                            handle,
-                            &mut name_to_item,
-                            &mut ast_items,
-                            &mut || ItemKind::Rule(ast_rules.push(handle)),
+                            &mut push_fn,
                         );
                     }
                 }
@@ -357,20 +359,17 @@ fn convert_ast_rule(
 }
 
 fn convert_ast_token(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::TokenRule) -> TokenDef {
-    let pattern = match ast.pattern {
-        ast::TokenValue::String(span) => {
-            if let Some((str, is_raw)) = ast::extract_str_literal(span.resolve(cx)) {
-                let string = Cow::into_owned(str);
-                match is_raw {
-                    true => TokenPattern::Regex(string),
-                    false => TokenPattern::SimpleString(string),
-                }
-            } else {
-                cx.error(span, "Invalid token pattern");
-                TokenPattern::Invalid
-            }
+    let extracted = ast::extract_str_literal(ast.pattern.resolve(cx));
+
+    let pattern = if let Some((str, is_regex)) = extracted {
+        let string = Cow::into_owned(str);
+        match is_regex {
+            true => TokenPattern::Regex(string),
+            false => TokenPattern::SimpleString(string),
         }
-        ast::TokenValue::RustCode(span) => TokenPattern::RustCode(span.resolve(cx).to_owned()),
+    } else {
+        cx.error(ast.pattern, "Invalid token pattern");
+        TokenPattern::Invalid
     };
 
     let mut attribute = None;
@@ -425,6 +424,9 @@ pub enum RuleExpr {
         element: Box<RuleExpr>,
         separator: Box<RuleExpr>,
     },
+
+    // pratt
+    Pratt(Vec<RuleHandle>),
 }
 
 impl RuleExpr {
@@ -470,60 +472,42 @@ impl RuleExpr {
     //     }
     // }
     pub fn visit_nodes_top_down(&self, mut fun: impl FnMut(&RuleExpr)) {
-        self.visit_nodes_top_down_(&mut fun)
-    }
-    fn visit_nodes_top_down_(&self, fun: &mut dyn FnMut(&RuleExpr)) {
-        fun(self);
-        match self {
-            RuleExpr::Sequence(vec) | RuleExpr::Choice(vec) => {
-                for a in vec {
-                    a.visit_nodes_top_down_(fun);
-                }
-            }
-            RuleExpr::SeparatedList { element, separator } => {
-                element.visit_nodes_top_down_(fun);
-                separator.visit_nodes_top_down_(fun);
-            }
-            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
-                a.visit_nodes_top_down_(fun);
-            }
-            RuleExpr::InlineCall(call) => {
-                for a in &call.parameters {
-                    a.visit_nodes_top_down_(fun);
-                }
-            }
-            RuleExpr::Token(_)
-            | RuleExpr::Rule(_)
-            | RuleExpr::InlineParameter(_)
-            | RuleExpr::Any
-            | RuleExpr::Commit
-            | RuleExpr::Empty
-            | RuleExpr::Error => {}
-        }
+        self.visit_nodes_(true, &mut fun)
     }
     pub fn visit_nodes_bottom_up(&self, mut fun: impl FnMut(&RuleExpr)) {
-        self.visit_nodes_bottom_up_(&mut fun)
+        self.visit_nodes_(false, &mut fun)
     }
-    fn visit_nodes_bottom_up_(&self, fun: &mut dyn FnMut(&RuleExpr)) {
+    pub fn visit_nodes_top_down_mut(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
+        self.visit_nodes_mut_(true, &mut fun)
+    }
+    pub fn visit_nodes_bottom_up_mut(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
+        self.visit_nodes_mut_(false, &mut fun)
+    }
+
+    fn visit_nodes_(&self, top_down: bool, fun: &mut dyn FnMut(&RuleExpr)) {
+        if top_down {
+            fun(self);
+        }
         match self {
             RuleExpr::Sequence(vec) | RuleExpr::Choice(vec) => {
                 for a in vec {
-                    a.visit_nodes_bottom_up_(fun);
+                    a.visit_nodes_(top_down, fun);
                 }
             }
             RuleExpr::SeparatedList { element, separator } => {
-                element.visit_nodes_bottom_up_(fun);
-                separator.visit_nodes_bottom_up_(fun);
+                element.visit_nodes_(top_down, fun);
+                separator.visit_nodes_(top_down, fun);
             }
             RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
-                a.visit_nodes_bottom_up_(fun);
+                a.visit_nodes_(top_down, fun);
             }
             RuleExpr::InlineCall(call) => {
                 for a in &call.parameters {
-                    a.visit_nodes_bottom_up_(fun);
+                    a.visit_nodes_(top_down, fun);
                 }
             }
-            RuleExpr::Token(_)
+            RuleExpr::Pratt(_)
+            | RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
@@ -531,32 +515,34 @@ impl RuleExpr {
             | RuleExpr::Empty
             | RuleExpr::Error => {}
         }
-        fun(self);
+        if !top_down {
+            fun(self);
+        }
     }
-    pub fn visit_nodes_top_down_mut(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
-        self.visit_nodes_top_down_mut_(&mut fun)
-    }
-    fn visit_nodes_top_down_mut_(&mut self, fun: &mut dyn FnMut(&mut RuleExpr)) {
-        fun(self);
+    fn visit_nodes_mut_(&mut self, top_down: bool, fun: &mut dyn FnMut(&mut RuleExpr)) {
+        if top_down {
+            fun(self);
+        }
         match self {
             RuleExpr::Sequence(vec) | RuleExpr::Choice(vec) => {
                 for a in vec {
-                    a.visit_nodes_top_down_mut_(fun);
+                    a.visit_nodes_mut_(top_down, fun);
                 }
             }
             RuleExpr::SeparatedList { element, separator } => {
-                element.visit_nodes_top_down_mut_(fun);
-                separator.visit_nodes_top_down_mut_(fun);
+                element.visit_nodes_mut_(top_down, fun);
+                separator.visit_nodes_mut_(top_down, fun);
             }
             RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
-                a.visit_nodes_top_down_mut_(fun);
+                a.visit_nodes_mut_(top_down, fun);
             }
             RuleExpr::InlineCall(call) => {
                 for a in &mut call.parameters {
-                    a.visit_nodes_top_down_mut_(fun);
+                    a.visit_nodes_mut_(top_down, fun);
                 }
             }
-            RuleExpr::Token(_)
+            RuleExpr::Pratt(_)
+            | RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
@@ -564,38 +550,9 @@ impl RuleExpr {
             | RuleExpr::Empty
             | RuleExpr::Error => {}
         }
-    }
-    pub fn visit_nodes_bottom_up_mut(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
-        self.visit_nodes_bottom_up_mut_(&mut fun)
-    }
-    fn visit_nodes_bottom_up_mut_(&mut self, fun: &mut dyn FnMut(&mut RuleExpr)) {
-        match self {
-            RuleExpr::Sequence(vec) | RuleExpr::Choice(vec) => {
-                for a in vec {
-                    a.visit_nodes_bottom_up_mut_(fun);
-                }
-            }
-            RuleExpr::SeparatedList { element, separator } => {
-                element.visit_nodes_bottom_up_mut_(fun);
-                separator.visit_nodes_bottom_up_mut_(fun);
-            }
-            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
-                a.visit_nodes_bottom_up_mut_(fun);
-            }
-            RuleExpr::InlineCall(call) => {
-                for a in &mut call.parameters {
-                    a.visit_nodes_bottom_up_mut_(fun);
-                }
-            }
-            RuleExpr::Token(_)
-            | RuleExpr::Rule(_)
-            | RuleExpr::InlineParameter(_)
-            | RuleExpr::Any
-            | RuleExpr::Commit
-            | RuleExpr::Empty
-            | RuleExpr::Error => {}
+        if !top_down {
+            fun(self);
         }
-        fun(self);
     }
     pub fn display(&self, buf: &mut dyn std::fmt::Write, file: &ConvertedFile) {
         self.display_with_indent(buf, 0, file);
@@ -607,9 +564,12 @@ impl RuleExpr {
         indent: u32,
         file: &ConvertedFile,
     ) {
-        for _ in 0..indent {
-            write!(buf, "  ");
-        }
+        let print_indent = |buf: &mut dyn std::fmt::Write| {
+            for _ in 0..indent {
+                write!(buf, "  ");
+            }
+        };
+
         let display_slice = |buf: &mut dyn std::fmt::Write, name: &str, exprs: &[RuleExpr]| {
             writeln!(buf, "{name}");
             for expr in exprs {
@@ -623,6 +583,7 @@ impl RuleExpr {
             Ok(())
         };
 
+        print_indent(buf);
         match self {
             RuleExpr::Empty => writeln!(buf, "Empty"),
             RuleExpr::Error => writeln!(buf, "Error"),
@@ -649,6 +610,16 @@ impl RuleExpr {
                 }
                 writeln!(buf, "---");
                 separator.display_with_indent(buf, indent + 1, file);
+                Ok(())
+            }
+            RuleExpr::Pratt(rules) => {
+                writeln!(buf, "pratt");
+
+                for rule in rules {
+                    print_indent(buf);
+                    writeln!(buf, "  {}", rule.name(file));
+                }
+
                 Ok(())
             }
         };
@@ -750,15 +721,13 @@ fn expression(
                 RuleExpr::Error
             }
         }
+        ast::Expression::PrattExpr(_) => {
+            todo!()
+        }
         ast::Expression::Paren(a) => match &a.expr {
             Some(e) => expression(cx, e, parameters, tokens, name_to_item),
             None => RuleExpr::Empty,
         },
-        ast::Expression::PreExpr(a) => {
-            _ = expression(cx, &a.expr, parameters, tokens, name_to_item);
-            cx.error(a.span, "TODO Expression attributes");
-            RuleExpr::Error
-        }
         ast::Expression::CallExpr(a) => {
             let expression = a
                 .args
@@ -806,10 +775,6 @@ fn expression(
                     }
                 },
             }
-        }
-        ast::Expression::PostName(a) => {
-            cx.error(a.span, "TODO postfix name");
-            RuleExpr::Error
         }
         ast::Expression::PostExpr(a) => {
             let inner = Box::new(expression(cx, &a.expr, parameters, tokens, name_to_item));

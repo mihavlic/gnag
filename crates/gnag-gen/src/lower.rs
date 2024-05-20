@@ -127,18 +127,14 @@ fn lower_token(token: &TokenDef, cx: &LoweringCtx) -> LoweredTokenPattern {
                 let AstItem::Token(ast, _) = &cx.file.ast_items[token.ast] else {
                     unreachable!()
                 };
-                let span = match ast.pattern {
-                    gnag::ast::TokenValue::String(s) => s,
-                    gnag::ast::TokenValue::RustCode(s) => s,
-                };
 
                 match err {
                     regex_syntax::Error::Parse(err) => {
-                        let span = convert_regex_syntax_span(err.span(), span, cx);
+                        let span = convert_regex_syntax_span(err.span(), ast.pattern, cx);
                         cx.error(span, err.kind());
                     }
                     regex_syntax::Error::Translate(err) => {
-                        let span = convert_regex_syntax_span(err.span(), span, cx);
+                        let span = convert_regex_syntax_span(err.span(), ast.pattern, cx);
                         cx.error(span, err.kind());
                     }
                     _ => todo!(),

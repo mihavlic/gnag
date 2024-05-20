@@ -13,6 +13,7 @@ pub enum Transition {
     Fail,
     Token(TokenHandle),
     Rule(RuleHandle),
+    PrattRule(RuleHandle, u32),
     // builtins
     Any,
     Not(TokenHandle),
@@ -35,6 +36,7 @@ impl Transition {
             Transition::Error
             | Transition::Token(_)
             | Transition::Rule(_)
+            | Transition::PrattRule(_, _)
             | Transition::Any
             | Transition::Not(_) => TransitionEffects::Fallible,
             Transition::Fail | Transition::RestoreState(_) => TransitionEffects::Infallible,
@@ -51,6 +53,7 @@ impl Transition {
             Transition::Fail => write!(f, "Fail"),
             Transition::Token(a) => write!(f, "Token({})", file.tokens[a].name),
             Transition::Rule(a) => write!(f, "Rule({})", file.rules[a].name),
+            Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", file.rules[a].name),
             Transition::Any => write!(f, "Any"),
             Transition::Not(a) => write!(f, "Not({})", file.tokens[a].name),
             Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
@@ -404,6 +407,9 @@ impl Graph {
             RuleExpr::InlineParameter(_) | RuleExpr::InlineCall(_) => {
                 unreachable!("These should have been eliminated during lowering")
             }
+            RuleExpr::Pratt(_rules) => {
+                todo!()
+            }
         }
     }
     fn error_transition(&mut self, incoming: &[IncomingEdge]) -> PegResult {
@@ -484,13 +490,13 @@ impl Graph {
     ///
     ///          │
     ///    ... ──A
-    ///          │ success transition
+    ///          │ match token
     ///    ... ──B
     ///          │ fail
     ///          C
     ///          │ reset(A)
     ///    ... ──D
-    ///          │ success transition
+    ///          │ match token
     ///    ... ──E
     ///          │ fail
     ///          F
@@ -500,13 +506,13 @@ impl Graph {
     ///
     ///          │
     ///    ... ──A
-    ///          │ success transition
+    ///          │ match token
     ///    ... ──B
     ///          │ fail
     ///          C
     ///          │ reset(A)
     ///    ... ──D
-    ///          │ success transition
+    ///          │ match token
     ///    ... ──E
     ///          │ fail
     ///          F

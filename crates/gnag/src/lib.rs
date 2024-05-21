@@ -460,12 +460,13 @@ impl Node {
         }
     }
     pub fn pretty_print(&self, src: &str, nodes: &[Node], errors: &[SpannedError]) -> String {
+        // TODO what to do about errors?
         let mut buf = String::new();
         self.recursive_format_into(&mut buf, src, nodes, &mut errors.iter(), 0);
         buf
     }
     pub fn pretty_print_with_file(&self, src: &str, file: &ParsedFile) -> String {
-        self.pretty_print(src, &file.arena, &file.errors)
+        self.pretty_print(src, &file.arena, &[])
     }
 }
 
@@ -670,7 +671,7 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(src: &str, tokens: Vec<Token>, trivia: Vec<Token>) -> Parser {
+    pub fn new(src: &'a str, tokens: Vec<Token>, trivia: Vec<Token>) -> Parser<'a> {
         Parser {
             tokens,
             trivia,

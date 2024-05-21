@@ -3,18 +3,17 @@
 use std::borrow::Cow;
 
 use crate::{
-    handle::HandleVec, simple_handle, Lexer, Node, NodeKind, SpannedError, StrSpan, TokenKind,
-    TreeKind,
+    ctx::ErrorAccumulator, handle::HandleVec, simple_handle, Lexer, Node, NodeKind, SpannedError,
+    StrSpan, TokenKind, TreeKind,
 };
 
 pub struct ParsedFile {
     pub root: Node,
     pub arena: Vec<Node>,
-    pub errors: Vec<SpannedError>,
 }
 
 impl ParsedFile {
-    pub fn new(src: &str) -> ParsedFile {
+    pub fn new(src: &str, err: &ErrorAccumulator) -> ParsedFile {
         let mut lexer = Lexer::new(src.as_bytes());
 
         let (tokens, trivia) = crate::lex(&mut lexer);
@@ -24,11 +23,7 @@ impl ParsedFile {
         let mut arena = Vec::new();
         let root = parser.build_tree(&mut arena);
 
-        Self {
-            root,
-            arena,
-            errors: parser.finish(),
-        }
+        Self { root, arena }
     }
 }
 
@@ -214,7 +209,6 @@ fn rule(tree: &Node, arena: &[Node]) -> Option<SynRule> {
     let mut name = None;
     let mut expr = None;
     let mut params = None;
-    let mut inline = false;
 
     for c in tree.children(arena) {
         match c.kind {

@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gnag::{ast::ParsedFile, SpannedError};
+use gnag::{ast::ParsedFile, ctx::ErrorAccumulator};
 use gnag_gen::{
     convert::ConvertedFile,
     graph::Graph,
@@ -93,20 +93,24 @@ fn run() -> Result<(), ()> {
     let src = std::fs::read_to_string(&path).pretty_error(&path, "Failed to read")?;
 
     let linemap = LineMap::new(&src);
-    let report = |errors: &[SpannedError]| {
+
+    let err = ErrorAccumulator::new();
+
+    let report = || {
         let file = file.display();
-        for e in errors {
+        for e in err.get().iter() {
             let Utf16Pos { line, character } = linemap.offset_to_utf16(&src, e.span.start);
             eprintln!("{file}:{}:{} {}", line + 1, character + 1, e.err);
         }
+        err.clear();
     };
 
-    let parsed = ParsedFile::new(&src);
-    report(&parsed.errors);
-    let converted = ConvertedFile::new(&src, &parsed);
-    report(&converted.errors);
-    let lowered = LoweredFile::new(&src, &converted);
-    report(&lowered.errors);
+    let parsed = ParsedFile::new(&src, &err);
+    report();
+    let converted = ConvertedFile::new(&src, &err, &parsed);
+    report();
+    let lowered = LoweredFile::new(&src, &err, &converted);
+    report();
 
     if do_ast || none_enabled {
         let string = parsed.root.pretty_print_with_file(&src, &parsed);

@@ -407,8 +407,10 @@ impl Graph {
             RuleExpr::InlineParameter(_) | RuleExpr::InlineCall(_) => {
                 unreachable!("These should have been eliminated during lowering")
             }
-            RuleExpr::Pratt(_rules) => {
-                todo!()
+            RuleExpr::Pratt(rules) => {
+                // TODO eliminate clone?
+                let choice = RuleExpr::Choice(rules.iter().map(|r| r.expr.clone()).collect());
+                self.convert_expr(&choice, incoming)
             }
         }
     }

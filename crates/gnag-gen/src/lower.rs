@@ -4,13 +4,13 @@ use std::{
 };
 
 use crate::convert::{
-    AstItem, CallExpr, ConvertedFile, InlineHandle, RuleExpr, RuleHandle, TokenDef, TokenHandle,
+    CallExpr, ConvertedFile, InlineHandle, RuleExpr, RuleHandle, TokenDef, TokenHandle,
     TokenPattern,
 };
 use gnag::{
-    ctx::{ConvertCtx, SpanExt},
+    ctx::{ErrorAccumulator, SpanExt},
     handle::{HandleVec, SecondaryVec},
-    SpannedError, StrSpan,
+    StrSpan,
 };
 
 #[derive(Debug)]
@@ -32,43 +32,41 @@ impl Display for LoweredTokenPattern {
     }
 }
 
-pub struct LoweringCtx<'a, 'b> {
-    inner: ConvertCtx<'a>,
-    file: &'b ConvertedFile,
+struct LoweringCx<'a, 'b, 'c> {
+    src: &'a str,
+    err: &'b ErrorAccumulator,
+    file: &'c ConvertedFile,
     stack: Vec<InlineHandle>,
 }
 
-impl<'a, 'b> LoweringCtx<'a, 'b> {
-    pub fn new(src: &'a str, file: &'b ConvertedFile) -> LoweringCtx<'a, 'b> {
+impl<'a, 'b, 'c> Borrow<str> for LoweringCx<'a, 'b, 'c> {
+    fn borrow(&self) -> &str {
+        self.src
+    }
+}
+
+impl<'a, 'b, 'c> LoweringCx<'a, 'b, 'c> {
+    fn new(src: &'a str, err: &'b ErrorAccumulator, file: &'c ConvertedFile) -> Self {
         Self {
-            inner: ConvertCtx::new(src),
+            src,
+            err,
             file,
             stack: Vec::new(),
         }
     }
     pub fn error(&self, span: StrSpan, err: impl ToString) {
-        self.inner.error(span, err)
-    }
-    pub fn finish(self) -> Vec<SpannedError> {
-        self.inner.finish()
-    }
-}
-
-impl Borrow<str> for LoweringCtx<'_, '_> {
-    fn borrow(&self) -> &str {
-        self.inner.borrow()
+        self.err.error(span, err)
     }
 }
 
 pub struct LoweredFile {
     pub tokens: HandleVec<TokenHandle, LoweredTokenPattern>,
     pub rules: HandleVec<RuleHandle, RuleExpr>,
-    pub errors: Vec<SpannedError>,
 }
 
 impl LoweredFile {
-    pub fn new(src: &str, file: &ConvertedFile) -> LoweredFile {
-        let mut cx = LoweringCtx::new(src, file);
+    pub fn new(src: &str, err: &ErrorAccumulator, file: &ConvertedFile) -> LoweredFile {
+        let mut cx = LoweringCx::new(src, err, file);
 
         let mut inlines = SecondaryVec::new();
         for inline in file.inlines.iter_keys() {
@@ -82,11 +80,7 @@ impl LoweredFile {
             expr
         });
 
-        LoweredFile {
-            tokens,
-            rules,
-            errors: cx.finish(),
-        }
+        LoweredFile { tokens, rules }
     }
 }
 
@@ -114,7 +108,7 @@ fn convert_regex_syntax_span(
     }
 }
 
-fn lower_token(token: &TokenDef, cx: &LoweringCtx) -> LoweredTokenPattern {
+fn lower_token(token: &TokenDef, cx: &LoweringCx) -> LoweredTokenPattern {
     match &token.pattern {
         TokenPattern::Regex(pattern) => match regex_syntax::parse(pattern) {
             Ok(hir) => match hir.kind() {
@@ -124,17 +118,13 @@ fn lower_token(token: &TokenDef, cx: &LoweringCtx) -> LoweredTokenPattern {
                 _ => LoweredTokenPattern::Regex(hir),
             },
             Err(err) => {
-                let AstItem::Token(ast, _) = &cx.file.ast_items[token.ast] else {
-                    unreachable!()
-                };
-
                 match err {
                     regex_syntax::Error::Parse(err) => {
-                        let span = convert_regex_syntax_span(err.span(), ast.pattern, cx);
+                        let span = convert_regex_syntax_span(err.span(), token.pattern_span, cx);
                         cx.error(span, err.kind());
                     }
                     regex_syntax::Error::Translate(err) => {
-                        let span = convert_regex_syntax_span(err.span(), ast.pattern, cx);
+                        let span = convert_regex_syntax_span(err.span(), token.pattern_span, cx);
                         cx.error(span, err.kind());
                     }
                     _ => todo!(),
@@ -153,7 +143,7 @@ fn lower_token(token: &TokenDef, cx: &LoweringCtx) -> LoweredTokenPattern {
 fn get_inline<'a>(
     handle: InlineHandle,
     inlines: &'a mut SecondaryVec<InlineHandle, RuleExpr>,
-    cx: &mut LoweringCtx,
+    cx: &mut LoweringCx,
 ) -> &'a RuleExpr {
     // NLL issue workaround https://github.com/rust-lang/rust/issues/54663#issuecomment-973936708
     if inlines.get(handle).is_some() {
@@ -165,10 +155,10 @@ fn get_inline<'a>(
     if cx.stack.contains(&handle) {
         let prev = *cx.stack.last().unwrap();
         let prev_name = cx.file.get_inline_name(prev);
-        let prev_ast = cx.file.get_inline_ast(prev);
+        let prev_span = cx.file.inlines[prev].body.span;
 
         cx.error(
-            prev_ast.span,
+            prev_span,
             format_args!(
                 "Rule {} recursively includes itself through {}",
                 prev_name, ir.body.name
@@ -188,7 +178,7 @@ fn get_inline<'a>(
 fn inline_calls(
     expr: &mut RuleExpr,
     inlines: &mut SecondaryVec<InlineHandle, RuleExpr>,
-    cx: &mut LoweringCtx<'_, '_>,
+    cx: &mut LoweringCx,
 ) {
     expr.visit_nodes_bottom_up_mut(|node| {
         if let RuleExpr::InlineCall(_) = node {

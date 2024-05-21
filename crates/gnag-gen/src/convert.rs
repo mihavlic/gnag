@@ -1,13 +1,13 @@
 use std::{
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     collections::{hash_map::Entry, HashMap},
 };
 
 use gnag::{
-    ast::{self, ParsedFile},
-    ctx::{ConvertCtx, SpanExt},
+    ast::{self, ParsedFile, SynRule, TokenRule},
+    ctx::{ErrorAccumulator, SpanExt},
     handle::HandleVec,
-    SpannedError, StrSpan,
+    StrSpan,
 };
 
 gnag::simple_handle! {
@@ -74,9 +74,10 @@ pub enum TokenAttribute {
 
 #[derive(Debug)]
 pub struct TokenDef {
-    pub ast: AstItemHandle,
+    pub span: StrSpan,
     pub attribute: Option<TokenAttribute>,
     pub name: String,
+    pub pattern_span: StrSpan,
     pub pattern: TokenPattern,
 }
 
@@ -90,7 +91,7 @@ pub struct RuleAttributes {
 
 #[derive(Debug, Clone)]
 pub struct RuleDef {
-    pub ast: AstItemHandle,
+    pub span: StrSpan,
     pub attributes: RuleAttributes,
     pub name: String,
     pub expr: RuleExpr,
@@ -112,180 +113,33 @@ pub enum ItemKind {
 #[derive(Default)]
 pub struct ConvertedFile {
     pub name_to_item: HashMap<String, ItemKind>,
-    pub ast_items: HandleVec<AstItemHandle, AstItem>,
 
     pub tokens: HandleVec<TokenHandle, TokenDef>,
     pub rules: HandleVec<RuleHandle, RuleDef>,
     pub inlines: HandleVec<InlineHandle, InlineDef>,
-
-    pub errors: Vec<SpannedError>,
-}
-
-fn add_ast_item(
-    cx: &mut ConvertCtx<'_>,
-
-    name_span: StrSpan,
-    ast_handle: AstItemHandle,
-    name_to_item: &mut HashMap<String, ItemKind>,
-    ast_items: &mut HandleVec<AstItemHandle, AstItem>,
-
-    push_fn: &mut dyn FnMut() -> ItemKind,
-) {
-    let name = name_span.resolve_owned(cx);
-    match name_to_item.entry(name) {
-        Entry::Occupied(_) => cx.error(name_span, "Duplicate item definition"),
-        Entry::Vacant(e) => {
-            let item_handle = push_fn();
-            e.insert(item_handle);
-            let ast_entry = &mut ast_items[ast_handle];
-            match (item_handle, ast_entry) {
-                (ItemKind::Token(handle), AstItem::Token(_, a)) => *a = Some(handle),
-                (ItemKind::Rule(handle), AstItem::Rule(_, a)) => *a = Some(handle),
-                (ItemKind::Inline(handle), AstItem::Inline(_, a)) => *a = Some(handle),
-                _ => unreachable!(),
-            };
-        }
-    }
 }
 
 impl ConvertedFile {
-    pub fn new(src: &str, file: &ParsedFile) -> ConvertedFile {
+    // fn convert(&mut self, src: &str, err: &ErrorAccumulator, file: &ParsedFile) {}
+    pub fn new(src: &str, err: &ErrorAccumulator, file: &ParsedFile) -> ConvertedFile {
         let file_ast = ast::file(&file.root, &file.arena).unwrap();
 
-        let mut name_to_item = HashMap::new();
-        let mut ast_items = HandleVec::new();
+        let mut cx = ConvertCx::new(src, err);
+        cx.scan_ast(&file_ast);
 
-        let mut ast_tokens = HandleVec::new();
-        let mut ast_rules = HandleVec::new();
-        let mut ast_inlines = HandleVec::new();
-
-        let mut convert_cx = ConvertCtx::new(src);
-        let cx = &mut convert_cx;
-
-        for item in file_ast.items {
-            match item {
-                ast::Item::Tokens(a) => {
-                    for r in a.rules {
-                        let name = r.name;
-                        let handle = ast_items.push(AstItem::Token(r, None));
-
-                        add_ast_item(
-                            cx,
-                            name,
-                            handle,
-                            &mut name_to_item,
-                            &mut ast_items,
-                            &mut || ItemKind::Token(ast_tokens.push(handle)),
-                        );
-                    }
-                }
-                ast::Item::Rules(a) => {
-                    for r in a.rules {
-                        let name = r.name;
-                        let inline = r.inline;
-
-                        let handle = ast_items.push(match inline {
-                            true => AstItem::Inline(r, None),
-                            false => AstItem::Rule(r, None),
-                        });
-
-                        let mut push_fn = || match inline {
-                            true => ItemKind::Inline(ast_inlines.push(handle)),
-                            false => ItemKind::Rule(ast_rules.push(handle)),
-                        };
-
-                        add_ast_item(
-                            cx,
-                            name,
-                            handle,
-                            &mut name_to_item,
-                            &mut ast_items,
-                            &mut push_fn,
-                        );
-                    }
-                }
-            };
-        }
-
-        let ir_tokens = ast_tokens.map(|handle| {
-            let AstItem::Token(ast, _) = &ast_items[handle] else {
-                unreachable!()
-            };
-            convert_ast_token(cx, handle, ast)
-        });
-        let ir_rules = ast_rules.map(|handle| {
-            let AstItem::Rule(ast, _) = &ast_items[handle] else {
-                unreachable!()
-            };
-            convert_ast_rule(cx, handle, ast, &[], &ir_tokens, &name_to_item)
-        });
-        let ir_inlines = ast_inlines.map(|handle| {
-            let AstItem::Inline(ast, _) = &ast_items[handle] else {
-                unreachable!()
-            };
-            convert_ast_inline(cx, handle, ast, &ir_tokens, &name_to_item)
-        });
+        let ir_tokens = cx.ast_tokens.map_ref(|handle| convert_token(&cx, handle));
+        let ir_rules = cx
+            .ast_rules
+            .map_ref(|handle| convert_rule(&cx, handle, &[], &ir_tokens));
+        let ir_inlines = cx
+            .ast_inlines
+            .map_ref(|handle| convert_inline_rule(&cx, handle, &ir_tokens));
 
         ConvertedFile {
-            name_to_item,
-            ast_items,
+            name_to_item: std::mem::take(&mut cx.name_to_item),
             tokens: ir_tokens,
             rules: ir_rules,
             inlines: ir_inlines,
-            errors: convert_cx.finish(),
-        }
-    }
-    pub fn get_token_ast(&self, handle: TokenHandle) -> &ast::TokenRule {
-        let token = &self.tokens[handle];
-        if let AstItem::Token(ast, _) = &self.ast_items[token.ast] {
-            ast
-        } else {
-            unreachable!()
-        }
-    }
-    pub fn get_rule_ast(&self, handle: RuleHandle) -> &ast::SynRule {
-        let rule = &self.rules[handle];
-        if let AstItem::Rule(ast, _) = &self.ast_items[rule.ast] {
-            ast
-        } else {
-            unreachable!()
-        }
-    }
-    pub fn get_inline_ast(&self, handle: InlineHandle) -> &ast::SynRule {
-        let rule = &self.inlines[handle];
-        if let AstItem::Inline(ast, _) = &self.ast_items[rule.body.ast] {
-            ast
-        } else {
-            unreachable!()
-        }
-    }
-    pub fn find_ast_item(&self, pos: u32) -> Option<&AstItem> {
-        let items = self.ast_items.as_slice();
-        let index = match items.binary_search_by_key(&pos, |a| a.span().start) {
-            Ok(ok) => ok,
-            Err(a) => a.checked_sub(1)?,
-        };
-        Some(&items[index])
-    }
-    pub fn find_rule_token(&self, pos: u32) -> Option<TokenHandle> {
-        match self.find_ast_item(pos)? {
-            AstItem::Token(_, handle) => *handle,
-            AstItem::Rule(_, _) => None,
-            AstItem::Inline(_, _) => None,
-        }
-    }
-    pub fn find_rule_handle(&self, pos: u32) -> Option<RuleHandle> {
-        match self.find_ast_item(pos)? {
-            AstItem::Token(_, _) => None,
-            AstItem::Rule(_, handle) => *handle,
-            AstItem::Inline(_, _) => None,
-        }
-    }
-    pub fn find_rule_inline(&self, pos: u32) -> Option<InlineHandle> {
-        match self.find_ast_item(pos)? {
-            AstItem::Token(_, _) => None,
-            AstItem::Rule(_, _) => None,
-            AstItem::Inline(_, handle) => *handle,
         }
     }
     pub fn get_token_name(&self, handle: TokenHandle) -> &str {
@@ -299,41 +153,96 @@ impl ConvertedFile {
     }
 }
 
-fn convert_ast_inline(
-    cx: &ConvertCtx<'_>,
-    handle: AstItemHandle,
+struct ConvertCx<'a, 'b, 'c> {
+    src: &'a str,
+    err: &'b ErrorAccumulator,
+    name_to_item: HashMap<String, ItemKind>,
+    ast_tokens: HandleVec<TokenHandle, &'c TokenRule>,
+    ast_rules: HandleVec<RuleHandle, &'c SynRule>,
+    ast_inlines: HandleVec<InlineHandle, &'c SynRule>,
+}
+
+impl<'a, 'b, 'c> Borrow<str> for ConvertCx<'a, 'b, 'c> {
+    fn borrow(&self) -> &str {
+        self.src
+    }
+}
+
+impl<'a, 'b, 'c> ConvertCx<'a, 'b, 'c> {
+    fn new(src: &'a str, err: &'b ErrorAccumulator) -> Self {
+        Self {
+            src,
+            err,
+            name_to_item: Default::default(),
+            ast_tokens: Default::default(),
+            ast_rules: Default::default(),
+            ast_inlines: Default::default(),
+        }
+    }
+    fn insert_ast(&mut self, name: StrSpan, handle: ItemKind) {
+        let owned_name = name.resolve_owned(self);
+        match self.name_to_item.entry(owned_name) {
+            Entry::Occupied(_) => self.error(name, "Duplicate item definition"),
+            Entry::Vacant(v) => _ = v.insert(handle),
+        }
+    }
+    fn scan_ast(&mut self, ast: &'c ast::File) {
+        for item in &ast.items {
+            match item {
+                ast::Item::Tokens(a) => {
+                    for r in &a.rules {
+                        let handle = ItemKind::Token(self.ast_tokens.push(r));
+                        self.insert_ast(r.name, handle);
+                    }
+                }
+                ast::Item::Rules(a) => {
+                    for r in &a.rules {
+                        let handle = match r.inline {
+                            true => ItemKind::Inline(self.ast_inlines.push(r)),
+                            false => ItemKind::Rule(self.ast_rules.push(r)),
+                        };
+                        self.insert_ast(r.name, handle);
+                    }
+                }
+            };
+        }
+    }
+
+    fn error(&self, span: StrSpan, error: impl ToString) {
+        self.err.error(span, error.to_string());
+    }
+}
+
+fn convert_inline_rule(
+    cx: &ConvertCx,
     ast: &ast::SynRule,
     ir_tokens: &HandleVec<TokenHandle, TokenDef>,
-    name_to_item: &HashMap<String, ItemKind>,
 ) -> InlineDef {
     let parameters = ast
         .paramaters
         .as_ref()
-        .map(|p| {
-            p.params
-                .iter()
-                .map(|parameter| {
-                    let name = parameter.resolve_owned(cx);
-                    if name_to_item.contains_key(&name) {
-                        cx.error(*parameter, "Parameter shadows symbol");
-                    }
-                    name
-                })
-                .collect::<Vec<_>>()
+        .map(|p| p.params.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|parameter| {
+            let name = parameter.resolve_owned(cx);
+            if cx.name_to_item.contains_key(&name) {
+                cx.error(*parameter, "Parameter shadows symbol");
+            }
+            name
         })
-        .unwrap_or_default();
-    let body = convert_ast_rule(cx, handle, ast, &parameters, ir_tokens, name_to_item);
+        .collect::<Vec<_>>();
+
+    let body = convert_rule(cx, ast, &parameters, ir_tokens);
 
     InlineDef { parameters, body }
 }
 
-fn convert_ast_rule(
-    cx: &ConvertCtx<'_>,
-    handle: AstItemHandle,
+fn convert_rule(
+    cx: &ConvertCx,
     ast: &ast::SynRule,
     parameters: &[String],
     ir_tokens: &HandleVec<TokenHandle, TokenDef>,
-    name_to_item: &HashMap<String, ItemKind>,
 ) -> RuleDef {
     let mut attributes = RuleAttributes::default();
     for attr in &ast.attributes {
@@ -347,18 +256,18 @@ fn convert_ast_rule(
     }
 
     let rule = RuleDef {
-        ast: handle,
+        span: ast.span,
         attributes,
         name: ast.name.resolve_owned(cx),
         expr: ast.expression.as_ref().map_or(RuleExpr::Empty, |e| {
-            expression(cx, e, &parameters, ir_tokens, name_to_item)
+            convert_expression(cx, e, &parameters, ir_tokens)
         }),
     };
 
     rule
 }
 
-fn convert_ast_token(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::TokenRule) -> TokenDef {
+fn convert_token(cx: &ConvertCx, ast: &ast::TokenRule) -> TokenDef {
     let extracted = ast::extract_str_literal(ast.pattern.resolve(cx));
 
     let pattern = if let Some((str, is_regex)) = extracted {
@@ -383,9 +292,10 @@ fn convert_ast_token(cx: &ConvertCtx<'_>, handle: AstItemHandle, ast: &ast::Toke
     }
 
     TokenDef {
-        ast: handle,
+        span: ast.span,
         attribute,
         name: ast.name.resolve_owned(cx),
+        pattern_span: ast.pattern,
         pattern,
     }
 }
@@ -426,7 +336,7 @@ pub enum RuleExpr {
     },
 
     // pratt
-    Pratt(Vec<RuleHandle>),
+    Pratt(Vec<RuleDef>),
 }
 
 impl RuleExpr {
@@ -617,71 +527,20 @@ impl RuleExpr {
 
                 for rule in rules {
                     print_indent(buf);
-                    writeln!(buf, "  {}", rule.name(file));
+                    display_nested(buf, &rule.name, &rule.expr);
                 }
 
                 Ok(())
             }
         };
     }
-    // /// Visits all leaf nodes which may be visited by the grammar while no tokens have been consumed.
-    // pub fn visit_prefix_leaves(&self, mut fun: impl FnMut(&RuleExpr) -> bool) {
-    //     self.visit_prefix_leaves_(&mut fun);
-    // }
-    // pub fn visit_prefix_leaves_(&self, fun: &mut dyn FnMut(&RuleExpr) -> bool) -> bool {
-    //     match self {
-    //         RuleExpr::Sequence(a) => {
-    //             if let Some(first) = a.first() {
-    //                 if first.visit_prefix_leaves_(fun) {
-    //                     return true;
-    //                 }
-    //             }
-    //             false
-    //         }
-    //         RuleExpr::Choice(a) => {
-    //             for e in a {
-    //                 if e.visit_prefix_leaves_(fun) {
-    //                     return true;
-    //                 }
-    //             }
-    //             false
-    //         }
-    //         RuleExpr::Loop(a)
-    //         | RuleExpr::OneOrMore(a)
-    //         | RuleExpr::Maybe(a)
-    //         | RuleExpr::SeparatedList { element: a, .. } => a.visit_prefix_leaves_(fun),
-    //         RuleExpr::Token(_)
-    //         | RuleExpr::Rule(_)
-    //         | RuleExpr::InlineParameter(_)
-    //         | RuleExpr::InlineCall(_)
-    //         | RuleExpr::Any
-    //         | RuleExpr::Not(_)
-    //         | RuleExpr::ZeroSpace
-    //         | RuleExpr::Empty
-    //         | RuleExpr::Error
-    //         | RuleExpr::PrattRecursion { .. } => fun(self),
-    //     }
-    // }
-    // pub fn get_sequence_slice(&self) -> &[RuleExpr] {
-    //     match self {
-    //         Self::Sequence(a) => a.as_slice(),
-    //         _ => std::array::from_ref(self),
-    //     }
-    // }
-    // pub fn get_choice_slice(&self) -> &[RuleExpr] {
-    //     match self {
-    //         Self::Choice(a) => a.as_slice(),
-    //         _ => std::array::from_ref(self),
-    //     }
-    // }
 }
 
-fn expression(
-    cx: &ConvertCtx,
+fn convert_expression(
+    cx: &ConvertCx,
     expr: &ast::Expression,
     parameters: &[String],
-    tokens: &HandleVec<TokenHandle, TokenDef>,
-    name_to_item: &HashMap<String, ItemKind>,
+    ir_tokens: &HandleVec<TokenHandle, TokenDef>,
 ) -> RuleExpr {
     match expr {
         ast::Expression::Ident(a) => {
@@ -689,7 +548,7 @@ fn expression(
             if let Some(pos) = parameters.iter().position(|a| a == name) {
                 RuleExpr::InlineParameter(pos)
             } else {
-                match name_to_item.get(name) {
+                match cx.name_to_item.get(name) {
                     Some(ItemKind::Token(t)) => RuleExpr::Token(*t),
                     Some(ItemKind::Rule(r)) => RuleExpr::Rule(*r),
                     Some(ItemKind::Inline(_)) => {
@@ -706,7 +565,7 @@ fn expression(
         ast::Expression::Literal(a) => {
             let value = ast::extract_str_literal(a.resolve(cx)).map(|(s, _)| s);
             if let Some(value) = value {
-                let token = tokens.iter_kv().find(|(_, v)| match &v.pattern {
+                let token = ir_tokens.iter_kv().find(|(_, v)| match &v.pattern {
                     TokenPattern::SimpleString(pattern) => pattern == &value,
                     _ => false,
                 });
@@ -721,18 +580,28 @@ fn expression(
                 RuleExpr::Error
             }
         }
-        ast::Expression::PrattExpr(_) => {
-            todo!()
+        ast::Expression::PrattExpr(rules) => {
+            let rules = rules
+                .exprs
+                .iter()
+                .map(|r| {
+                    if r.inline {
+                        cx.error(r.span, "Rules inside a pratt expression cannot be inline");
+                    }
+                    convert_rule(cx, r, &[], ir_tokens)
+                })
+                .collect();
+            RuleExpr::Pratt(rules)
         }
         ast::Expression::Paren(a) => match &a.expr {
-            Some(e) => expression(cx, e, parameters, tokens, name_to_item),
+            Some(e) => convert_expression(cx, e, parameters, ir_tokens),
             None => RuleExpr::Empty,
         },
         ast::Expression::CallExpr(a) => {
             let expression = a
                 .args
                 .as_ref()
-                .map(|e| expression(cx, e, parameters, tokens, name_to_item));
+                .map(|e| convert_expression(cx, e, parameters, ir_tokens));
 
             let name = a.name.resolve(cx);
 
@@ -759,7 +628,7 @@ fn expression(
                     separator: Box::new(args.pop().unwrap()),
                     element: Box::new(args.pop().unwrap()),
                 }),
-                _ => match name_to_item.get(name) {
+                _ => match cx.name_to_item.get(name) {
                     Some(ItemKind::Inline(rule)) => RuleExpr::InlineCall(Box::new(CallExpr {
                         template: *rule,
                         parameters: arguments,
@@ -777,7 +646,7 @@ fn expression(
             }
         }
         ast::Expression::PostExpr(a) => {
-            let inner = Box::new(expression(cx, &a.expr, parameters, tokens, name_to_item));
+            let inner = Box::new(convert_expression(cx, &a.expr, parameters, ir_tokens));
             match a.kind {
                 ast::PostExprKind::Question => RuleExpr::Maybe(inner),
                 ast::PostExprKind::Star => RuleExpr::Loop(inner),
@@ -786,14 +655,14 @@ fn expression(
         }
         ast::Expression::BinExpr(_) => {
             let mut vec = Vec::new();
-            binary_expression(cx, expr, parameters, tokens, name_to_item, &mut vec);
+            binary_expression(cx, expr, parameters, ir_tokens, &mut vec);
             RuleExpr::Choice(vec)
         }
         ast::Expression::SeqExpr(seq) => {
             let vec = seq
                 .exprs
                 .iter()
-                .map(|e| expression(cx, e, parameters, tokens, name_to_item))
+                .map(|e| convert_expression(cx, e, parameters, ir_tokens))
                 .collect();
             RuleExpr::Sequence(vec)
         }
@@ -801,20 +670,19 @@ fn expression(
 }
 
 fn binary_expression(
-    cx: &ConvertCtx,
+    cx: &ConvertCx,
     expr: &ast::Expression,
     parameters: &[String],
     tokens: &HandleVec<TokenHandle, TokenDef>,
-    name_to_item: &HashMap<String, ItemKind>,
     vec: &mut Vec<RuleExpr>,
 ) {
     match expr {
         ast::Expression::BinExpr(a) => {
-            binary_expression(cx, &a.left, parameters, tokens, name_to_item, vec);
-            binary_expression(cx, &a.right, parameters, tokens, name_to_item, vec);
+            binary_expression(cx, &a.left, parameters, tokens, vec);
+            binary_expression(cx, &a.right, parameters, tokens, vec);
         }
         _ => {
-            vec.push(expression(cx, expr, parameters, tokens, name_to_item));
+            vec.push(convert_expression(cx, expr, parameters, tokens));
         }
     }
 }

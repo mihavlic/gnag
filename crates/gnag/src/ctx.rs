@@ -17,17 +17,14 @@ impl SpanExt for StrSpan {
     }
 }
 
-pub struct ConvertCtx<'a> {
-    src: &'a str,
+#[derive(Default)]
+pub struct ErrorAccumulator {
     errors: RefCell<Vec<SpannedError>>,
 }
 
-impl<'a> ConvertCtx<'a> {
-    pub fn new(src: &'a str) -> Self {
-        Self {
-            src,
-            errors: Default::default(),
-        }
+impl ErrorAccumulator {
+    pub fn new() -> Self {
+        Self::default()
     }
     pub fn error(&self, span: StrSpan, err: impl ToString) {
         self.errors.borrow_mut().push(SpannedError {
@@ -35,13 +32,10 @@ impl<'a> ConvertCtx<'a> {
             err: err.to_string(),
         });
     }
-    pub fn finish(self) -> Vec<SpannedError> {
-        RefCell::into_inner(self.errors)
+    pub fn get(&self) -> std::cell::Ref<Vec<SpannedError>> {
+        self.errors.borrow()
     }
-}
-
-impl Borrow<str> for ConvertCtx<'_> {
-    fn borrow(&self) -> &str {
-        self.src
+    pub fn clear(&self) {
+        self.errors.borrow_mut().clear();
     }
 }

@@ -434,6 +434,15 @@ pub struct HandleBitset<H> {
     spooky: PhantomData<H>,
 }
 
+impl<H> Default for HandleBitset<H> {
+    fn default() -> Self {
+        Self {
+            set: Default::default(),
+            spooky: Default::default(),
+        }
+    }
+}
+
 impl<H> Clone for HandleBitset<H> {
     fn clone(&self) -> Self {
         Self {

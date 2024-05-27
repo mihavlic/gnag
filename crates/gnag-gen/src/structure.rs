@@ -2,7 +2,6 @@ use crate::convert::ConvertedFile;
 use crate::graph::Graph;
 use crate::graph::NodeHandle;
 use crate::graph::PegNode;
-use crate::graph::Transition;
 use crate::graph::TransitionEffects;
 use crate::scope_tree::ScopeHandle;
 use crate::scope_tree::ScopeKind;
@@ -389,7 +388,7 @@ pub fn display_code(
                     writeln!(buf, "{suffix}");
                 }
 
-                if let Transition::CloseSpan(_) | Transition::ReturnFail = transition {
+                if effects == TransitionEffects::Noreturn {
                     transition.display(buf, file);
                     writeln!(buf, ";");
                     continue;
@@ -432,10 +431,10 @@ pub fn display_code(
                         transition.display(buf, file);
                         writeln!(buf, " {{");
 
-                        print_indent(buf, indent);
-                        print_action(buf, success, "    true => ", ",", &stack);
-                        print_indent(buf, indent);
-                        print_action(buf, fail, "    false => ", ",", &stack);
+                        print_indent(buf, indent + 1);
+                        print_action(buf, success, "true => ", ",", &stack);
+                        print_indent(buf, indent + 1);
+                        print_action(buf, fail, "false => ", ",", &stack);
 
                         print_indent(buf, indent);
                         writeln!(buf, "}}");

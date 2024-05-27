@@ -6,7 +6,7 @@ use std::{
 use gnag::{ast::ParsedFile, ctx::ErrorAccumulator};
 use gnag_gen::{
     convert::ConvertedFile,
-    graph::Graph,
+    graph::{Graph, GraphScratch},
     lower::LoweredFile,
     structure::{display_code, GraphStructuring},
 };
@@ -140,9 +140,16 @@ fn run() -> Result<(), ()> {
         println!();
     }
 
-    let graphs = lowered
-        .rules
-        .map_ref_with_key(|handle, expr| Graph::new(handle, expr));
+    let mut scratch = GraphScratch::new();
+
+    let graphs = lowered.rules.map_ref_with_key(|handle, expr| {
+        let mut graph = Graph::new();
+        let entry = graph.convert_rule(handle, expr);
+        if let Some(entry) = entry {
+            graph.optimize(&mut scratch, entry);
+        }
+        graph
+    });
 
     if do_dot || none_enabled {
         let mut offset = 0;

@@ -84,7 +84,6 @@ pub struct TokenDef {
 #[derive(Debug, Default, Clone)]
 pub struct RuleAttributes {
     pub root: bool,
-    pub pratt: bool,
     pub left_assoc: bool,
     pub right_assoc: bool,
 }
@@ -248,7 +247,6 @@ fn convert_rule(
     for attr in &ast.attributes {
         match attr.name.resolve(cx) {
             "root" => attributes.root = true,
-            "pratt" => attributes.pratt = true,
             "left" => attributes.left_assoc = true,
             "right" => attributes.right_assoc = true,
             _ => cx.error(attr.name, "Unknown attribute"),

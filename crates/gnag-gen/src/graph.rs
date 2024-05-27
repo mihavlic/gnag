@@ -20,7 +20,7 @@ pub enum Transition {
     // function start/end
     RestoreState(NodeHandle),
     CloseSpan(RuleHandle),
-    ReturnFail,
+    Return(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,8 +39,10 @@ impl Transition {
             | Transition::PrattRule(_, _)
             | Transition::Any
             | Transition::Not(_) => TransitionEffects::Fallible,
-            Transition::Fail | Transition::RestoreState(_) => TransitionEffects::Infallible,
-            Transition::ReturnFail | Transition::CloseSpan(_) => TransitionEffects::Noreturn,
+            Transition::Fail | Transition::RestoreState(_) | Transition::CloseSpan(_) => {
+                TransitionEffects::Infallible
+            }
+            Transition::Return(_) => TransitionEffects::Noreturn,
         }
     }
     pub fn display(
@@ -58,7 +60,7 @@ impl Transition {
             Transition::Not(a) => write!(f, "Not({})", file.tokens[a].name),
             Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
             Transition::CloseSpan(a) => write!(f, "CloseSpan({})", file.rules[a].name),
-            Transition::ReturnFail => write!(f, "ReturnFail"),
+            Transition::Return(value) => write!(f, "Return({value})"),
         }
     }
 }
@@ -118,6 +120,17 @@ impl PegNode {
             self.success = Some(to);
         }
     }
+    /// return whether failure in this node has the same control flow as success
+    fn fail_same_as_success(&self) -> bool {
+        return self.fail.is_none() || self.fail == self.success;
+    }
+    fn free_fail_edge(&mut self) -> bool {
+        if self.fail.is_some() {
+            self.fail = None;
+            return true;
+        }
+        return false;
+    }
     pub fn for_edges(&self, mut fun: impl FnMut(NodeHandle)) {
         if let Some(success) = self.success {
             fun(success);
@@ -163,40 +176,74 @@ impl PegResult {
     }
 }
 
+// we need to keep GraphScratch separate due to the borrow checker
+pub struct GraphScratch {
+    scratch1: HandleBitset<NodeHandle>,
+    scratch2: HandleBitset<NodeHandle>,
+}
+
+impl GraphScratch {
+    pub fn new() -> Self {
+        Self {
+            scratch1: HandleBitset::new(),
+            scratch2: HandleBitset::new(),
+        }
+    }
+}
+
 pub struct Graph {
     nodes: HandleVec<NodeHandle, PegNode>,
     // TODO spans
     errors: Vec<String>,
-    entry: Option<NodeHandle>,
+    // a sidechannel to give information to convert_expr for pratt conversion
+    current_rule: Option<RuleHandle>,
 }
 
 impl Graph {
-    pub fn new(handle: RuleHandle, expr: &RuleExpr) -> Graph {
-        let mut graph = Graph {
+    pub fn new() -> Graph {
+        Graph {
             nodes: HandleVec::new(),
             errors: Vec::new(),
-            entry: None,
-        };
+            current_rule: None,
+        }
+    }
+    pub fn convert_rule(&mut self, handle: RuleHandle, expr: &RuleExpr) -> Option<NodeHandle> {
+        // good code right here
+        self.current_rule = Some(handle);
+        let mut result = self.convert_expr(expr, vec![]);
+        self.current_rule = None;
 
-        let result = graph.convert_expr(expr, vec![]);
-
-        if let Some(entry) = result.entry {
-            graph.entry = Some(entry);
-            let _success = graph.single_transition(&result.success, Transition::CloseSpan(handle));
-            let _fail = graph.single_transition(&result.fail, Transition::ReturnFail);
+        if let Some(_) = result.entry {
+            if !matches!(expr, RuleExpr::Pratt(_)) {
+                let success =
+                    self.single_transition(&result.success, Transition::CloseSpan(handle));
+                result.success = success.success;
+            }
+            self.single_transition(&result.success, Transition::Return(true));
+            self.single_transition(&result.fail, Transition::Return(false));
         }
 
-        let mut reachable = HandleBitset::new();
-        let mut bitset2 = HandleBitset::new();
-        // reorder does not move the entry
-        graph.reorder(&mut reachable, &mut bitset2);
-        graph.merge_state_resets(&mut reachable, &mut bitset2);
-
-        graph
+        result.entry
     }
+    /// Reorder the graph into a topological order which is suitable for lowering to code, Removes reduntand parser state resets.
+    /// The new graph only contains nodes reachable from the entry.
+    pub fn optimize(&mut self, scratch: &mut GraphScratch, entry: NodeHandle) {
+        // reorder does not move the entry
+        self.reorder(entry, &mut scratch.scratch1, &mut scratch.scratch2);
+        self.merge_state_resets(entry, &mut scratch.scratch1, &mut scratch.scratch2);
+    }
+}
+
+impl Graph {
     fn connect_backward_edges(&mut self, node: NodeHandle, incoming: &[IncomingEdge]) {
         for edge in incoming {
             assert!(edge.from >= node);
+            self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
+        }
+    }
+    fn connect_forward_edges(&mut self, node: NodeHandle, incoming: &[IncomingEdge]) {
+        for edge in incoming {
+            assert!(edge.from < node);
             self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
         }
     }
@@ -407,10 +454,94 @@ impl Graph {
             RuleExpr::InlineParameter(_) | RuleExpr::InlineCall(_) => {
                 unreachable!("These should have been eliminated during lowering")
             }
-            RuleExpr::Pratt(rules) => {
-                // TODO eliminate clone?
-                let choice = RuleExpr::Choice(rules.iter().map(|r| r.expr.clone()).collect());
-                self.convert_expr(&choice, incoming)
+            RuleExpr::Pratt(vec) => {
+                // TODO improve robustness, left recursion recognition is very dumb
+                let mut prefix_entry = None;
+                let mut prefix_fail = incoming;
+                let mut prefix_success = Vec::new();
+
+                let mut otherwise_entry = None;
+                let mut otherwise_fail = Vec::new();
+                let mut otherwise_success = Vec::new();
+
+                for rule in vec {
+                    let mut result = self.convert_expr(&rule.expr, vec![]);
+
+                    let Some(mut first_handle) = result.entry else {
+                        continue;
+                    };
+
+                    let first_node = &self.nodes[first_handle];
+
+                    let mut is_recursive = false;
+                    if let Transition::Rule(rule) = first_node.transition {
+                        if Some(rule) == self.current_rule {
+                            let Some(next_handle) = first_node.success else {
+                                // TODO emit error
+                                continue;
+                            };
+                            let next_node = &mut self.nodes[next_handle];
+                            // we are skipping the first rule, if the rule expression was a sequence,
+                            // it may have been committed after the first node
+                            // so we have to reintroduce a correct fail edge
+                            if next_node.fail_same_as_success() {
+                                if next_node.free_fail_edge() {
+                                    result.fail.push(IncomingEdge {
+                                        from: next_handle,
+                                        is_fail: true,
+                                    });
+                                }
+                            }
+                            first_handle = next_handle;
+
+                            is_recursive = true;
+                        }
+                    }
+
+                    if is_recursive {
+                        result.success = self
+                            .single_transition(
+                                &result.success,
+                                Transition::CloseSpan(self.current_rule.unwrap()),
+                            )
+                            .success;
+                    }
+
+                    let (fail, success, entry) = match is_recursive {
+                        false => (&mut prefix_fail, &mut prefix_success, &mut prefix_entry),
+                        true => (
+                            &mut otherwise_fail,
+                            &mut otherwise_success,
+                            &mut otherwise_entry,
+                        ),
+                    };
+
+                    if entry.is_none() {
+                        *entry = Some(first_handle);
+                    }
+
+                    self.connect_forward_edges(first_handle, fail);
+                    *fail = std::mem::take(&mut result.fail);
+                    success.append(&mut result.success);
+                }
+
+                if prefix_entry.is_none() {
+                    prefix_entry = otherwise_entry;
+                }
+
+                if let Some(otherwise_entry) = otherwise_entry {
+                    self.connect_forward_edges(otherwise_entry, &prefix_success);
+                    self.connect_backward_edges(otherwise_entry, &otherwise_success);
+                    otherwise_success = std::mem::take(&mut otherwise_fail);
+                } else {
+                    otherwise_success = prefix_success;
+                }
+
+                PegResult {
+                    entry: prefix_entry,
+                    success: otherwise_success,
+                    fail: prefix_fail,
+                }
             }
         }
     }
@@ -522,6 +653,7 @@ impl Graph {
     /// ```
     fn merge_state_resets(
         &mut self,
+        entry: NodeHandle,
         reachable: &mut HandleBitset<NodeHandle>,
         scratch: &mut HandleBitset<NodeHandle>,
     ) {
@@ -544,10 +676,6 @@ impl Graph {
                 *self = InitialState::Original(this);
             }
         }
-
-        let Some(entry) = self.entry else {
-            return;
-        };
 
         let nodes = self.get_nodes();
         let mut states = nodes.map_fill(InitialState::None);
@@ -595,13 +723,10 @@ impl Graph {
     /// Also eliminates unreachable nodes.
     fn reorder(
         &mut self,
+        entry: NodeHandle,
         reachable: &mut HandleBitset<NodeHandle>,
         scratch: &mut HandleBitset<NodeHandle>,
     ) {
-        let Some(entry) = self.entry else {
-            return;
-        };
-
         // count the number of incoming forward edges
         //  A   B
         //   \ /

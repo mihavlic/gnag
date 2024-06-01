@@ -1,6 +1,7 @@
 use crate::convert::ConvertedFile;
 use crate::graph::NodeHandle;
 use crate::graph::PegNode;
+use crate::graph::Transition;
 use crate::graph::TransitionEffects;
 use crate::scope_tree::ScopeHandle;
 use crate::scope_tree::ScopeKind;
@@ -389,6 +390,15 @@ pub fn display_code(
                         }
                     }
                     writeln!(buf, "{suffix}");
+                }
+
+                if transition == Transition::Dummy {
+                    writeln!(buf, "// dummy");
+                    if success != FlowAction::None {
+                        print_indent(buf, indent);
+                        print_action(buf, success, "", ";", &stack);
+                    }
+                    continue;
                 }
 
                 if effects == TransitionEffects::Noreturn {

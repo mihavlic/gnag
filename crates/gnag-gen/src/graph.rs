@@ -11,7 +11,7 @@ use crate::{
     lower::LoweredFile,
 };
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum Transition {
     Error,
     Fail,
@@ -25,6 +25,8 @@ pub enum Transition {
     RestoreState(NodeHandle),
     CloseSpan(RuleHandle),
     Return(bool),
+    // does nothing
+    Dummy,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,7 +44,8 @@ impl Transition {
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
             | Transition::Any
-            | Transition::Not(_) => TransitionEffects::Fallible,
+            | Transition::Not(_)
+            | Transition::Dummy => TransitionEffects::Fallible,
             Transition::Fail | Transition::RestoreState(_) | Transition::CloseSpan(_) => {
                 TransitionEffects::Infallible
             }
@@ -65,6 +68,7 @@ impl Transition {
             Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
             Transition::CloseSpan(a) => write!(f, "CloseSpan({})", file.rules[a].name),
             Transition::Return(value) => write!(f, "Return({value})"),
+            Transition::Dummy => write!(f, "Dummy"),
         }
     }
 }
@@ -547,6 +551,10 @@ impl<'a> GraphBuilder<'a> {
                 }
 
                 if let Some(otherwise_entry) = otherwise_entry {
+                    let mut dummy = self.single_transition(&otherwise_fail, Transition::Dummy);
+                    otherwise_fail = dummy.success;
+                    otherwise_success.append(&mut dummy.fail);
+
                     self.connect_forward_edges(otherwise_entry, &prefix_success);
                     self.connect_backward_edges(otherwise_entry, &otherwise_success);
                     otherwise_success = std::mem::take(&mut otherwise_fail);

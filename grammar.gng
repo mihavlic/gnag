@@ -8,11 +8,11 @@ tokens {
     @error
     ErrorToken = r'\S+'
 
-    String = 'r'? <string_like '\''> # TODO
+    String = r'TODO' # 'r'? <string_like '\''> # TODO
 
     InlineKeyword = 'inline'
-    TokenizerKeyword = 'tokenizer'
-    RuleKeyword = 'rule'
+    TokensKeywords = 'tokens'
+    RulesKeyword = 'rules'
     PrattKeyword = 'pratt'
     GroupKeyword = 'group'
     Ident = r'\w+' # <class_word>
@@ -44,7 +44,7 @@ rules {
     Rules = 'rules' <brace_delimited_lines Rule>
 
     Attribute = '@' Ident Newline?
-    Token = Attribute* Ident '=' (String | RegexString) Newline?
+    Token = Attribute* Ident '=' String Newline?
 
     Parameters = '(' <comma_list Ident> ')'
     Rule = Attribute* Ident Parameters? '=' Expr Newline?
@@ -53,7 +53,7 @@ rules {
     # GroupItem = Ident Ident
 
     Expr = pratt {
-        Atom = Ident | String | RegexString
+        Atom = Ident | String
         CallExpr = '<' Ident Expr? '>'
         ParenExpr = '(' Expr ')'
         PrattExpr = 'pratt' <brace_delimited_lines Rule>

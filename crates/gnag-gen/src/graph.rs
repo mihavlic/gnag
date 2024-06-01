@@ -1,11 +1,15 @@
 use std::fmt::{Display, Formatter, Write};
 
 use gnag::{
+    ctx::ErrorAccumulator,
     handle::{Bitset, HandleBitset, HandleVec, SecondaryVec, TypedHandle},
-    simple_handle,
+    simple_handle, StrSpan,
 };
 
-use crate::convert::{ConvertedFile, RuleExpr, RuleHandle, TokenHandle};
+use crate::{
+    convert::{ConvertedFile, RuleExpr, RuleHandle, TokenHandle},
+    lower::LoweredFile,
+};
 
 #[derive(Clone, Debug, Copy)]
 pub enum Transition {
@@ -176,36 +180,44 @@ impl PegResult {
     }
 }
 
-// we need to keep GraphScratch separate due to the borrow checker
-pub struct GraphScratch {
+pub struct GraphBuilder<'a> {
+    nodes: HandleVec<NodeHandle, PegNode>,
+    err: &'a ErrorAccumulator,
+    // a sidechannel to give information to convert_expr for pratt conversion
+    current_rule: Option<RuleHandle>,
+
+    // scratch data for rule conversion
+    // TODO use a bump allocator and allocate as needed
     scratch1: HandleBitset<NodeHandle>,
     scratch2: HandleBitset<NodeHandle>,
 }
 
-impl GraphScratch {
-    pub fn new() -> Self {
-        Self {
-            scratch1: HandleBitset::new(),
-            scratch2: HandleBitset::new(),
+impl<'a> GraphBuilder<'a> {
+    pub fn new(err: &'a ErrorAccumulator) -> GraphBuilder {
+        GraphBuilder {
+            nodes: HandleVec::new(),
+            err,
+            current_rule: None,
+            scratch1: Default::default(),
+            scratch2: Default::default(),
         }
     }
-}
-
-pub struct Graph {
-    nodes: HandleVec<NodeHandle, PegNode>,
-    // TODO spans
-    errors: Vec<String>,
-    // a sidechannel to give information to convert_expr for pratt conversion
-    current_rule: Option<RuleHandle>,
-}
-
-impl Graph {
-    pub fn new() -> Graph {
-        Graph {
-            nodes: HandleVec::new(),
-            errors: Vec::new(),
-            current_rule: None,
-        }
+    pub fn convert_file(
+        &mut self,
+        optimize: bool,
+        lowered: &LoweredFile,
+    ) -> HandleVec<RuleHandle, HandleVec<NodeHandle, PegNode>> {
+        self.clear();
+        lowered.rules.map_ref_with_key(|handle, expr| {
+            self.clear();
+            let entry = self.convert_rule(handle, expr);
+            if let Some(entry) = entry {
+                if optimize {
+                    self.optimize(entry);
+                }
+            }
+            self.get_nodes().clone()
+        })
     }
     pub fn convert_rule(&mut self, handle: RuleHandle, expr: &RuleExpr) -> Option<NodeHandle> {
         // good code right here
@@ -227,14 +239,26 @@ impl Graph {
     }
     /// Reorder the graph into a topological order which is suitable for lowering to code, Removes reduntand parser state resets.
     /// The new graph only contains nodes reachable from the entry.
-    pub fn optimize(&mut self, scratch: &mut GraphScratch, entry: NodeHandle) {
+    pub fn optimize(&mut self, entry: NodeHandle) {
         // reorder does not move the entry
-        self.reorder(entry, &mut scratch.scratch1, &mut scratch.scratch2);
-        self.merge_state_resets(entry, &mut scratch.scratch1, &mut scratch.scratch2);
+        self.reorder(entry);
+        self.merge_state_resets(entry);
+    }
+    pub fn get_node(&self, node: NodeHandle) -> Option<&PegNode> {
+        self.nodes.get(node)
+    }
+    pub fn get_nodes(&self) -> &HandleVec<NodeHandle, PegNode> {
+        &self.nodes
+    }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+    pub fn clear(&mut self) {
+        self.nodes.clear();
     }
 }
 
-impl Graph {
+impl<'a> GraphBuilder<'a> {
     fn connect_backward_edges(&mut self, node: NodeHandle, incoming: &[IncomingEdge]) {
         for edge in incoming {
             assert!(edge.from >= node);
@@ -262,14 +286,8 @@ impl Graph {
         let next = peek.0;
         self.get_node(next).is_some().then_some(next)
     }
-    pub fn get_node(&self, node: NodeHandle) -> Option<&PegNode> {
-        self.nodes.get(node)
-    }
-    pub fn get_nodes(&self) -> &HandleVec<NodeHandle, PegNode> {
-        &self.nodes
-    }
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+    fn error(&self, /* span: StrSpan, */ error: String) {
+        self.err.error(StrSpan::empty(), error);
     }
     fn convert_expr_nonempty(
         &mut self,
@@ -279,7 +297,7 @@ impl Graph {
     ) -> PegResult {
         let result = self.convert_expr(expr, incoming);
         if result.entry.is_none() {
-            self.errors.push(error.to_owned());
+            self.error(error.to_owned());
             return self.error_transition(&result.merged_edges());
         };
         result
@@ -413,8 +431,7 @@ impl Graph {
                 if let RuleExpr::Token(token) = **expr {
                     self.single_transition(&incoming, Transition::Not(token))
                 } else {
-                    self.errors
-                        .push("RuleExpr::Not only works with tokens".to_owned());
+                    self.error("RuleExpr::Not only works with tokens".to_owned());
                     self.error_transition(&incoming)
                 }
             }
@@ -574,7 +591,7 @@ impl Graph {
         }
     }
     fn visit_edges_dfs(
-        &self,
+        nodes: &HandleVec<NodeHandle, PegNode>,
         handle: NodeHandle,
         explored: &mut HandleBitset<NodeHandle>,
         scratch: &mut HandleBitset<NodeHandle>,
@@ -582,7 +599,7 @@ impl Graph {
         mut fun: impl FnMut(Option<NodeHandle>, NodeHandle, bool) -> bool,
     ) {
         fn dyn_impl(
-            graph: &Graph,
+            nodes: &HandleVec<NodeHandle, PegNode>,
             parent: Option<NodeHandle>,
             child: NodeHandle,
             explored: &mut HandleBitset<NodeHandle>,
@@ -597,8 +614,8 @@ impl Graph {
                 explored.insert(child);
                 on_stack.insert(child);
 
-                graph.get_node(child).unwrap().for_edges(|node| {
-                    dyn_impl(graph, Some(child), node, explored, on_stack, fun);
+                nodes[child].for_edges(|node| {
+                    dyn_impl(nodes, Some(child), node, explored, on_stack, fun);
                 });
 
                 on_stack.remove(child);
@@ -607,7 +624,7 @@ impl Graph {
 
         explored.clear();
         scratch.clear();
-        dyn_impl(self, None, handle, explored, scratch, &mut fun);
+        dyn_impl(nodes, None, handle, explored, scratch, &mut fun);
     }
     /// Maps the state of the parser through the graph and transitively propagates state resets
     /// to the earliest checkpoint.
@@ -651,12 +668,7 @@ impl Graph {
     ///          F
     ///          │ reset(A) // <<<<<<<<<<<<<<<<<<
     /// ```
-    fn merge_state_resets(
-        &mut self,
-        entry: NodeHandle,
-        reachable: &mut HandleBitset<NodeHandle>,
-        scratch: &mut HandleBitset<NodeHandle>,
-    ) {
+    fn merge_state_resets(&mut self, entry: NodeHandle) {
         #[derive(Clone, Copy, PartialEq, Eq)]
         enum InitialState {
             None,
@@ -677,7 +689,13 @@ impl Graph {
             }
         }
 
-        let nodes = self.get_nodes();
+        let Self {
+            nodes,
+            scratch1: reachable,
+            scratch2: scratch,
+            ..
+        } = self;
+
         let mut states = nodes.map_fill(InitialState::None);
 
         states[entry].original(entry);
@@ -699,7 +717,7 @@ impl Graph {
             }
         }
 
-        self.visit_edges_dfs(entry, reachable, scratch, |_, child, _| {
+        Self::visit_edges_dfs(&self.nodes, entry, reachable, scratch, |_, child, _| {
             if let InitialState::Sameas(node) = states[child] {
                 states[child] = states[node];
             }
@@ -721,48 +739,58 @@ impl Graph {
     /// directly after their parents (Backward edges are preserved), which leads to more natural generated code.
     ///
     /// Also eliminates unreachable nodes.
-    fn reorder(
-        &mut self,
-        entry: NodeHandle,
-        reachable: &mut HandleBitset<NodeHandle>,
-        scratch: &mut HandleBitset<NodeHandle>,
-    ) {
+    fn reorder(&mut self, entry: NodeHandle) {
+        let reachable = &mut self.scratch1;
+        let scratch = &mut self.scratch2;
+
         // count the number of incoming forward edges
         //  A   B
         //   \ /
         // ┌─►C    C has 2 parents
         // └──┘
         let mut parent_count = self.nodes.map_fill(0);
-        self.visit_edges_dfs(entry, reachable, scratch, |_, child, is_backward_edge| {
-            if !is_backward_edge {
-                parent_count[child] += 1;
-            }
-            true
-        });
+        Self::visit_edges_dfs(
+            &self.nodes,
+            entry,
+            reachable,
+            scratch,
+            |_, child, is_backward_edge| {
+                if !is_backward_edge {
+                    parent_count[child] += 1;
+                }
+                true
+            },
+        );
 
         assert_eq!(parent_count[entry], 1);
 
         // old_node -> new_node
-        let mut renames = SecondaryVec::new();
+        let mut renames = SecondaryVec::with_capacity(self.nodes.len());
         // new_node -> old_node
         let mut collect = HandleVec::new();
 
         // iterate the graph in topological order, storing the visited sequence
-        self.visit_edges_dfs(entry, reachable, scratch, |_, child, is_backward_edge| {
-            if !is_backward_edge {
-                let parents = &mut parent_count[child];
-                *parents -= 1;
+        Self::visit_edges_dfs(
+            &self.nodes,
+            entry,
+            reachable,
+            scratch,
+            |_, child, is_backward_edge| {
+                if !is_backward_edge {
+                    let parents = &mut parent_count[child];
+                    *parents -= 1;
 
-                if *parents == 0 {
-                    let new_handle = collect.push(child);
-                    let prev = renames.insert(child, new_handle);
-                    assert!(prev.is_none());
+                    if *parents == 0 {
+                        let new_handle = collect.push(child);
+                        let prev = renames.insert(child, new_handle);
+                        assert!(prev.is_none());
 
-                    return true;
+                        return true;
+                    }
                 }
-            }
-            false
-        });
+                false
+            },
+        );
 
         // collect nodes in the new order
         let new_nodes = collect.map(|source| {
@@ -774,128 +802,6 @@ impl Graph {
         });
 
         self.nodes = new_nodes;
-    }
-    #[allow(unused_must_use)]
-    pub fn debug_graphviz(
-        &self,
-        buf: &mut dyn Write,
-        subgraph: &str,
-        index_offset: usize,
-        file: &crate::convert::ConvertedFile,
-    ) {
-        writeln!(buf, "subgraph cluster_{subgraph} {{");
-        writeln!(buf, "    label={subgraph:?}");
-        for (k, v) in self.nodes.iter_kv() {
-            let offset_index = k.index() + index_offset;
-            writeln!(buf, "    v{offset_index}[label={}]", k.index());
-
-            let effects = v.transition.effects();
-
-            if v.success == v.fail {
-                let style = match effects {
-                    TransitionEffects::Noreturn => "color=orange",
-                    _ => "color=purple",
-                };
-                print_dot_edge(
-                    buf,
-                    k,
-                    v.success,
-                    v.transition,
-                    Some(style),
-                    index_offset,
-                    file,
-                );
-            } else {
-                print_dot_edge(buf, k, v.success, v.transition, None, index_offset, file);
-                if effects == TransitionEffects::Fallible {
-                    print_dot_edge(
-                        buf,
-                        k,
-                        v.fail,
-                        Transition::Fail,
-                        Some("color=red"),
-                        index_offset,
-                        file,
-                    );
-                }
-            }
-        }
-        writeln!(buf, "}}");
-    }
-    pub fn debug_statements(&self, buf: &mut dyn Write, file: &ConvertedFile) {
-        let reachability = self.analyze_flow_targets();
-
-        let mut previous_reachable = None;
-
-        #[allow(unused_must_use)]
-        for (current, node) in self.nodes.iter_kv() {
-            {
-                let is_target = reachability.is_target(current);
-                let is_reachable = reachability.is_reachable(current);
-
-                let previous_is_reachable = previous_reachable.unwrap_or(true);
-                let is_dead = !is_reachable && (previous_is_reachable || is_target);
-
-                if is_target {
-                    write!(buf, "{current}");
-                }
-                if is_dead {
-                    if is_target {
-                        write!(buf, " ");
-                    }
-                    write!(buf, "dead");
-                }
-                if is_target || is_dead {
-                    write!(buf, ":\n");
-                }
-
-                previous_reachable = Some(is_reachable);
-            }
-
-            {
-                write!(buf, "  ");
-                node.transition.display(buf, file);
-
-                let next = current.next();
-                let mut print_target = |jump: Option<NodeHandle>| {
-                    if let Some(jump) = jump {
-                        if jump == next {
-                            write!(buf, " ↓");
-                        } else {
-                            write!(buf, " {jump}");
-                        }
-                    } else {
-                        write!(buf, " _");
-                    }
-                };
-
-                print_target(node.success);
-                print_target(node.fail);
-            }
-            write!(buf, "\n");
-        }
-    }
-    pub fn analyze_flow_targets(&self) -> FlowTargets {
-        let mut reachability = FlowTargets::with_capacity(self.nodes.len());
-
-        if self.nodes.is_empty() {
-            return reachability;
-        }
-
-        reachability.set_is_reachable(0.into());
-
-        for (current, node) in self.nodes.iter_kv() {
-            let next = current.next();
-            node.for_edges(|jump| {
-                if next != jump {
-                    reachability.set_is_target(jump);
-                }
-                if reachability.is_reachable(current) {
-                    reachability.set_is_reachable(jump);
-                }
-            });
-        }
-        reachability
     }
 }
 
@@ -927,6 +833,135 @@ impl FlowTargets {
     pub fn is_target(&self, node: NodeHandle) -> bool {
         let index = node.index() * 2 + 1;
         self.set.contains(index)
+    }
+}
+
+pub fn analyze_flow_targets(nodes: &HandleVec<NodeHandle, PegNode>) -> FlowTargets {
+    let mut reachability = FlowTargets::with_capacity(nodes.len());
+
+    if nodes.is_empty() {
+        return reachability;
+    }
+
+    reachability.set_is_reachable(0.into());
+
+    for (current, node) in nodes.iter_kv() {
+        let next = current.next();
+        node.for_edges(|jump| {
+            if next != jump {
+                reachability.set_is_target(jump);
+            }
+            if reachability.is_reachable(current) {
+                reachability.set_is_reachable(jump);
+            }
+        });
+    }
+    reachability
+}
+
+#[allow(unused_must_use)]
+pub fn debug_graphviz(
+    nodes: &HandleVec<NodeHandle, PegNode>,
+    buf: &mut dyn Write,
+    subgraph: &str,
+    index_offset: usize,
+    file: &crate::convert::ConvertedFile,
+) {
+    writeln!(buf, "subgraph cluster_{subgraph} {{");
+    writeln!(buf, "    label={subgraph:?}");
+    for (k, v) in nodes.iter_kv() {
+        let offset_index = k.index() + index_offset;
+        writeln!(buf, "    v{offset_index}[label={}]", k.index());
+
+        let effects = v.transition.effects();
+
+        if v.success == v.fail {
+            let style = match effects {
+                TransitionEffects::Noreturn => "color=orange",
+                _ => "color=purple",
+            };
+            print_dot_edge(
+                buf,
+                k,
+                v.success,
+                v.transition,
+                Some(style),
+                index_offset,
+                file,
+            );
+        } else {
+            print_dot_edge(buf, k, v.success, v.transition, None, index_offset, file);
+            if effects == TransitionEffects::Fallible {
+                print_dot_edge(
+                    buf,
+                    k,
+                    v.fail,
+                    Transition::Fail,
+                    Some("color=red"),
+                    index_offset,
+                    file,
+                );
+            }
+        }
+    }
+    writeln!(buf, "}}");
+}
+
+pub fn debug_statements(
+    nodes: &HandleVec<NodeHandle, PegNode>,
+    buf: &mut dyn Write,
+    file: &ConvertedFile,
+) {
+    let reachability = analyze_flow_targets(nodes);
+
+    let mut previous_reachable = None;
+
+    #[allow(unused_must_use)]
+    for (current, node) in nodes.iter_kv() {
+        {
+            let is_target = reachability.is_target(current);
+            let is_reachable = reachability.is_reachable(current);
+
+            let previous_is_reachable = previous_reachable.unwrap_or(true);
+            let is_dead = !is_reachable && (previous_is_reachable || is_target);
+
+            if is_target {
+                write!(buf, "{current}");
+            }
+            if is_dead {
+                if is_target {
+                    write!(buf, " ");
+                }
+                write!(buf, "dead");
+            }
+            if is_target || is_dead {
+                write!(buf, ":\n");
+            }
+
+            previous_reachable = Some(is_reachable);
+        }
+
+        {
+            write!(buf, "  ");
+            node.transition.display(buf, file);
+
+            let next = current.next();
+            let mut print_target = |jump: Option<NodeHandle>| {
+                if let Some(jump) = jump {
+                    if jump == next {
+                        write!(buf, " ↓");
+                    } else {
+                        write!(buf, " {jump}");
+                    }
+                } else {
+                    write!(buf, " _");
+                }
+            };
+
+            print_target(node.success);
+            print_target(node.fail);
+        }
+        write!(buf, "\n");
     }
 }
 

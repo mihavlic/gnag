@@ -1,7 +1,8 @@
 use crate::convert::ConvertedFile;
-use crate::graph::Graph;
 use crate::graph::NodeHandle;
+use crate::graph::PegNode;
 use gnag::handle::HandleCounter;
+use gnag::handle::HandleVec;
 use gnag::handle::TypedHandle;
 use gnag::simple_handle;
 use std::fmt::Display;
@@ -208,7 +209,12 @@ impl ScopeNode {
         }
     }
     #[allow(unused_must_use)]
-    pub fn debug_display(&self, buf: &mut dyn Write, graph: &Graph, file: &ConvertedFile) {
+    pub fn debug_display(
+        &self,
+        buf: &mut dyn Write,
+        nodes: &HandleVec<NodeHandle, PegNode>,
+        file: &ConvertedFile,
+    ) {
         fn print_indent(buf: &mut dyn Write, indent: i32) {
             for _ in 0..indent {
                 write!(buf, "  ");
@@ -242,9 +248,8 @@ impl ScopeNode {
                 indent += 1;
             }
             ScopeVisit::Statement(handle) => {
-                let node = graph.get_node(handle).unwrap();
                 print_indent(buf, indent);
-                node.transition.display(buf, file);
+                nodes[handle].transition.display(buf, file);
                 writeln!(buf);
             }
             ScopeVisit::Close(_) => {

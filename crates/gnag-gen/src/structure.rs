@@ -1,5 +1,4 @@
 use crate::convert::ConvertedFile;
-use crate::graph::Graph;
 use crate::graph::NodeHandle;
 use crate::graph::PegNode;
 use crate::graph::TransitionEffects;
@@ -65,7 +64,7 @@ pub struct GraphStructuring {
 }
 
 impl GraphStructuring {
-    pub fn new(graph: &Graph) -> GraphStructuring {
+    pub fn new(nodes: &HandleVec<NodeHandle, PegNode>) -> GraphStructuring {
         //                                start           0:                       loop {
         //                             ┌─►0──┐              Rule(A) ↓ 2                if !next(A) {
         //                            B│  │A │              Rule(B) 0 ↓                   break;
@@ -97,8 +96,6 @@ impl GraphStructuring {
                 }
             })
         }
-
-        let nodes = graph.get_nodes();
 
         let mut counter = HandleCounter::new();
         let mut tree = ScopeNode::new(counter.next(), 0.into(), nodes.len().into());
@@ -137,7 +134,12 @@ impl GraphStructuring {
             FlowAction::Panic
         }
     }
-    pub fn emit_code(&self, create_while: bool, create_if: bool, graph: &Graph) -> Vec<Statement> {
+    pub fn emit_code(
+        &self,
+        create_while: bool,
+        create_if: bool,
+        nodes: &HandleVec<NodeHandle, PegNode>,
+    ) -> Vec<Statement> {
         let mut statements = Vec::new();
 
         let mut last_statement = None;
@@ -150,7 +152,7 @@ impl GraphStructuring {
                 statements.push(Statement::Open(scope.handle, scope.kind.into()));
             }
             ScopeVisit::Statement(handle) => {
-                let node = graph.get_node(handle).unwrap();
+                let node = &nodes[handle];
                 let next = handle.next();
 
                 if let Some(last) = last_statement {
@@ -256,8 +258,13 @@ impl GraphStructuring {
 
         statements
     }
-    pub fn debug_scopes(&self, buf: &mut dyn Write, graph: &Graph, file: &ConvertedFile) {
-        self.tree.debug_display(buf, graph, file);
+    pub fn debug_scopes(
+        &self,
+        buf: &mut dyn Write,
+        nodes: &HandleVec<NodeHandle, PegNode>,
+        file: &ConvertedFile,
+    ) {
+        self.tree.debug_display(buf, nodes, file);
     }
 }
 
@@ -296,7 +303,7 @@ pub(crate) fn mark_used_labels<'a>(
 pub fn display_code(
     buf: &mut dyn Write,
     statements: &[Statement],
-    graph: &Graph,
+    nodes: &HandleVec<NodeHandle, PegNode>,
     file: &ConvertedFile,
 ) {
     fn print_indent(buf: &mut dyn Write, indent: i32) {
@@ -333,11 +340,7 @@ pub fn display_code(
                         if condition.negate {
                             write!(buf, "!");
                         }
-                        graph
-                            .get_node(condition.condition)
-                            .unwrap()
-                            .transition
-                            .display(buf, file);
+                        nodes[condition.condition].transition.display(buf, file);
 
                         write!(buf, " {{");
                         if print_label && kind == ScopeKind::Block {
@@ -361,7 +364,7 @@ pub fn display_code(
                 mut fail,
             } => {
                 print_indent(buf, indent);
-                let transition = graph.get_node(condition).unwrap().transition;
+                let transition = nodes[condition].transition;
                 let effects = transition.effects();
 
                 fn print_action(

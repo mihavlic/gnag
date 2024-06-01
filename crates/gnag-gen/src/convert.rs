@@ -414,8 +414,12 @@ impl RuleExpr {
                     a.visit_nodes_(top_down, fun);
                 }
             }
-            RuleExpr::Pratt(_)
-            | RuleExpr::Token(_)
+            RuleExpr::Pratt(rules) => {
+                for a in rules {
+                    a.expr.visit_nodes_(top_down, fun);
+                }
+            }
+            RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
@@ -449,8 +453,12 @@ impl RuleExpr {
                     a.visit_nodes_mut_(top_down, fun);
                 }
             }
-            RuleExpr::Pratt(_)
-            | RuleExpr::Token(_)
+            RuleExpr::Pratt(rules) => {
+                for a in rules {
+                    a.expr.visit_nodes_mut_(top_down, fun);
+                }
+            }
+            RuleExpr::Token(_)
             | RuleExpr::Rule(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any

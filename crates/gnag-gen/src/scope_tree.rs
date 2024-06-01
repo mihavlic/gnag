@@ -81,13 +81,22 @@ impl ScopeNode {
         start: &mut NodeHandle,
         end: &mut NodeHandle,
     ) -> std::ops::Range<usize> {
-        let start_index = self.children.partition_point(|x| *start > x.end);
-        let end_index = self.children.partition_point(|x| *end > x.start);
+        let start_index = match self.children.binary_search_by_key(start, |x| x.end) {
+            Ok(i) => (i + 1).min(self.children.len()),
+            Err(i) => i,
+        };
+        let end_index = match self.children.binary_search_by_key(end, |x| x.start) {
+            Ok(i) => i,
+            Err(i) => (i + 1).min(self.children.len()),
+        };
 
-        if let Some(scope) = self.children.get(start_index) {
+        let slice = &self.children[start_index..end_index];
+
+        if let Some(scope) = slice.first() {
             *start = (*start).min(scope.start);
         }
-        if let Some(scope) = end_index.checked_sub(1).and_then(|i| self.children.get(i)) {
+
+        if let Some(scope) = slice.last() {
             *end = (*end).max(scope.end);
         }
 
@@ -209,11 +218,10 @@ impl ScopeNode {
         }
     }
     #[allow(unused_must_use)]
-    pub fn debug_display(
+    fn debug_display_impl(
         &self,
         buf: &mut dyn Write,
-        nodes: &HandleVec<NodeHandle, PegNode>,
-        file: &ConvertedFile,
+        extra: Option<(&HandleVec<NodeHandle, PegNode>, &ConvertedFile)>,
     ) {
         fn print_indent(buf: &mut dyn Write, indent: i32) {
             for _ in 0..indent {
@@ -248,9 +256,11 @@ impl ScopeNode {
                 indent += 1;
             }
             ScopeVisit::Statement(handle) => {
-                print_indent(buf, indent);
-                nodes[handle].transition.display(buf, file);
-                writeln!(buf);
+                if let Some((nodes, file)) = extra {
+                    print_indent(buf, indent);
+                    nodes[handle].transition.display(buf, file);
+                    writeln!(buf);
+                }
             }
             ScopeVisit::Close(_) => {
                 indent -= 1;
@@ -259,4 +269,29 @@ impl ScopeNode {
             }
         })
     }
+    pub fn debug_display(
+        &self,
+        buf: &mut dyn Write,
+        nodes: &HandleVec<NodeHandle, PegNode>,
+        file: &ConvertedFile,
+    ) {
+        self.debug_display_impl(buf, Some((nodes, file)))
+    }
+    pub fn debug_tree(&self, buf: &mut dyn Write) {
+        self.debug_display_impl(buf, None)
+    }
+}
+
+#[test]
+fn test_tree() {
+    let mut counter = HandleCounter::new();
+    let mut tree = ScopeNode::new(counter.next(), 0.into(), 4.into());
+
+    tree.add_scope(&mut counter, 1.into(), 2.into(), ScopeKind::Block);
+    tree.add_scope(&mut counter, 2.into(), 3.into(), ScopeKind::Block);
+    tree.add_scope(&mut counter, 3.into(), 4.into(), ScopeKind::Block);
+
+    let mut buf = String::new();
+    tree.debug_tree(&mut buf);
+    println!("{buf}");
 }

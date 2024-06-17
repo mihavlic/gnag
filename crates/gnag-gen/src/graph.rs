@@ -1,8 +1,11 @@
-use std::fmt::{Display, Formatter, Write};
+use std::{
+    cell::RefCell,
+    fmt::{Display, Formatter, Write},
+};
 
 use gnag::{
     ctx::ErrorAccumulator,
-    handle::{Bitset, HandleBitset, HandleVec, SecondaryVec, TypedHandle},
+    handle::{Bitset, HandleBitset, HandleCounter, HandleVec, SecondaryVec, TypedHandle},
     simple_handle, StrSpan,
 };
 
@@ -14,7 +17,6 @@ use crate::{
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum Transition {
     Error,
-    Fail,
     Token(TokenHandle),
     Rule(RuleHandle),
     PrattRule(RuleHandle, u32),
@@ -22,7 +24,8 @@ pub enum Transition {
     Any,
     Not(TokenHandle),
     // function start/end
-    RestoreState(NodeHandle),
+    SaveState(VariableHandle),
+    RestoreState(VariableHandle),
     CloseSpan(RuleHandle),
     Return(bool),
     // does nothing
@@ -37,7 +40,7 @@ pub enum TransitionEffects {
 }
 
 impl Transition {
-    pub fn effects(self) -> TransitionEffects {
+    pub fn effects(&self) -> TransitionEffects {
         match self {
             Transition::Error
             | Transition::Token(_)
@@ -46,25 +49,40 @@ impl Transition {
             | Transition::Any
             | Transition::Not(_)
             | Transition::Dummy => TransitionEffects::Fallible,
-            Transition::Fail | Transition::RestoreState(_) | Transition::CloseSpan(_) => {
+            Transition::SaveState(_) | Transition::RestoreState(_) | Transition::CloseSpan(_) => {
                 TransitionEffects::Infallible
             }
             Transition::Return(_) => TransitionEffects::Noreturn,
         }
     }
+    pub fn advances_parser(&self) -> bool {
+        match self {
+            Transition::Error
+            | Transition::Token(_)
+            | Transition::Rule(_)
+            | Transition::PrattRule(_, _)
+            | Transition::Any
+            | Transition::Not(_) => true,
+            Transition::SaveState(_)
+            | Transition::RestoreState(_)
+            | Transition::CloseSpan(_)
+            | Transition::Return(_)
+            | Transition::Dummy => false,
+        }
+    }
     pub fn display(
-        self,
+        &self,
         f: &mut dyn Write,
         file: &crate::convert::ConvertedFile,
     ) -> std::fmt::Result {
-        match self {
+        match *self {
             Transition::Error => write!(f, "Error"),
-            Transition::Fail => write!(f, "Fail"),
             Transition::Token(a) => write!(f, "Token({})", file.tokens[a].name),
             Transition::Rule(a) => write!(f, "Rule({})", file.rules[a].name),
             Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", file.rules[a].name),
             Transition::Any => write!(f, "Any"),
             Transition::Not(a) => write!(f, "Not({})", file.tokens[a].name),
+            Transition::SaveState(a) => write!(f, "SaveState({})", a.index()),
             Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
             Transition::CloseSpan(a) => write!(f, "CloseSpan({})", file.rules[a].name),
             Transition::Return(value) => write!(f, "Return({value})"),
@@ -74,7 +92,8 @@ impl Transition {
 }
 
 simple_handle! {
-    pub NodeHandle
+    pub NodeHandle,
+    pub VariableHandle
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,6 +158,14 @@ impl PegNode {
         }
         return false;
     }
+    pub fn for_edges_transition(&self, mut fun: impl FnMut(NodeHandle, Option<&Transition>)) {
+        if let Some(success) = self.success {
+            fun(success, Some(&self.transition));
+        }
+        if let Some(fail) = self.fail {
+            fun(fail, None);
+        }
+    }
     pub fn for_edges(&self, mut fun: impl FnMut(NodeHandle)) {
         if let Some(success) = self.success {
             fun(success);
@@ -189,6 +216,7 @@ pub struct GraphBuilder<'a> {
     err: &'a ErrorAccumulator,
     // a sidechannel to give information to convert_expr for pratt conversion
     current_rule: Option<RuleHandle>,
+    variables: HandleCounter<VariableHandle>,
 
     // scratch data for rule conversion
     // TODO use a bump allocator and allocate as needed
@@ -202,6 +230,7 @@ impl<'a> GraphBuilder<'a> {
             nodes: HandleVec::new(),
             err,
             current_rule: None,
+            variables: HandleCounter::new(),
             scratch1: Default::default(),
             scratch2: Default::default(),
         }
@@ -215,9 +244,9 @@ impl<'a> GraphBuilder<'a> {
         lowered.rules.map_ref_with_key(|handle, expr| {
             self.clear();
             let entry = self.convert_rule(handle, expr);
-            if let Some(entry) = entry {
+            if let Some(handle) = entry {
                 if optimize {
-                    self.optimize(entry);
+                    self.optimize(handle);
                 }
             }
             self.get_nodes().clone()
@@ -243,10 +272,13 @@ impl<'a> GraphBuilder<'a> {
     }
     /// Reorder the graph into a topological order which is suitable for lowering to code, Removes reduntand parser state resets.
     /// The new graph only contains nodes reachable from the entry.
-    pub fn optimize(&mut self, entry: NodeHandle) {
-        // reorder does not move the entry
-        self.reorder(entry);
-        self.merge_state_resets(entry);
+    ///
+    /// Returns the new handle to the entry.
+    pub fn optimize(&mut self, mut entry: NodeHandle) -> Option<NodeHandle> {
+        let mut deleted = HandleBitset::new();
+        self.merge_state_resets(entry, &mut deleted);
+        entry = self.apply_deletes(entry, &deleted)?;
+        Some(self.reorder(entry))
     }
     pub fn get_node(&self, node: NodeHandle) -> Option<&PegNode> {
         self.nodes.get(node)
@@ -259,6 +291,7 @@ impl<'a> GraphBuilder<'a> {
     }
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.variables.reset();
     }
 }
 
@@ -282,6 +315,9 @@ impl<'a> GraphBuilder<'a> {
             self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
         }
         node
+    }
+    fn new_variable(&mut self) -> VariableHandle {
+        self.variables.next()
     }
     fn peek_next_node(&self) -> NodePeekHandle {
         NodePeekHandle(self.nodes.next_handle())
@@ -318,21 +354,23 @@ impl<'a> GraphBuilder<'a> {
             RuleExpr::Token(token) => self.single_transition(&incoming, Transition::Token(*token)),
             RuleExpr::Rule(rule) => self.single_transition(&incoming, Transition::Rule(*rule)),
             RuleExpr::Sequence(vec) => {
+                let save_variable = self.new_variable();
+                let save = self.single_transition(&incoming, Transition::SaveState(save_variable));
+
                 let mut fail = Vec::new();
                 let mut fail_reset = Vec::new();
-                let mut success = incoming;
+                let mut success = save.success;
 
                 let mut commit_index = vec.iter().position(|e| matches!(e, RuleExpr::Commit));
-                let mut entry = None;
 
-                let peek = self.peek_next_node();
+                let mut consumed_any = false;
+
                 for (i, rule) in vec.iter().enumerate() {
                     let incoming = std::mem::take(&mut success);
                     let mut result = self.convert_expr(rule, incoming);
 
-                    let consumed_any = entry.is_some();
-                    if let Some(first) = result.entry {
-                        entry.get_or_insert(first);
+                    if result.entry.is_some() {
+                        consumed_any = true;
                     }
 
                     let is_comitted = commit_index.map(|index| i > index).unwrap_or(false);
@@ -360,16 +398,14 @@ impl<'a> GraphBuilder<'a> {
                     success.append(&mut result.success);
                 }
 
-                if let Some(entry) = entry {
-                    if !fail_reset.is_empty() {
-                        let mut restore =
-                            self.single_transition(&fail_reset, Transition::RestoreState(entry));
-                        fail.append(&mut restore.success);
-                    }
+                if !fail_reset.is_empty() {
+                    let mut restore = self
+                        .single_transition(&fail_reset, Transition::RestoreState(save_variable));
+                    fail.append(&mut restore.success);
                 }
 
                 PegResult {
-                    entry: self.verify_peek(peek),
+                    entry: save.entry,
                     success,
                     fail,
                 }
@@ -462,6 +498,8 @@ impl<'a> GraphBuilder<'a> {
                     element.success,
                     "Separator expression cannot be empty",
                 );
+
+                self.connect_backward_edges(element.entry.unwrap(), &separator.success);
 
                 let mut fail = element.fail;
                 fail.append(&mut separator.fail);
@@ -598,41 +636,155 @@ impl<'a> GraphBuilder<'a> {
             },
         }
     }
+    fn visit_edges_dfs_impl(
+        nodes: &HandleVec<NodeHandle, PegNode>,
+        parent: Option<NodeHandle>,
+        child: NodeHandle,
+        transition: Option<&Transition>,
+        on_stack: &mut HandleBitset<NodeHandle>,
+        fun: &mut dyn FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>, bool) -> bool,
+    ) {
+        let is_back_edge = on_stack.contains(child);
+        let should_enter = fun(parent, child, transition, is_back_edge);
+
+        if should_enter && !is_back_edge {
+            on_stack.insert(child);
+
+            nodes[child].for_edges_transition(|node, transition| {
+                Self::visit_edges_dfs_impl(nodes, Some(child), node, transition, on_stack, fun);
+            });
+
+            on_stack.remove(child);
+        }
+    }
     fn visit_edges_dfs(
         nodes: &HandleVec<NodeHandle, PegNode>,
-        handle: NodeHandle,
+        entry: NodeHandle,
+        scratch: &mut HandleBitset<NodeHandle>,
+        mut fun: impl FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>, bool) -> bool,
+    ) {
+        scratch.clear();
+        Self::visit_edges_dfs_impl(nodes, None, entry, None, scratch, &mut fun);
+    }
+    fn visit_edges_once_dfs(
+        nodes: &HandleVec<NodeHandle, PegNode>,
+        entry: NodeHandle,
         explored: &mut HandleBitset<NodeHandle>,
         scratch: &mut HandleBitset<NodeHandle>,
-        //                           parent       child     is_backward_edge
-        mut fun: impl FnMut(Option<NodeHandle>, NodeHandle, bool) -> bool,
+        //                           parent       child     transition           is_backward_edge
+        mut fun: impl FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>, bool) -> bool,
     ) {
-        fn dyn_impl(
-            nodes: &HandleVec<NodeHandle, PegNode>,
-            parent: Option<NodeHandle>,
-            child: NodeHandle,
-            explored: &mut HandleBitset<NodeHandle>,
-            on_stack: &mut HandleBitset<NodeHandle>,
-            fun: &mut dyn FnMut(Option<NodeHandle>, NodeHandle, bool) -> bool,
-        ) {
-            let is_explored = explored.contains(child);
-            let is_back_edge = on_stack.contains(child);
-            let should_enter = fun(parent, child, is_back_edge);
-
-            if should_enter && !is_back_edge && !is_explored {
-                explored.insert(child);
-                on_stack.insert(child);
-
-                nodes[child].for_edges(|node| {
-                    dyn_impl(nodes, Some(child), node, explored, on_stack, fun);
-                });
-
-                on_stack.remove(child);
-            }
-        }
-
         explored.clear();
         scratch.clear();
-        dyn_impl(nodes, None, handle, explored, scratch, &mut fun);
+        Self::visit_edges_dfs_impl(
+            nodes,
+            None,
+            entry,
+            None,
+            scratch,
+            &mut |parent, child, transition, is_back_edge| {
+                let should_continue = fun(parent, child, transition, is_back_edge);
+                let mut already_explored = false;
+                if should_continue && !is_back_edge {
+                    already_explored = explored.insert(child);
+                }
+                should_continue && !already_explored
+            },
+        );
+    }
+    fn visit_edges_dfs_then_topological(
+        nodes: &HandleVec<NodeHandle, PegNode>,
+        entry: NodeHandle,
+
+        explored: &mut HandleBitset<NodeHandle>,
+        scratch: &mut HandleBitset<NodeHandle>,
+
+        mut dfs: impl FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>, bool),
+        mut topological: impl FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>),
+    ) {
+        // count the number of incoming forward edges
+        //  A   B
+        //   \ /
+        // ┌─►C    C has 2 parents
+        // └──┘
+        let mut parent_count = nodes.map_fill(0);
+        Self::visit_edges_once_dfs(
+            nodes,
+            entry,
+            explored,
+            scratch,
+            |parent, child, transition, is_backward_edge| {
+                dfs(parent, child, transition, is_backward_edge);
+                if !is_backward_edge {
+                    parent_count[child] += 1;
+                }
+                true
+            },
+        );
+
+        assert_eq!(parent_count[entry], 1);
+
+        Self::visit_edges_once_dfs(
+            nodes,
+            entry,
+            explored,
+            scratch,
+            |parent, child, transition, is_backward_edge| {
+                if !is_backward_edge {
+                    topological(parent, child, transition);
+
+                    let parents = &mut parent_count[child];
+                    *parents -= 1;
+                    if *parents == 0 {
+                        return true;
+                    }
+                }
+                false
+            },
+        );
+    }
+    fn visit_nodes_topological(
+        nodes: &HandleVec<NodeHandle, PegNode>,
+        entry: NodeHandle,
+
+        explored: &mut HandleBitset<NodeHandle>,
+        scratch: &mut HandleBitset<NodeHandle>,
+
+        mut topological: impl FnMut(NodeHandle),
+    ) {
+        let mut parent_count = nodes.map_fill(0);
+        Self::visit_edges_once_dfs(
+            nodes,
+            entry,
+            explored,
+            scratch,
+            |_, child, _, is_backward_edge| {
+                if !is_backward_edge {
+                    parent_count[child] += 1;
+                }
+                true
+            },
+        );
+
+        assert_eq!(parent_count[entry], 1);
+
+        Self::visit_edges_once_dfs(
+            nodes,
+            entry,
+            explored,
+            scratch,
+            |_, child, _, is_backward_edge| {
+                if !is_backward_edge {
+                    let parents = &mut parent_count[child];
+                    *parents -= 1;
+                    if *parents == 0 {
+                        topological(child);
+                        return true;
+                    }
+                }
+                false
+            },
+        );
     }
     /// Maps the state of the parser through the graph and transitively propagates state resets
     /// to the earliest checkpoint.
@@ -676,133 +828,224 @@ impl<'a> GraphBuilder<'a> {
     ///          F
     ///          │ reset(A) // <<<<<<<<<<<<<<<<<<
     /// ```
-    fn merge_state_resets(&mut self, entry: NodeHandle) {
+    fn merge_state_resets(&mut self, entry: NodeHandle, deleted: &mut HandleBitset<NodeHandle>) {
         #[derive(Clone, Copy, PartialEq, Eq)]
-        enum InitialState {
-            None,
-            Original(NodeHandle),
-            Sameas(NodeHandle),
+        struct ParserState {
+            state: NodeHandle,
+            variable: Option<VariableHandle>,
         }
 
-        impl InitialState {
-            fn same_as(&mut self, this: NodeHandle, same_as: NodeHandle) {
-                if *self == InitialState::None || *self == InitialState::Sameas(same_as) {
-                    *self = InitialState::Sameas(same_as);
-                } else {
-                    self.original(this);
+        impl ParserState {
+            fn original(this: NodeHandle) -> ParserState {
+                Self {
+                    state: this,
+                    variable: None,
                 }
             }
-            fn original(&mut self, this: NodeHandle) {
-                *self = InitialState::Original(this);
+            fn is_equivalent(&self, other: &ParserState) -> bool {
+                self.state == other.state
+            }
+            fn merge_with(&mut self, this: NodeHandle, other: &ParserState) {
+                if self.is_equivalent(other) {
+                    if self.variable != other.variable {
+                        self.variable = None;
+                    }
+                } else {
+                    *self = Self::original(this);
+                }
+            }
+            fn set_variable(&mut self, variable: VariableHandle) {
+                self.variable = Some(variable);
             }
         }
 
         let Self {
             nodes,
-            scratch1: reachable,
+            scratch1: explored,
             scratch2: scratch,
             ..
         } = self;
 
-        let mut states = nodes.map_fill(InitialState::None);
+        let mut variables: SecondaryVec<VariableHandle, ParserState> =
+            SecondaryVec::with_capacity(self.variables.len());
+        let mut states = RefCell::new(SecondaryVec::with_capacity_for(nodes));
+        let mut used_variables = HandleBitset::with_capacity(self.variables.len());
 
-        states[entry].original(entry);
+        states.get_mut().insert(entry, ParserState::original(entry));
 
-        for (handle, node) in nodes.iter_kv() {
-            if !reachable.contains(handle) {
-                continue;
+        Self::visit_edges_dfs_then_topological(
+            nodes,
+            entry,
+            explored,
+            scratch,
+            |_, child, _, is_back_edge| {
+                if is_back_edge {
+                    // loops are hard to think about so we conservatively mark all loop entrances as original
+                    states
+                        .borrow_mut()
+                        .insert(child, ParserState::original(child));
+                }
+            },
+            |parent, child, transition| {
+                let mut states = states.borrow_mut();
+                if let Some(parent) = parent {
+                    let mut parent_state = states[parent];
+
+                    match transition {
+                        Some(&Transition::SaveState(variable)) => {
+                            // if the current state is already saved in some variable,
+                            // we can reuse it and entirely remove this variable
+                            if parent_state.variable.is_some() {
+                                deleted.insert(parent);
+                            }
+
+                            let actual_variable = parent_state.variable.unwrap_or(variable);
+                            parent_state.set_variable(actual_variable);
+
+                            let prev = variables.insert(variable, parent_state);
+                            assert!(prev.is_none(), "Variables can be set only once");
+                        }
+                        Some(&Transition::RestoreState(variable)) => {
+                            let saved_state = variables[variable];
+                            if saved_state.is_equivalent(&parent_state) {
+                                deleted.insert(parent);
+                            } else {
+                                used_variables.insert(saved_state.variable.unwrap());
+                                parent_state = saved_state;
+                            }
+                        }
+                        _ => {
+                            let advances_parser =
+                                transition.map_or(false, Transition::advances_parser);
+
+                            if advances_parser {
+                                parent_state = ParserState::original(child);
+                            }
+                        }
+                    }
+
+                    match states.get_mut(child) {
+                        Some(state) => state.merge_with(child, &parent_state),
+                        None => _ = states.insert(child, parent_state),
+                    }
+                }
+            },
+        );
+
+        for (handle, node) in self.nodes.iter_kv_mut() {
+            match &mut node.transition {
+                Transition::SaveState(variable) => {
+                    if !used_variables.contains(*variable) {
+                        deleted.insert(handle);
+                    }
+                }
+                Transition::RestoreState(variable) => {
+                    let state = variables[*variable];
+                    // the variable's handle and the variable in its actual state may differ if
+                    // it was determined that another variable hold the same state
+                    *variable = state.variable.unwrap();
+                }
+                _ => (),
+            }
+        }
+    }
+    /// Modify the graph such that all deleted nodes become unreachable.
+    /// This works by reattaching all edges going into deleted nodes to go into the success-edge children instead.
+    /// Deleting whole cycles creates dangling edges.
+    fn apply_deletes(
+        &mut self,
+        entry: NodeHandle,
+        deleted: &HandleBitset<NodeHandle>,
+    ) -> Option<NodeHandle> {
+        fn find_non_deleted_node(
+            handle: NodeHandle,
+            deleted: &HandleBitset<NodeHandle>,
+            nodes: &HandleVec<NodeHandle, PegNode>,
+            memo: &mut SecondaryVec<NodeHandle, Option<NodeHandle>>,
+            stack: &mut HandleBitset<NodeHandle>,
+        ) -> Option<NodeHandle> {
+            if let Some(present) = memo.get(handle) {
+                return *present;
             }
 
-            if let Some(child) = node.success {
-                if let Transition::RestoreState(state) = node.transition {
-                    states[child].same_as(child, state);
+            let node = &nodes[handle];
+            let is_loop = stack.insert(handle);
+            let is_deleted = deleted.contains(handle);
+
+            let result = if is_deleted {
+                if is_loop {
+                    // deleting loops creates dangling edges
+                    None
                 } else {
-                    states[child].original(child);
+                    if let Some(success) = node.success {
+                        // recurse
+                        find_non_deleted_node(success, deleted, nodes, memo, stack)
+                    } else {
+                        // deleting a node with a dangling success edge propagates the dangling to incoming edges
+                        None
+                    }
                 }
+            } else {
+                // node is not deleted, we can keep it
+                Some(handle)
+            };
+
+            // fill the entry for this node
+            memo.insert(handle, result);
+
+            if !is_loop {
+                stack.remove(handle);
+            }
+
+            return result;
+        }
+
+        let mut memo = SecondaryVec::with_capacity_for(&self.nodes);
+        let mut stack = HandleBitset::with_capacity(self.nodes.len());
+
+        for handle in self.nodes.iter_keys() {
+            find_non_deleted_node(handle, deleted, &self.nodes, &mut memo, &mut stack);
+        }
+
+        for node in self.nodes.iter_mut() {
+            if let Some(child) = node.success {
+                node.success = memo[child];
             }
             if let Some(child) = node.fail {
-                states[child].same_as(child, handle);
+                node.fail = memo[child];
             }
         }
 
-        Self::visit_edges_dfs(&self.nodes, entry, reachable, scratch, |_, child, _| {
-            if let InitialState::Sameas(node) = states[child] {
-                states[child] = states[node];
-            }
-            true
-        });
-
-        for node in &mut self.nodes {
-            if let Transition::RestoreState(to) = node.transition {
-                let InitialState::Original(state) = states[to] else {
-                    unreachable!(
-                        "Original nodes should have been propagated to all reachable nodes"
-                    );
-                };
-                node.transition = Transition::RestoreState(state);
-            }
-        }
+        memo[entry]
     }
     /// Reorder the nodes into a new topological order where success edge children are placed
     /// directly after their parents (Backward edges are preserved), which leads to more natural generated code.
     ///
     /// Also eliminates unreachable nodes.
-    fn reorder(&mut self, entry: NodeHandle) {
-        let reachable = &mut self.scratch1;
-        let scratch = &mut self.scratch2;
-
-        // count the number of incoming forward edges
-        //  A   B
-        //   \ /
-        // ┌─►C    C has 2 parents
-        // └──┘
-        let mut parent_count = self.nodes.map_fill(0);
-        Self::visit_edges_dfs(
-            &self.nodes,
-            entry,
-            reachable,
-            scratch,
-            |_, child, is_backward_edge| {
-                if !is_backward_edge {
-                    parent_count[child] += 1;
-                }
-                true
-            },
-        );
-
-        assert_eq!(parent_count[entry], 1);
+    ///
+    /// Returns the new handle to the entry.
+    fn reorder(&mut self, entry: NodeHandle) -> NodeHandle {
+        let Self {
+            nodes,
+            scratch1: explored,
+            scratch2: scratch,
+            ..
+        } = self;
 
         // old_node -> new_node
-        let mut renames = SecondaryVec::with_capacity(self.nodes.len());
+        let mut renames = SecondaryVec::with_capacity(nodes.len());
         // new_node -> old_node
         let mut collect = HandleVec::new();
 
-        // iterate the graph in topological order, storing the visited sequence
-        Self::visit_edges_dfs(
-            &self.nodes,
-            entry,
-            reachable,
-            scratch,
-            |_, child, is_backward_edge| {
-                if !is_backward_edge {
-                    let parents = &mut parent_count[child];
-                    *parents -= 1;
-
-                    if *parents == 0 {
-                        let new_handle = collect.push(child);
-                        let prev = renames.insert(child, new_handle);
-                        assert!(prev.is_none());
-
-                        return true;
-                    }
-                }
-                false
-            },
-        );
+        Self::visit_nodes_topological(nodes, entry, explored, scratch, |node| {
+            let new_handle = collect.push(node);
+            let previous = renames.insert(node, new_handle);
+            assert!(previous.is_none());
+        });
 
         // collect nodes in the new order
         let new_nodes = collect.map(|source| {
-            let mut new = self.get_node(source).unwrap().clone();
+            let mut new = self.nodes[source].clone();
             new.for_edges_mut(|child| {
                 *child = renames[*child];
             });
@@ -810,6 +1053,7 @@ impl<'a> GraphBuilder<'a> {
         });
 
         self.nodes = new_nodes;
+        return renames[entry];
     }
 }
 
@@ -892,23 +1136,23 @@ pub fn debug_graphviz(
                 buf,
                 k,
                 v.success,
-                v.transition,
+                Some(v.transition),
                 Some(style),
                 index_offset,
                 file,
             );
         } else {
-            print_dot_edge(buf, k, v.success, v.transition, None, index_offset, file);
+            print_dot_edge(
+                buf,
+                k,
+                v.success,
+                Some(v.transition),
+                None,
+                index_offset,
+                file,
+            );
             if effects == TransitionEffects::Fallible {
-                print_dot_edge(
-                    buf,
-                    k,
-                    v.fail,
-                    Transition::Fail,
-                    Some("color=red"),
-                    index_offset,
-                    file,
-                );
+                print_dot_edge(buf, k, v.fail, None, Some("color=red"), index_offset, file);
             }
         }
     }
@@ -978,7 +1222,7 @@ fn print_dot_edge(
     buf: &mut dyn Write,
     from: NodeHandle,
     to: Option<NodeHandle>,
-    transition: Transition,
+    transition: Option<Transition>,
     style: Option<&str>,
     index_offset: usize,
     file: &ConvertedFile,
@@ -992,7 +1236,11 @@ fn print_dot_edge(
     };
 
     write!(buf, "    v{start} -> v{end}{suffix}[label=\"");
-    transition.display(buf, file);
+    if let Some(transition) = transition {
+        transition.display(buf, file);
+    } else {
+        write!(buf, "Fail");
+    }
     write!(buf, "\"");
 
     if let Some(style) = style {

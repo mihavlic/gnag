@@ -53,6 +53,7 @@ fn run() -> Result<(), ()> {
     let mut do_statements = false;
     let mut do_scopes = false;
     let mut do_code = false;
+    let mut no_optimize = false;
 
     let mut none_enabled = true;
     args.retain(|arg| {
@@ -64,6 +65,7 @@ fn run() -> Result<(), ()> {
             "--statements" => do_statements = true,
             "--scopes" => do_scopes = true,
             "--code" => do_code = true,
+            "--no-optimize" => no_optimize = true,
             _ => return true,
         }
         none_enabled = false;
@@ -113,7 +115,7 @@ fn run() -> Result<(), ()> {
     report();
     let graphs = {
         let mut graph_builder = GraphBuilder::new(&err);
-        graph_builder.convert_file(true, &lowered)
+        graph_builder.convert_file(!no_optimize, &lowered)
     };
     report();
 

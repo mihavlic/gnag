@@ -60,6 +60,9 @@ impl ScopeNode {
     pub fn contains_range(&self, start: NodeHandle, end: NodeHandle) -> bool {
         self.start <= start && end <= self.end
     }
+    pub fn overlaps(&self, start: NodeHandle, end: NodeHandle) -> bool {
+        self.start < end && start < self.end
+    }
     /// Find the range of children whose ranges overlap start..end.
     ///
     /// Will enlarge the range in case of partial overlaps.
@@ -85,10 +88,15 @@ impl ScopeNode {
             Ok(i) => (i + 1).min(self.children.len()),
             Err(i) => i,
         };
-        let end_index = match self.children.binary_search_by_key(end, |x| x.start) {
-            Ok(i) => i,
-            Err(i) => (i + 1).min(self.children.len()),
-        };
+
+        // TODO find some way to binary search this without spaghetti code
+        let mut end_index = start_index;
+        while let Some(next) = self.children.get(end_index) {
+            if !next.overlaps(*start, *end) {
+                break;
+            }
+            end_index += 1;
+        }
 
         let slice = &self.children[start_index..end_index];
 
@@ -282,16 +290,40 @@ impl ScopeNode {
     }
 }
 
-#[test]
-fn test_tree() {
-    let mut counter = HandleCounter::new();
-    let mut tree = ScopeNode::new(counter.next(), 0.into(), 4.into());
+#[allow(dead_code)]
+fn test_impl(insertions: &[(usize, usize, ScopeKind)]) {
+    let max = insertions.iter().map(|(_, end, _)| *end).max().unwrap_or(0);
 
-    tree.add_scope(&mut counter, 1.into(), 2.into(), ScopeKind::Block);
-    tree.add_scope(&mut counter, 2.into(), 3.into(), ScopeKind::Block);
-    tree.add_scope(&mut counter, 3.into(), 4.into(), ScopeKind::Block);
+    let mut counter = HandleCounter::new();
+    let mut tree = ScopeNode::new(counter.next(), 0.into(), max.into());
+
+    for &(start, end, kind) in insertions {
+        let start = start.into();
+        let end = end.into();
+        tree.add_scope(&mut counter, start, end, kind);
+    }
+
+    tree.validate(true);
 
     let mut buf = String::new();
     tree.debug_tree(&mut buf);
     println!("{buf}");
+}
+
+#[test]
+fn test_tight_sibling() {
+    test_impl(&[
+        (1, 2, ScopeKind::Block),
+        (2, 3, ScopeKind::Block),
+        (3, 4, ScopeKind::Block),
+    ]);
+}
+
+#[test]
+fn test_loop() {
+    test_impl(&[
+        (3, 5, ScopeKind::Loop),
+        (1, 2, ScopeKind::Loop),
+        (0, 3, ScopeKind::Block),
+    ]);
 }

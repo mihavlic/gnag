@@ -37,25 +37,28 @@ pub struct HandleCounter<H>(usize, PhantomData<H>);
 
 impl<H: TypedHandle> HandleCounter<H> {
     pub fn new() -> Self {
-        Self(0, PhantomData)
+        Self::default()
     }
     pub fn next(&mut self) -> H {
         let next = H::new(self.0);
         self.0 += 1;
         next
     }
+    pub fn len(&self) -> usize {
+        self.0
+    }
     pub fn reset(&mut self) {
         self.0 = 0;
     }
 }
 
-impl<H, T> Default for HandleVec<H, T> {
+impl<H> Default for HandleCounter<H> {
     fn default() -> Self {
-        Self(Vec::default(), PhantomData)
+        Self(0, PhantomData)
     }
 }
 
-impl<H, T: Clone> Clone for HandleVec<H, T> {
+impl<H> Clone for HandleCounter<H> {
     fn clone(&self) -> Self {
         Self(self.0.clone(), PhantomData)
     }
@@ -191,6 +194,18 @@ impl<H: TypedHandle, T> HandleVec<H, T> {
         &self,
     ) -> impl Iterator<Item = H> + Clone + ExactSizeIterator + DoubleEndedIterator {
         (0..self.len()).map(H::new)
+    }
+}
+
+impl<H, T> Default for HandleVec<H, T> {
+    fn default() -> Self {
+        Self(Vec::default(), PhantomData)
+    }
+}
+
+impl<H, T: Clone> Clone for HandleVec<H, T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData)
     }
 }
 

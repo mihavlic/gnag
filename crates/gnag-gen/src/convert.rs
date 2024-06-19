@@ -10,6 +10,8 @@ use gnag::{
     StrSpan,
 };
 
+use crate::graph::Transition;
+
 gnag::simple_handle! {
     pub TokenHandle,
     pub RuleHandle,
@@ -257,7 +259,7 @@ fn convert_rule(
         span: ast.span,
         attributes,
         name: ast.name.resolve_owned(cx),
-        expr: ast.expression.as_ref().map_or(RuleExpr::Empty, |e| {
+        expr: ast.expression.as_ref().map_or(RuleExpr::empty(), |e| {
             convert_expression(cx, e, &parameters, ir_tokens)
         }),
     };
@@ -308,11 +310,7 @@ pub struct CallExpr {
 
 #[derive(Clone, Debug)]
 pub enum RuleExpr {
-    Empty,
-    Error,
-    Token(TokenHandle),
-    Rule(RuleHandle),
-    PrattRule(RuleHandle, u32),
+    Transition(Transition),
 
     Sequence(Vec<RuleExpr>),
     Choice(Vec<RuleExpr>),
@@ -320,13 +318,12 @@ pub enum RuleExpr {
     OneOrMore(Box<RuleExpr>),
     Maybe(Box<RuleExpr>),
 
+    Commit,
+
     // inline rules (eliminated during lowering)
     InlineParameter(usize),
     InlineCall(Box<CallExpr>),
 
-    // builtins
-    Any,
-    Commit,
     // `Not` only supports tokens, but at this point it may also contain an InlineParameter, we will check this later
     Not(Box<RuleExpr>),
     SeparatedList {
@@ -350,7 +347,7 @@ impl RuleExpr {
     // /// node without traversing into its childern.
     // fn is_empty_leaf(&self) -> bool {
     //     match self {
-    //         RuleExpr::Empty => true,
+    //         RuleExpr::empty() => true,
     //         RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.is_empty(),
     //         _ => false,
     //     }
@@ -365,21 +362,33 @@ impl RuleExpr {
     // }
     // fn is_empty_impl<F: Fn(&Self) -> bool>(&self, fun: F) -> bool {
     //     match self {
-    //         RuleExpr::Empty => true,
+    //         RuleExpr::empty() => true,
     //         RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.iter().all(fun),
     //         RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Maybe(a) => fun(a),
     //         RuleExpr::Not(a) => !fun(a),
     //         RuleExpr::SeparatedList { element, separator } => fun(element) && fun(separator),
-    //         RuleExpr::Token(_)
-    //         | RuleExpr::Rule(_)
+    //         RuleExpr::token(_)
+    //         | RuleExpr::rule(_)
     //         | RuleExpr::InlineParameter(_)
     //         | RuleExpr::InlineCall(_)
     //         | RuleExpr::Any
     //         | RuleExpr::ZeroSpace
-    //         | RuleExpr::Error
+    //         | RuleExpr::error()
     //         | RuleExpr::PrattRecursion { .. } => false,
     //     }
     // }
+    pub fn empty() -> RuleExpr {
+        RuleExpr::Sequence(vec![])
+    }
+    pub fn error() -> RuleExpr {
+        RuleExpr::Transition(Transition::Error)
+    }
+    pub fn token(handle: TokenHandle) -> RuleExpr {
+        RuleExpr::Transition(Transition::Token(handle))
+    }
+    pub fn rule(handle: RuleHandle) -> RuleExpr {
+        RuleExpr::Transition(Transition::Rule(handle))
+    }
     pub fn visit_nodes_top_down(&self, mut fun: impl FnMut(&RuleExpr)) {
         self.visit_nodes_(true, &mut fun)
     }
@@ -420,14 +429,7 @@ impl RuleExpr {
                     a.expr.visit_nodes_(top_down, fun);
                 }
             }
-            RuleExpr::Token(_)
-            | RuleExpr::Rule(_)
-            | RuleExpr::PrattRule(_, _)
-            | RuleExpr::InlineParameter(_)
-            | RuleExpr::Any
-            | RuleExpr::Commit
-            | RuleExpr::Empty
-            | RuleExpr::Error => {}
+            RuleExpr::Transition(_) | RuleExpr::InlineParameter(_) | RuleExpr::Commit => {}
         }
         if !top_down {
             fun(self);
@@ -460,14 +462,7 @@ impl RuleExpr {
                     a.expr.visit_nodes_mut_(top_down, fun);
                 }
             }
-            RuleExpr::Token(_)
-            | RuleExpr::Rule(_)
-            | RuleExpr::PrattRule(_, _)
-            | RuleExpr::InlineParameter(_)
-            | RuleExpr::Any
-            | RuleExpr::Commit
-            | RuleExpr::Empty
-            | RuleExpr::Error => {}
+            RuleExpr::Transition(_) | RuleExpr::InlineParameter(_) | RuleExpr::Commit => {}
         }
         if !top_down {
             fun(self);
@@ -504,11 +499,8 @@ impl RuleExpr {
 
         print_indent(buf);
         match self {
-            RuleExpr::Empty => writeln!(buf, "Empty"),
-            RuleExpr::Error => writeln!(buf, "Error"),
-            RuleExpr::Token(a) => writeln!(buf, "Token({})", a.name(file)),
-            RuleExpr::Rule(a) => writeln!(buf, "Rule({})", a.name(file)),
-            RuleExpr::PrattRule(rule, bp) => writeln!(buf, "PrattRule({}, {bp})", rule.name(file)),
+            RuleExpr::Transition(transition) => transition.display(buf, file),
+            RuleExpr::Commit => write!(buf, "Commit"),
             RuleExpr::Sequence(a) => display_slice(buf, "Sequence", a),
             RuleExpr::Choice(a) => display_slice(buf, "Choice", a),
             RuleExpr::Loop(a) => display_nested(buf, "Loop", a),
@@ -519,8 +511,6 @@ impl RuleExpr {
                 write!(buf, "InlineCall {}", a.template.name(file));
                 display_slice(buf, "", &a.parameters)
             }
-            RuleExpr::Any => writeln!(buf, "Any"),
-            RuleExpr::Commit => writeln!(buf, "Commit"),
             RuleExpr::Not(a) => display_nested(buf, "Not", a),
             RuleExpr::SeparatedList { element, separator } => {
                 writeln!(buf, "SeparatedList");
@@ -559,15 +549,15 @@ fn convert_expression(
                 RuleExpr::InlineParameter(pos)
             } else {
                 match cx.name_to_item.get(name) {
-                    Some(ItemKind::Token(t)) => RuleExpr::Token(*t),
-                    Some(ItemKind::Rule(r)) => RuleExpr::Rule(*r),
+                    Some(ItemKind::Token(t)) => RuleExpr::token(*t),
+                    Some(ItemKind::Rule(r)) => RuleExpr::rule(*r),
                     Some(ItemKind::Inline(_)) => {
                         cx.error(*a, "Use <> syntax for inlines");
-                        RuleExpr::Error
+                        RuleExpr::error()
                     }
                     None => {
                         cx.error(*a, "Unknown item");
-                        RuleExpr::Error
+                        RuleExpr::error()
                     }
                 }
             }
@@ -580,14 +570,14 @@ fn convert_expression(
                     _ => false,
                 });
                 if let Some((handle, _)) = token {
-                    RuleExpr::Token(handle)
+                    RuleExpr::token(handle)
                 } else {
                     cx.error(*a, "No matching token");
-                    RuleExpr::Error
+                    RuleExpr::error()
                 }
             } else {
                 cx.error(*a, "Invalid string");
-                RuleExpr::Error
+                RuleExpr::error()
             }
         }
         ast::Expression::PrattExpr(rules) => {
@@ -605,7 +595,7 @@ fn convert_expression(
         }
         ast::Expression::Paren(a) => match &a.expr {
             Some(e) => convert_expression(cx, e, parameters, ir_tokens),
-            None => RuleExpr::Empty,
+            None => RuleExpr::empty(),
         },
         ast::Expression::CallExpr(a) => {
             let expression = a
@@ -624,14 +614,14 @@ fn convert_expression(
             let mut expect_count = |c: usize, ok: &dyn Fn(&mut Vec<RuleExpr>) -> RuleExpr| {
                 if arguments.len() != c {
                     cx.error(a.span, format_args!("expected {c} arguments"));
-                    RuleExpr::Error
+                    RuleExpr::error()
                 } else {
                     ok(&mut arguments)
                 }
             };
 
             match name {
-                "any" => expect_count(0, &|_| RuleExpr::Any),
+                "any" => expect_count(0, &|_| RuleExpr::Transition(Transition::Any)),
                 "commit" => expect_count(0, &|_| RuleExpr::Commit),
                 "not" => expect_count(1, &|args| RuleExpr::Not(Box::new(args.pop().unwrap()))),
                 "separated_list" => expect_count(2, &|args| RuleExpr::SeparatedList {
@@ -646,11 +636,11 @@ fn convert_expression(
                     })),
                     Some(_) => {
                         cx.error(a.name, "Expected inline");
-                        RuleExpr::Error
+                        RuleExpr::error()
                     }
                     None => {
                         cx.error(a.name, "Unknown item");
-                        RuleExpr::Error
+                        RuleExpr::error()
                     }
                 },
             }

@@ -348,18 +348,12 @@ impl<'a> GraphBuilder<'a> {
     }
     fn convert_expr(&mut self, expr: &RuleExpr, incoming: Vec<IncomingEdge>) -> PegResult {
         match expr {
-            RuleExpr::Empty | RuleExpr::Commit => PegResult {
+            RuleExpr::Commit => PegResult {
                 entry: None,
                 success: incoming,
                 fail: vec![],
             },
-            // some error that has already been reported, pass it along in a dummy state transition
-            RuleExpr::Error => self.error_transition(&incoming),
-            RuleExpr::Token(token) => self.single_transition(&incoming, Transition::Token(*token)),
-            RuleExpr::Rule(rule) => self.single_transition(&incoming, Transition::Rule(*rule)),
-            RuleExpr::PrattRule(rule, bp) => {
-                self.single_transition(&incoming, Transition::PrattRule(*rule, *bp))
-            }
+            RuleExpr::Transition(transition) => self.single_transition(&incoming, *transition),
             RuleExpr::Sequence(vec) => {
                 let save_variable = self.new_variable();
                 let save = self.single_transition(&incoming, Transition::SaveState(save_variable));
@@ -473,15 +467,6 @@ impl<'a> GraphBuilder<'a> {
                     fail: vec![],
                 }
             }
-            RuleExpr::Any => self.single_transition(&incoming, Transition::Any),
-            RuleExpr::Not(expr) => {
-                if let RuleExpr::Token(token) = **expr {
-                    self.single_transition(&incoming, Transition::Not(token))
-                } else {
-                    self.error("RuleExpr::Not only works with tokens".to_owned());
-                    self.error_transition(&incoming)
-                }
-            }
             RuleExpr::SeparatedList { element, separator } => {
                 // SeparatedList('a', ',')
                 //
@@ -517,7 +502,7 @@ impl<'a> GraphBuilder<'a> {
                     fail: vec![],
                 }
             }
-            RuleExpr::InlineParameter(_) | RuleExpr::InlineCall(_) => {
+            RuleExpr::InlineParameter(_) | RuleExpr::InlineCall(_) | RuleExpr::Not(_) => {
                 unreachable!("These should have been eliminated during lowering")
             }
             RuleExpr::Pratt(vec) => {
@@ -663,15 +648,6 @@ impl<'a> GraphBuilder<'a> {
 
             on_stack.remove(child);
         }
-    }
-    fn visit_edges_dfs(
-        nodes: &HandleVec<NodeHandle, PegNode>,
-        entry: NodeHandle,
-        scratch: &mut HandleBitset<NodeHandle>,
-        mut fun: impl FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>, bool) -> bool,
-    ) {
-        scratch.clear();
-        Self::visit_edges_dfs_impl(nodes, None, entry, None, scratch, &mut fun);
     }
     fn visit_edges_once_dfs(
         nodes: &HandleVec<NodeHandle, PegNode>,

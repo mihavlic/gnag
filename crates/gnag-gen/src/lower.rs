@@ -3,9 +3,12 @@ use std::{
     fmt::{Debug, Display},
 };
 
-use crate::convert::{
-    CallExpr, ConvertedFile, InlineHandle, RuleExpr, RuleHandle, TokenDef, TokenHandle,
-    TokenPattern,
+use crate::{
+    convert::{
+        CallExpr, ConvertedFile, InlineHandle, RuleExpr, RuleHandle, TokenDef, TokenHandle,
+        TokenPattern,
+    },
+    graph::Transition,
 };
 use gnag::{
     ctx::{ErrorAccumulator, SpanExt},
@@ -182,7 +185,7 @@ fn inline_calls(
 ) {
     expr.visit_nodes_bottom_up_mut(|node| {
         if let RuleExpr::InlineCall(_) = node {
-            let RuleExpr::InlineCall(call) = std::mem::replace(node, RuleExpr::Error) else {
+            let RuleExpr::InlineCall(call) = std::mem::replace(node, RuleExpr::error()) else {
                 unreachable!()
             };
             let CallExpr {
@@ -203,7 +206,7 @@ fn inline_calls(
                     span,
                     format_args!("Expected {expected_len} arguments, got {provided_len}"),
                 );
-                *node = RuleExpr::Error;
+                *node = RuleExpr::error();
             } else {
                 *node = expanded.clone();
                 if !parameters.is_empty() {
@@ -218,5 +221,16 @@ fn inline_calls(
                 }
             }
         };
+        if let RuleExpr::Not(expr) = node {
+            if let RuleExpr::Transition(Transition::Token(token)) = **expr {
+                *node = RuleExpr::Transition(Transition::Not(token));
+            } else {
+                cx.error(
+                    StrSpan::empty(),
+                    "(TODO span) RuleExpr::Not only works with tokens",
+                );
+                *node = RuleExpr::error();
+            }
+        }
     });
 }

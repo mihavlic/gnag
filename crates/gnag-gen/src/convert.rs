@@ -312,6 +312,7 @@ pub enum RuleExpr {
     Error,
     Token(TokenHandle),
     Rule(RuleHandle),
+    PrattRule(RuleHandle, u32),
 
     Sequence(Vec<RuleExpr>),
     Choice(Vec<RuleExpr>),
@@ -421,6 +422,7 @@ impl RuleExpr {
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
+            | RuleExpr::PrattRule(_, _)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
             | RuleExpr::Commit
@@ -460,6 +462,7 @@ impl RuleExpr {
             }
             RuleExpr::Token(_)
             | RuleExpr::Rule(_)
+            | RuleExpr::PrattRule(_, _)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::Any
             | RuleExpr::Commit
@@ -505,6 +508,7 @@ impl RuleExpr {
             RuleExpr::Error => writeln!(buf, "Error"),
             RuleExpr::Token(a) => writeln!(buf, "Token({})", a.name(file)),
             RuleExpr::Rule(a) => writeln!(buf, "Rule({})", a.name(file)),
+            RuleExpr::PrattRule(rule, bp) => writeln!(buf, "PrattRule({}, {bp})", rule.name(file)),
             RuleExpr::Sequence(a) => display_slice(buf, "Sequence", a),
             RuleExpr::Choice(a) => display_slice(buf, "Choice", a),
             RuleExpr::Loop(a) => display_nested(buf, "Loop", a),

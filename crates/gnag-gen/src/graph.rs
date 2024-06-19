@@ -20,6 +20,7 @@ pub enum Transition {
     Token(TokenHandle),
     Rule(RuleHandle),
     PrattRule(RuleHandle, u32),
+    CompareBindingPower(u32),
     // builtins
     Any,
     Not(TokenHandle),
@@ -28,7 +29,7 @@ pub enum Transition {
     RestoreState(VariableHandle),
     CloseSpan(RuleHandle),
     Return(bool),
-    // does nothing
+    // does nothing, used to massage statement order for generated code
     Dummy,
 }
 
@@ -46,6 +47,7 @@ impl Transition {
             | Transition::Token(_)
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
+            | Transition::CompareBindingPower(_)
             | Transition::Any
             | Transition::Not(_)
             | Transition::Dummy => TransitionEffects::Fallible,
@@ -63,7 +65,8 @@ impl Transition {
             | Transition::PrattRule(_, _)
             | Transition::Any
             | Transition::Not(_) => true,
-            Transition::SaveState(_)
+            Transition::CompareBindingPower(_)
+            | Transition::SaveState(_)
             | Transition::RestoreState(_)
             | Transition::CloseSpan(_)
             | Transition::Return(_)
@@ -80,6 +83,7 @@ impl Transition {
             Transition::Token(a) => write!(f, "Token({})", file.tokens[a].name),
             Transition::Rule(a) => write!(f, "Rule({})", file.rules[a].name),
             Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", file.rules[a].name),
+            Transition::CompareBindingPower(power) => write!(f, "CompareBindingPower({power})"),
             Transition::Any => write!(f, "Any"),
             Transition::Not(a) => write!(f, "Not({})", file.tokens[a].name),
             Transition::SaveState(a) => write!(f, "SaveState({})", a.index()),
@@ -353,6 +357,9 @@ impl<'a> GraphBuilder<'a> {
             RuleExpr::Error => self.error_transition(&incoming),
             RuleExpr::Token(token) => self.single_transition(&incoming, Transition::Token(*token)),
             RuleExpr::Rule(rule) => self.single_transition(&incoming, Transition::Rule(*rule)),
+            RuleExpr::PrattRule(rule, bp) => {
+                self.single_transition(&incoming, Transition::PrattRule(*rule, *bp))
+            }
             RuleExpr::Sequence(vec) => {
                 let save_variable = self.new_variable();
                 let save = self.single_transition(&incoming, Transition::SaveState(save_variable));

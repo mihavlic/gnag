@@ -186,7 +186,7 @@ fn inline_calls(
     expr.visit_nodes_bottom_up_mut(|node| {
         match node {
             RuleExpr::InlineCall(_) => {
-                let RuleExpr::InlineCall(call) = std::mem::replace(node, RuleExpr::error()) else {
+                let RuleExpr::InlineCall(call) = node.take() else {
                     unreachable!()
                 };
                 let CallExpr {
@@ -234,7 +234,7 @@ fn inline_calls(
                 }
             }
             RuleExpr::OneOrMore(expr) => {
-                let expr = std::mem::replace(&mut **expr, RuleExpr::error());
+                let expr = expr.take();
                 *node = RuleExpr::Sequence(vec![expr.clone(), RuleExpr::Loop(Box::new(expr))]);
             }
             _ => (),

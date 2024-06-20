@@ -339,46 +339,6 @@ pub enum RuleExpr {
 
 impl RuleExpr {
     pub const BUILTIN_RULES: &'static [&'static str] = &["any", "not", "separated_list"];
-    // pub fn is_sequence(&self) -> bool {
-    //     matches!(self, Self::Sequence(_))
-    // }
-    // pub fn is_choice(&self) -> bool {
-    //     matches!(self, Self::Choice(_))
-    // }
-    // /// A helper function for [`Self::is_empty_nonrecursive()`] which only considers the current
-    // /// node without traversing into its childern.
-    // fn is_empty_leaf(&self) -> bool {
-    //     match self {
-    //         RuleExpr::empty() => true,
-    //         RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.is_empty(),
-    //         _ => false,
-    //     }
-    // }
-    // /// A version of [`Self::is_empty()`] which only considers its direct children, useful when
-    // /// doing a [`Self::visit_nodes_bottom_up()`] to avoid quadratic complexity.
-    // pub fn is_empty_nonrecursive(&self) -> bool {
-    //     self.is_empty_impl(Self::is_empty_leaf)
-    // }
-    // pub fn is_empty(&self) -> bool {
-    //     self.is_empty_impl(Self::is_empty)
-    // }
-    // fn is_empty_impl<F: Fn(&Self) -> bool>(&self, fun: F) -> bool {
-    //     match self {
-    //         RuleExpr::empty() => true,
-    //         RuleExpr::Sequence(a) | RuleExpr::Choice(a) => a.iter().all(fun),
-    //         RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Maybe(a) => fun(a),
-    //         RuleExpr::Not(a) => !fun(a),
-    //         RuleExpr::SeparatedList { element, separator } => fun(element) && fun(separator),
-    //         RuleExpr::token(_)
-    //         | RuleExpr::rule(_)
-    //         | RuleExpr::InlineParameter(_)
-    //         | RuleExpr::InlineCall(_)
-    //         | RuleExpr::Any
-    //         | RuleExpr::ZeroSpace
-    //         | RuleExpr::error()
-    //         | RuleExpr::PrattRecursion { .. } => false,
-    //     }
-    // }
     pub fn empty() -> RuleExpr {
         RuleExpr::Sequence(vec![])
     }
@@ -402,6 +362,25 @@ impl RuleExpr {
     }
     pub fn visit_nodes_bottom_up_mut(&mut self, mut fun: impl FnMut(&mut RuleExpr)) {
         self.visit_nodes_mut_(false, &mut fun)
+    }
+
+    /// Replaces the contents with RuleExpr::empty(), returning the old value
+    pub fn take(&mut self) -> RuleExpr {
+        std::mem::replace(self, RuleExpr::empty())
+    }
+
+    pub fn to_sequence(&mut self) -> &mut Vec<RuleExpr> {
+        loop {
+            match self {
+                RuleExpr::Sequence(vec) => return vec,
+                _ => {
+                    let mut vec = Vec::with_capacity(2);
+                    vec.push(self.take());
+                    *self = RuleExpr::Sequence(vec);
+                    continue;
+                }
+            }
+        }
     }
 
     fn visit_nodes_(&self, top_down: bool, fun: &mut dyn FnMut(&RuleExpr)) {

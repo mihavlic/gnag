@@ -184,53 +184,60 @@ fn inline_calls(
     cx: &mut LoweringCx,
 ) {
     expr.visit_nodes_bottom_up_mut(|node| {
-        if let RuleExpr::InlineCall(_) = node {
-            let RuleExpr::InlineCall(call) = std::mem::replace(node, RuleExpr::error()) else {
-                unreachable!()
-            };
-            let CallExpr {
-                template: handle,
-                parameters,
-                span,
-            } = *call;
-
-            // try to get the expanded body first because doing so can generate errors
-            let expanded = get_inline(handle, inlines, cx);
-
-            let rule_ir = &cx.file.inlines[handle];
-
-            let expected_len = rule_ir.parameters.len();
-            let provided_len = parameters.len();
-            if expected_len != provided_len {
-                cx.error(
+        match node {
+            RuleExpr::InlineCall(_) => {
+                let RuleExpr::InlineCall(call) = std::mem::replace(node, RuleExpr::error()) else {
+                    unreachable!()
+                };
+                let CallExpr {
+                    template: handle,
+                    parameters,
                     span,
-                    format_args!("Expected {expected_len} arguments, got {provided_len}"),
-                );
-                *node = RuleExpr::error();
-            } else {
-                *node = expanded.clone();
-                if !parameters.is_empty() {
-                    node.visit_nodes_top_down_mut(|node| {
-                        if let &mut RuleExpr::InlineParameter(pos) = node {
-                            *node = parameters
-                                .get(pos)
-                                .expect("InlineParameter out of bounds??")
-                                .clone();
-                        }
-                    })
+                } = *call;
+
+                // try to get the expanded body first because doing so can generate errors
+                let expanded = get_inline(handle, inlines, cx);
+
+                let rule_ir = &cx.file.inlines[handle];
+
+                let expected_len = rule_ir.parameters.len();
+                let provided_len = parameters.len();
+                if expected_len != provided_len {
+                    cx.error(
+                        span,
+                        format_args!("Expected {expected_len} arguments, got {provided_len}"),
+                    );
+                    *node = RuleExpr::error();
+                } else {
+                    *node = expanded.clone();
+                    if !parameters.is_empty() {
+                        node.visit_nodes_top_down_mut(|node| {
+                            if let &mut RuleExpr::InlineParameter(pos) = node {
+                                *node = parameters
+                                    .get(pos)
+                                    .expect("InlineParameter out of bounds??")
+                                    .clone();
+                            }
+                        })
+                    }
                 }
             }
-        };
-        if let RuleExpr::Not(expr) = node {
-            if let RuleExpr::Transition(Transition::Token(token)) = **expr {
-                *node = RuleExpr::Transition(Transition::Not(token));
-            } else {
-                cx.error(
-                    StrSpan::empty(),
-                    "(TODO span) RuleExpr::Not only works with tokens",
-                );
-                *node = RuleExpr::error();
+            RuleExpr::Not(expr) => {
+                if let RuleExpr::Transition(Transition::Token(token)) = **expr {
+                    *node = RuleExpr::Transition(Transition::Not(token));
+                } else {
+                    cx.error(
+                        StrSpan::empty(),
+                        "(TODO span) RuleExpr::Not only works with tokens",
+                    );
+                    *node = RuleExpr::error();
+                }
             }
+            RuleExpr::OneOrMore(expr) => {
+                let expr = std::mem::replace(&mut **expr, RuleExpr::error());
+                *node = RuleExpr::Sequence(vec![expr.clone(), RuleExpr::Loop(Box::new(expr))]);
+            }
+            _ => (),
         }
     });
 }

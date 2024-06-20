@@ -454,11 +454,6 @@ impl<'a> GraphBuilder<'a> {
                     fail: vec![],
                 }
             }
-            RuleExpr::OneOrMore(expr) => {
-                let lowered =
-                    RuleExpr::Sequence(vec![(**expr).clone(), RuleExpr::Loop(expr.clone())]);
-                self.convert_expr(&lowered, incoming)
-            }
             RuleExpr::Maybe(expr) => {
                 let result = self.convert_expr(expr, incoming);
                 PegResult {
@@ -502,7 +497,10 @@ impl<'a> GraphBuilder<'a> {
                     fail: vec![],
                 }
             }
-            RuleExpr::InlineParameter(_) | RuleExpr::InlineCall(_) | RuleExpr::Not(_) => {
+            RuleExpr::OneOrMore(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::InlineCall(_)
+            | RuleExpr::Not(_) => {
                 unreachable!("These should have been eliminated during lowering")
             }
             RuleExpr::Pratt(vec) => {

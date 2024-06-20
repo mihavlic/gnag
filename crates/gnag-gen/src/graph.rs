@@ -440,8 +440,19 @@ impl<'a> GraphBuilder<'a> {
                 //       ▼
                 //       * done
 
+                let mut expr = Cow::Borrowed(&**expr);
+                if let RuleExpr::Choice(vec) = &*expr {
+                    if vec.len() > 1 {
+                        if let RuleExpr::Choice(vec) = expr.to_mut() {
+                            vec.push(RuleExpr::Transition(Transition::Dummy(false)));
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                }
+
                 let result = self.convert_expr_nonempty(
-                    expr,
+                    expr.as_ref(),
                     incoming,
                     "Looped expressions cannot be empty",
                 );

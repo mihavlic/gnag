@@ -392,11 +392,15 @@ pub fn display_code(
                     writeln!(buf, "{suffix}");
                 }
 
-                if transition == Transition::Dummy {
+                if let Transition::Dummy(should_succeed) = transition {
                     writeln!(buf, "// dummy");
-                    if success != FlowAction::None {
+                    let action = match should_succeed {
+                        true => success,
+                        false => fail,
+                    };
+                    if action != FlowAction::None {
                         print_indent(buf, indent);
-                        print_action(buf, success, "", ";", &stack);
+                        print_action(buf, action, "", ";", &stack);
                     }
                     continue;
                 }

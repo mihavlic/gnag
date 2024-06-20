@@ -30,7 +30,8 @@ pub enum Transition {
     CloseSpan(RuleHandle),
     Return(bool),
     // does nothing, used to massage statement order for generated code
-    Dummy,
+    // for true always succeeds, for false always fails
+    Dummy(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,7 +51,7 @@ impl Transition {
             | Transition::CompareBindingPower(_)
             | Transition::Any
             | Transition::Not(_)
-            | Transition::Dummy => TransitionEffects::Fallible,
+            | Transition::Dummy(_) => TransitionEffects::Fallible,
             Transition::SaveState(_) | Transition::RestoreState(_) | Transition::CloseSpan(_) => {
                 TransitionEffects::Infallible
             }
@@ -70,7 +71,7 @@ impl Transition {
             | Transition::RestoreState(_)
             | Transition::CloseSpan(_)
             | Transition::Return(_)
-            | Transition::Dummy => false,
+            | Transition::Dummy(_) => false,
         }
     }
     pub fn display(
@@ -90,7 +91,7 @@ impl Transition {
             Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
             Transition::CloseSpan(a) => write!(f, "CloseSpan({})", file.rules[a].name),
             Transition::Return(value) => write!(f, "Return({value})"),
-            Transition::Dummy => write!(f, "Dummy"),
+            Transition::Dummy(value) => write!(f, "Dummy({value})"),
         }
     }
 }
@@ -579,7 +580,8 @@ impl<'a> GraphBuilder<'a> {
                 }
 
                 if let Some(otherwise_entry) = otherwise_entry {
-                    let mut dummy = self.single_transition(&otherwise_fail, Transition::Dummy);
+                    let mut dummy =
+                        self.single_transition(&otherwise_fail, Transition::Dummy(true));
                     otherwise_fail = dummy.success;
                     otherwise_success.append(&mut dummy.fail);
 

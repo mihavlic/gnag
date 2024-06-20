@@ -1,33 +1,65 @@
-use crate::convert::{RuleHandle, TokenHandle};
+use crate::convert::RuleExpr;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PrattExprKind {
-    /// '(' Expr ')'
-    Atom,
-    /// '!' Expr
-    Prefix,
-    /// Expr '!'
-    Postfix,
-    /// Expr '+' Expr
-    Binary(Associativity),
-}
+pub fn visit_affix_leaves(
+    expr: &mut RuleExpr,
+    prefix: bool,
+    on_leaf: &mut dyn FnMut(&mut RuleExpr) -> bool,
+) -> Option<bool> {
+    match expr {
+        RuleExpr::Transition(_) => Some(on_leaf(expr)),
+        RuleExpr::Sequence(vec) => {
+            let expr = match prefix {
+                true => vec.first_mut(),
+                false => vec.last_mut(),
+            };
+            expr.and_then(|e| visit_affix_leaves(e, prefix, on_leaf))
+        }
+        RuleExpr::Choice(vec) => {
+            let mut contains_true = false;
+            let mut contains_false = false;
 
-impl PrattExprKind {
-    pub fn get_binding_power(self, order: u32) -> (Option<u32>, Option<u32>) {
-        assert!(order != 0);
-        let base = order * 2 - 1;
-        match self {
-            PrattExprKind::Atom => (None, None),
-            PrattExprKind::Prefix => (None, Some(base)),
-            PrattExprKind::Postfix => (Some(base), None),
-            PrattExprKind::Binary(associativity) => {
-                let (l, r) = match associativity {
-                    Associativity::Left => (1, 0),
-                    Associativity::Right => (0, 1),
-                };
-                (Some(base + l), Some(base + r))
+            for expr in vec {
+                match visit_affix_leaves(expr, prefix, on_leaf) {
+                    Some(true) => contains_true = true,
+                    Some(false) => contains_false = true,
+                    None => return None,
+                }
+            }
+
+            // children must all be true or all false, otherwise return None
+            match (contains_true, contains_false) {
+                (true, false) => Some(true),
+                (false, true) => Some(false),
+                _ => None,
             }
         }
+        RuleExpr::Loop(a) | RuleExpr::Maybe(a) => {
+            // these constructs are fine if they do not contain a recursive affix
+            match visit_affix_leaves(a, prefix, on_leaf) {
+                Some(false) => Some(false),
+                _ => None,
+            }
+        }
+        RuleExpr::SeparatedList {
+            element,
+            separator: _,
+        } => {
+            if prefix {
+                match visit_affix_leaves(element, prefix, on_leaf) {
+                    Some(false) => Some(false),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        RuleExpr::OneOrMore(_)
+        | RuleExpr::InlineParameter(_)
+        | RuleExpr::InlineCall(_)
+        | RuleExpr::Not(_) => {
+            unreachable!("These should have been eliminated during lowering")
+        }
+        RuleExpr::Commit | RuleExpr::Pratt(_) => None,
     }
 }
 
@@ -37,15 +69,39 @@ pub enum Associativity {
     Right,
 }
 
-#[derive(Clone, Debug)]
-pub enum PrattExpr {
-    Token(TokenHandle),
-    Rule(RuleHandle),
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PrattExprKind {
+    /// '(' Expr ')'
+    Atom,
+    /// '!' Expr
+    Prefix,
+    /// Expr '!'
+    Suffix,
+    /// Expr '+' Expr
+    Binary(Associativity),
 }
 
-#[derive(Clone, Debug)]
-pub struct PrattChild {
-    pub expr: PrattExpr,
-    pub kind: PrattExprKind,
-    pub order: u32,
+impl PrattExprKind {
+    pub fn get_binding_power(self, offset: &mut u32) -> (Option<u32>, Option<u32>) {
+        let start = *offset;
+        match self {
+            PrattExprKind::Atom => (None, None),
+            PrattExprKind::Prefix => {
+                *offset += 1;
+                (None, Some(start))
+            }
+            PrattExprKind::Suffix => {
+                *offset += 1;
+                (Some(start), None)
+            }
+            PrattExprKind::Binary(associativity) => {
+                *offset += 2;
+                let (l, r) = match associativity {
+                    Associativity::Left => (1, 0),
+                    Associativity::Right => (0, 1),
+                };
+                (Some(start + l), Some(start + r))
+            }
+        }
+    }
 }

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cell::RefCell,
     fmt::{Display, Formatter, Write},
 };
@@ -12,6 +13,7 @@ use gnag::{
 use crate::{
     convert::{ConvertedFile, RuleExpr, RuleHandle, TokenHandle},
     lower::LoweredFile,
+    pratt::{visit_affix_leaves, Associativity, PrattExprKind},
 };
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
@@ -151,17 +153,6 @@ impl PegNode {
             assert!(self.success.is_none());
             self.success = Some(to);
         }
-    }
-    /// return whether failure in this node has the same control flow as success
-    fn fail_same_as_success(&self) -> bool {
-        return self.fail.is_none() || self.fail == self.success;
-    }
-    fn free_fail_edge(&mut self) -> bool {
-        if self.fail.is_some() {
-            self.fail = None;
-            return true;
-        }
-        return false;
     }
     pub fn for_edges_transition(&self, mut fun: impl FnMut(NodeHandle, Option<&Transition>)) {
         if let Some(success) = self.success {
@@ -307,6 +298,7 @@ impl<'a> GraphBuilder<'a> {
             self.nodes[edge.from].add_outgoing_edge(node, edge.is_fail);
         }
     }
+    #[allow(dead_code)]
     fn connect_forward_edges(&mut self, node: NodeHandle, incoming: &[IncomingEdge]) {
         for edge in incoming {
             assert!(edge.from < node);
@@ -516,98 +508,94 @@ impl<'a> GraphBuilder<'a> {
                 unreachable!("These should have been eliminated during lowering")
             }
             RuleExpr::Pratt(vec) => {
-                // TODO improve robustness, left recursion recognition is very dumb
-                let mut prefix_entry = None;
-                let mut prefix_fail = incoming;
-                let mut prefix_success = Vec::new();
-
-                let mut otherwise_entry = None;
-                let mut otherwise_fail = Vec::new();
-                let mut otherwise_success = Vec::new();
-
-                for rule in vec {
-                    let mut result = self.convert_expr(&rule.expr, vec![]);
-
-                    let Some(mut first_handle) = result.entry else {
-                        continue;
-                    };
-
-                    let first_node = &self.nodes[first_handle];
-
-                    let mut is_recursive = false;
-                    if let Transition::Rule(rule) = first_node.transition {
-                        if Some(rule) == self.current_rule {
-                            let Some(next_handle) = first_node.success else {
-                                // TODO emit error
-                                continue;
+                let current_rule = self.current_rule;
+                let handle_expr = |expr: &mut RuleExpr, prefix: bool| {
+                    if let RuleExpr::Transition(Transition::Rule(rule)) = expr {
+                        if Some(*rule) == current_rule {
+                            *expr = match prefix {
+                                // binding power will be added later
+                                true => RuleExpr::Transition(Transition::CompareBindingPower(0)),
+                                false => RuleExpr::Transition(Transition::PrattRule(*rule, 0)),
                             };
-                            let next_node = &mut self.nodes[next_handle];
-                            // we are skipping the first rule, if the rule expression was a sequence,
-                            // it may have been committed after the first node
-                            // so we have to reintroduce a correct fail edge
-                            if next_node.fail_same_as_success() {
-                                if next_node.free_fail_edge() {
-                                    result.fail.push(IncomingEdge {
-                                        from: next_handle,
-                                        is_fail: true,
-                                    });
-                                }
-                            }
-                            first_handle = next_handle;
-
-                            is_recursive = true;
+                            return true;
                         }
                     }
+                    false
+                };
 
-                    if is_recursive {
-                        result.success = self
-                            .single_transition(
-                                &result.success,
-                                Transition::CloseSpan(self.current_rule.unwrap()),
-                            )
-                            .success;
-                    }
+                let mut atoms = Vec::new();
+                let mut suffixes = Vec::new();
+                let mut bp_offset = 1;
 
-                    let (fail, success, entry) = match is_recursive {
-                        false => (&mut prefix_fail, &mut prefix_success, &mut prefix_entry),
-                        true => (
-                            &mut otherwise_fail,
-                            &mut otherwise_success,
-                            &mut otherwise_entry,
-                        ),
+                for rule in vec {
+                    let mut expr = rule.expr.clone();
+                    let has_prefix =
+                        visit_affix_leaves(&mut expr, true, &mut |expr| handle_expr(expr, true));
+                    let has_suffix =
+                        visit_affix_leaves(&mut expr, false, &mut |expr| handle_expr(expr, false));
+
+                    let kind = match has_prefix {
+                        Some(true) => {
+                            if has_suffix == Some(true) {
+                                let assoc = match rule.attributes.right_assoc {
+                                    true => Associativity::Right,
+                                    false => Associativity::Left,
+                                };
+                                PrattExprKind::Binary(assoc)
+                            } else {
+                                PrattExprKind::Suffix
+                            }
+                        }
+                        Some(false) => {
+                            if has_suffix != Some(true) || rule.attributes.atom {
+                                PrattExprKind::Atom
+                            } else {
+                                PrattExprKind::Prefix
+                            }
+                        }
+                        None => {
+                            // TODO report error
+                            expr = RuleExpr::error();
+                            PrattExprKind::Atom
+                        }
                     };
 
-                    if entry.is_none() {
-                        *entry = Some(first_handle);
+                    let (l_bp, r_bp) = kind.get_binding_power(&mut bp_offset);
+
+                    if let Some(bp) = l_bp {
+                        visit_affix_leaves(&mut expr, true, &mut |expr| {
+                            if let RuleExpr::Transition(Transition::CompareBindingPower(power)) =
+                                expr
+                            {
+                                *power = bp
+                            }
+                            true
+                        });
                     }
 
-                    self.connect_forward_edges(first_handle, fail);
-                    *fail = std::mem::take(&mut result.fail);
-                    success.append(&mut result.success);
+                    if let Some(bp) = r_bp {
+                        visit_affix_leaves(&mut expr, false, &mut |expr| {
+                            if let RuleExpr::Transition(Transition::PrattRule(_, power)) = expr {
+                                *power = bp
+                            }
+                            true
+                        });
+                    }
+
+                    // expr.to_sequence().push(RuleExpr::Transition(Transition::CloseSpan(todo!())));
+
+                    let dest = match kind {
+                        PrattExprKind::Atom | PrattExprKind::Prefix => &mut atoms,
+                        PrattExprKind::Suffix | PrattExprKind::Binary(_) => &mut suffixes,
+                    };
+                    dest.push(expr);
                 }
 
-                if prefix_entry.is_none() {
-                    prefix_entry = otherwise_entry;
-                }
-
-                if let Some(otherwise_entry) = otherwise_entry {
-                    let mut dummy =
-                        self.single_transition(&otherwise_fail, Transition::Dummy(true));
-                    otherwise_fail = dummy.success;
-                    otherwise_success.append(&mut dummy.fail);
-
-                    self.connect_forward_edges(otherwise_entry, &prefix_success);
-                    self.connect_backward_edges(otherwise_entry, &otherwise_success);
-                    otherwise_success = std::mem::take(&mut otherwise_fail);
-                } else {
-                    otherwise_success = prefix_success;
-                }
-
-                PegResult {
-                    entry: prefix_entry,
-                    success: otherwise_success,
-                    fail: prefix_fail,
-                }
+                let mangled = RuleExpr::Sequence(vec![
+                    RuleExpr::Choice(atoms),
+                    RuleExpr::Loop(Box::new(RuleExpr::Choice(suffixes))),
+                ]);
+                self.convert_expr(&mangled, incoming)
             }
         }
     }

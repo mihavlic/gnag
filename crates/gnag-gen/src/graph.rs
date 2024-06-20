@@ -956,17 +956,12 @@ impl<'a> GraphBuilder<'a> {
             let is_deleted = deleted.contains(handle);
 
             let result = if is_deleted {
-                if is_loop {
-                    // deleting loops creates dangling edges
-                    None
-                } else {
-                    if let Some(success) = node.success {
-                        // recurse
+                if !is_loop {
+                    node.success.and_then(|success| {
                         find_non_deleted_node(success, deleted, nodes, memo, stack)
-                    } else {
-                        // deleting a node with a dangling success edge propagates the dangling to incoming edges
-                        None
-                    }
+                    })
+                } else {
+                    None
                 }
             } else {
                 // node is not deleted, we can keep it

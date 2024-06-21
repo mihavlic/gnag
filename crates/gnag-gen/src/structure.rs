@@ -1,8 +1,8 @@
 use crate::convert::ConvertedFile;
+use crate::expr::Transition;
+use crate::expr::TransitionEffects;
 use crate::graph::NodeHandle;
 use crate::graph::PegNode;
-use crate::graph::Transition;
-use crate::graph::TransitionEffects;
 use crate::scope_tree::ScopeHandle;
 use crate::scope_tree::ScopeKind;
 use crate::scope_tree::ScopeNode;

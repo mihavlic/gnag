@@ -11,95 +11,13 @@ use gnag::{
 };
 
 use crate::{
-    convert::{ConvertedFile, RuleExpr, RuleHandle, TokenHandle},
+    convert::{ConvertedFile, RuleHandle},
+    expr::{RuleExpr, Transition, TransitionEffects, VariableHandle},
     lower::LoweredFile,
 };
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
-pub enum Transition {
-    Error,
-    Token(TokenHandle),
-    Rule(RuleHandle),
-    PrattRule(RuleHandle, u32),
-    CompareBindingPower(u32),
-    // builtins
-    Any,
-    Not(TokenHandle),
-    // function start/end
-    SaveState(VariableHandle),
-    RestoreState(VariableHandle),
-    CloseSpan(RuleHandle),
-    Return(bool),
-    // does nothing, used to massage statement order for generated code
-    // for true always succeeds, for false always fails
-    Dummy(bool),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum TransitionEffects {
-    Fallible,
-    Infallible,
-    Noreturn,
-}
-
-impl Transition {
-    pub fn effects(&self) -> TransitionEffects {
-        match self {
-            Transition::Error
-            | Transition::Token(_)
-            | Transition::Rule(_)
-            | Transition::PrattRule(_, _)
-            | Transition::CompareBindingPower(_)
-            | Transition::Any
-            | Transition::Not(_)
-            | Transition::Dummy(_) => TransitionEffects::Fallible,
-            Transition::SaveState(_) | Transition::RestoreState(_) | Transition::CloseSpan(_) => {
-                TransitionEffects::Infallible
-            }
-            Transition::Return(_) => TransitionEffects::Noreturn,
-        }
-    }
-    pub fn advances_parser(&self) -> bool {
-        match self {
-            Transition::Error
-            | Transition::Token(_)
-            | Transition::Rule(_)
-            | Transition::PrattRule(_, _)
-            | Transition::Any
-            | Transition::Not(_) => true,
-            Transition::CompareBindingPower(_)
-            | Transition::SaveState(_)
-            | Transition::RestoreState(_)
-            | Transition::CloseSpan(_)
-            | Transition::Return(_)
-            | Transition::Dummy(_) => false,
-        }
-    }
-    pub fn display(
-        &self,
-        f: &mut dyn Write,
-        file: &crate::convert::ConvertedFile,
-    ) -> std::fmt::Result {
-        match *self {
-            Transition::Error => write!(f, "Error"),
-            Transition::Token(a) => write!(f, "Token({})", file.tokens[a].name),
-            Transition::Rule(a) => write!(f, "Rule({})", file.rules[a].name),
-            Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", file.rules[a].name),
-            Transition::CompareBindingPower(power) => write!(f, "CompareBindingPower({power})"),
-            Transition::Any => write!(f, "Any"),
-            Transition::Not(a) => write!(f, "Not({})", file.tokens[a].name),
-            Transition::SaveState(a) => write!(f, "SaveState({})", a.index()),
-            Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
-            Transition::CloseSpan(a) => write!(f, "CloseSpan({})", file.rules[a].name),
-            Transition::Return(value) => write!(f, "Return({value})"),
-            Transition::Dummy(value) => write!(f, "Dummy({value})"),
-        }
-    }
-}
-
 simple_handle! {
-    pub NodeHandle,
-    pub VariableHandle
+    pub NodeHandle
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -4,11 +4,8 @@ use std::{
 };
 
 use crate::{
-    convert::{
-        CallExpr, ConvertedFile, InlineHandle, RuleExpr, RuleHandle, TokenDef, TokenHandle,
-        TokenPattern,
-    },
-    graph::Transition,
+    convert::{ConvertedFile, InlineHandle, RuleHandle, TokenDef, TokenHandle, TokenPattern},
+    expr::{CallExpr, RuleExpr, Transition},
     pratt::{Associativity, PrattExprKind},
 };
 use gnag::{

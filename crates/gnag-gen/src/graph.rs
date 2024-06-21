@@ -13,7 +13,6 @@ use gnag::{
 use crate::{
     convert::{ConvertedFile, RuleExpr, RuleHandle, TokenHandle},
     lower::LoweredFile,
-    pratt::{visit_affix_leaves, Associativity, PrattExprKind},
 };
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
@@ -501,101 +500,12 @@ impl<'a> GraphBuilder<'a> {
                     fail: vec![],
                 }
             }
-            RuleExpr::OneOrMore(_)
+            RuleExpr::Pratt(_)
+            | RuleExpr::OneOrMore(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::InlineCall(_)
             | RuleExpr::Not(_) => {
                 unreachable!("These should have been eliminated during lowering")
-            }
-            RuleExpr::Pratt(vec) => {
-                let current_rule = self.current_rule;
-                let handle_expr = |expr: &mut RuleExpr, prefix: bool| {
-                    if let RuleExpr::Transition(Transition::Rule(rule)) = expr {
-                        if Some(*rule) == current_rule {
-                            *expr = match prefix {
-                                // binding power will be added later
-                                true => RuleExpr::Transition(Transition::CompareBindingPower(0)),
-                                false => RuleExpr::Transition(Transition::PrattRule(*rule, 0)),
-                            };
-                            return true;
-                        }
-                    }
-                    false
-                };
-
-                let mut atoms = Vec::new();
-                let mut suffixes = Vec::new();
-                let mut bp_offset = 1;
-
-                for rule in vec {
-                    let mut expr = rule.expr.clone();
-                    let has_prefix =
-                        visit_affix_leaves(&mut expr, true, &mut |expr| handle_expr(expr, true));
-                    let has_suffix =
-                        visit_affix_leaves(&mut expr, false, &mut |expr| handle_expr(expr, false));
-
-                    let kind = match has_prefix {
-                        Some(true) => {
-                            if has_suffix == Some(true) {
-                                let assoc = match rule.attributes.right_assoc {
-                                    true => Associativity::Right,
-                                    false => Associativity::Left,
-                                };
-                                PrattExprKind::Binary(assoc)
-                            } else {
-                                PrattExprKind::Suffix
-                            }
-                        }
-                        Some(false) => {
-                            if has_suffix != Some(true) || rule.attributes.atom {
-                                PrattExprKind::Atom
-                            } else {
-                                PrattExprKind::Prefix
-                            }
-                        }
-                        None => {
-                            // TODO report error
-                            expr = RuleExpr::error();
-                            PrattExprKind::Atom
-                        }
-                    };
-
-                    let (l_bp, r_bp) = kind.get_binding_power(&mut bp_offset);
-
-                    if let Some(bp) = l_bp {
-                        visit_affix_leaves(&mut expr, true, &mut |expr| {
-                            if let RuleExpr::Transition(Transition::CompareBindingPower(power)) =
-                                expr
-                            {
-                                *power = bp
-                            }
-                            true
-                        });
-                    }
-
-                    if let Some(bp) = r_bp {
-                        visit_affix_leaves(&mut expr, false, &mut |expr| {
-                            if let RuleExpr::Transition(Transition::PrattRule(_, power)) = expr {
-                                *power = bp
-                            }
-                            true
-                        });
-                    }
-
-                    // expr.to_sequence().push(RuleExpr::Transition(Transition::CloseSpan(todo!())));
-
-                    let dest = match kind {
-                        PrattExprKind::Atom | PrattExprKind::Prefix => &mut atoms,
-                        PrattExprKind::Suffix | PrattExprKind::Binary(_) => &mut suffixes,
-                    };
-                    dest.push(expr);
-                }
-
-                let mangled = RuleExpr::Sequence(vec![
-                    RuleExpr::Choice(atoms),
-                    RuleExpr::Loop(Box::new(RuleExpr::Choice(suffixes))),
-                ]);
-                self.convert_expr(&mangled, incoming)
             }
         }
     }

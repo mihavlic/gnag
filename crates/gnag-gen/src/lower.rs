@@ -9,6 +9,7 @@ use crate::{
         TokenPattern,
     },
     graph::Transition,
+    pratt::{Associativity, PrattExprKind},
 };
 use gnag::{
     ctx::{ErrorAccumulator, SpanExt},
@@ -77,9 +78,9 @@ impl LoweredFile {
         }
 
         let tokens = file.tokens.map_ref(|token| lower_token(token, &mut cx));
-        let rules = file.rules.map_ref(|rule| {
+        let rules = file.rules.map_ref_with_key(|handle, rule| {
             let mut expr = rule.expr.clone();
-            inline_calls(&mut expr, &mut inlines, &mut cx);
+            lower_expr(handle, &mut expr, &mut inlines, &mut cx);
             expr
         });
 
@@ -172,72 +173,228 @@ fn get_inline<'a>(
     let mut expr = ir.body.expr.clone();
 
     cx.stack.push(handle);
-    inline_calls(&mut expr, inlines, cx);
+    expr.visit_nodes_bottom_up_mut(|node| {
+        if let RuleExpr::InlineCall(call) = node {
+            *node = inline_call(call, inlines, cx);
+        }
+    });
     cx.stack.pop();
 
     inlines.entry(handle).insert(expr)
 }
 
-fn inline_calls(
+fn inline_call(
+    call: &CallExpr,
+    inlines: &mut SecondaryVec<InlineHandle, RuleExpr>,
+    cx: &mut LoweringCx,
+) -> RuleExpr {
+    let CallExpr {
+        template: handle,
+        ref parameters,
+        span,
+    } = *call;
+
+    // try to get the expanded body first because doing so can generate errors
+    let expanded = get_inline(handle, inlines, cx);
+
+    let rule_ir = &cx.file.inlines[handle];
+
+    let expected_len = rule_ir.parameters.len();
+    let provided_len = parameters.len();
+    if expected_len != provided_len {
+        cx.error(
+            span,
+            format_args!("Expected {expected_len} arguments, got {provided_len}"),
+        );
+        RuleExpr::error()
+    } else {
+        let mut expanded = expanded.clone();
+        if !parameters.is_empty() {
+            expanded.visit_nodes_bottom_up_mut(|node| {
+                if let &mut RuleExpr::InlineParameter(pos) = node {
+                    *node = parameters
+                        .get(pos)
+                        .expect("InlineParameter out of bounds??")
+                        .clone();
+                }
+            });
+        }
+        expanded
+    }
+}
+
+pub fn visit_affix_leaves(
+    expr: &mut RuleExpr,
+    prefix: bool,
+    on_leaf: &mut dyn FnMut(&mut RuleExpr) -> bool,
+) -> Option<bool> {
+    match expr {
+        RuleExpr::Transition(_) => Some(on_leaf(expr)),
+        RuleExpr::Sequence(vec) => {
+            let expr = match prefix {
+                true => vec.first_mut(),
+                false => vec.last_mut(),
+            };
+            expr.and_then(|e| visit_affix_leaves(e, prefix, on_leaf))
+        }
+        RuleExpr::Choice(vec) => {
+            let mut contains_true = false;
+            let mut contains_false = false;
+
+            for expr in vec {
+                match visit_affix_leaves(expr, prefix, on_leaf) {
+                    Some(true) => contains_true = true,
+                    Some(false) => contains_false = true,
+                    None => return None,
+                }
+            }
+
+            // children must all be true or all false, otherwise return None
+            match (contains_true, contains_false) {
+                (true, false) => Some(true),
+                (false, true) => Some(false),
+                _ => None,
+            }
+        }
+        RuleExpr::Loop(a) | RuleExpr::Maybe(a) => {
+            // these constructs are fine if they do not contain a recursive affix
+            match visit_affix_leaves(a, prefix, on_leaf) {
+                Some(false) => Some(false),
+                _ => None,
+            }
+        }
+        RuleExpr::SeparatedList {
+            element,
+            separator: _,
+        } => {
+            if prefix {
+                match visit_affix_leaves(element, prefix, on_leaf) {
+                    Some(false) => Some(false),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        RuleExpr::OneOrMore(_)
+        | RuleExpr::InlineParameter(_)
+        | RuleExpr::InlineCall(_)
+        | RuleExpr::Not(_) => {
+            unreachable!("These should have been eliminated during lowering")
+        }
+        RuleExpr::Commit | RuleExpr::Pratt(_) => None,
+    }
+}
+
+fn lower_pratt(current_rule: RuleHandle, vec: &Vec<crate::convert::RuleDef>) -> RuleExpr {
+    let handle_expr = |expr: &mut RuleExpr, prefix: bool| {
+        if let RuleExpr::Transition(Transition::Rule(rule)) = expr {
+            if *rule == current_rule {
+                *expr = match prefix {
+                    // binding power will be added later
+                    true => RuleExpr::Transition(Transition::CompareBindingPower(0)),
+                    false => RuleExpr::Transition(Transition::PrattRule(*rule, 0)),
+                };
+                return true;
+            }
+        }
+        false
+    };
+
+    let mut atoms = Vec::new();
+    let mut suffixes = Vec::new();
+    let mut bp_offset = 1;
+    for rule in vec {
+        let mut expr = rule.expr.clone();
+        let has_prefix = visit_affix_leaves(&mut expr, true, &mut |expr| handle_expr(expr, true));
+        let has_suffix = visit_affix_leaves(&mut expr, false, &mut |expr| handle_expr(expr, false));
+
+        let kind = match has_prefix {
+            Some(true) => {
+                if has_suffix == Some(true) {
+                    let assoc = match rule.attributes.right_assoc {
+                        true => Associativity::Right,
+                        false => Associativity::Left,
+                    };
+                    PrattExprKind::Binary(assoc)
+                } else {
+                    PrattExprKind::Suffix
+                }
+            }
+            Some(false) => {
+                if has_suffix != Some(true) || rule.attributes.atom {
+                    PrattExprKind::Atom
+                } else {
+                    PrattExprKind::Prefix
+                }
+            }
+            None => {
+                // TODO report error
+                expr = RuleExpr::error();
+                PrattExprKind::Atom
+            }
+        };
+
+        let (l_bp, r_bp) = kind.get_binding_power(&mut bp_offset);
+
+        if let Some(bp) = l_bp {
+            visit_affix_leaves(&mut expr, true, &mut |expr| {
+                if let RuleExpr::Transition(Transition::CompareBindingPower(power)) = expr {
+                    *power = bp
+                }
+                true
+            });
+        }
+
+        if let Some(bp) = r_bp {
+            visit_affix_leaves(&mut expr, false, &mut |expr| {
+                if let RuleExpr::Transition(Transition::PrattRule(_, power)) = expr {
+                    *power = bp
+                }
+                true
+            });
+        }
+
+        // expr.to_sequence().push(RuleExpr::Transition(Transition::CloseSpan(todo!())));
+
+        let dest = match kind {
+            PrattExprKind::Atom | PrattExprKind::Prefix => &mut atoms,
+            PrattExprKind::Suffix | PrattExprKind::Binary(_) => &mut suffixes,
+        };
+        dest.push(expr);
+    }
+    let mangled = RuleExpr::Sequence(vec![
+        RuleExpr::Choice(atoms),
+        RuleExpr::Loop(Box::new(RuleExpr::Choice(suffixes))),
+    ]);
+
+    mangled
+}
+
+fn lower_expr(
+    rule: RuleHandle,
     expr: &mut RuleExpr,
     inlines: &mut SecondaryVec<InlineHandle, RuleExpr>,
     cx: &mut LoweringCx,
 ) {
-    expr.visit_nodes_bottom_up_mut(|node| {
-        match node {
-            RuleExpr::InlineCall(_) => {
-                let RuleExpr::InlineCall(call) = node.take() else {
-                    unreachable!()
-                };
-                let CallExpr {
-                    template: handle,
-                    parameters,
-                    span,
-                } = *call;
-
-                // try to get the expanded body first because doing so can generate errors
-                let expanded = get_inline(handle, inlines, cx);
-
-                let rule_ir = &cx.file.inlines[handle];
-
-                let expected_len = rule_ir.parameters.len();
-                let provided_len = parameters.len();
-                if expected_len != provided_len {
-                    cx.error(
-                        span,
-                        format_args!("Expected {expected_len} arguments, got {provided_len}"),
-                    );
-                    *node = RuleExpr::error();
-                } else {
-                    *node = expanded.clone();
-                    if !parameters.is_empty() {
-                        node.visit_nodes_top_down_mut(|node| {
-                            if let &mut RuleExpr::InlineParameter(pos) = node {
-                                *node = parameters
-                                    .get(pos)
-                                    .expect("InlineParameter out of bounds??")
-                                    .clone();
-                            }
-                        })
-                    }
-                }
+    expr.visit_nodes_bottom_up_mut(|node| match node {
+        RuleExpr::Pratt(vec) => *node = lower_pratt(rule, vec),
+        RuleExpr::InlineCall(call) => *node = inline_call(call, inlines, cx),
+        RuleExpr::Not(expr) => {
+            if let RuleExpr::Transition(Transition::Token(token)) = **expr {
+                *node = RuleExpr::Transition(Transition::Not(token));
+            } else {
+                cx.error(
+                    StrSpan::empty(),
+                    "(TODO span) RuleExpr::Not only works with tokens",
+                );
+                *node = RuleExpr::error();
             }
-            RuleExpr::Not(expr) => {
-                if let RuleExpr::Transition(Transition::Token(token)) = **expr {
-                    *node = RuleExpr::Transition(Transition::Not(token));
-                } else {
-                    cx.error(
-                        StrSpan::empty(),
-                        "(TODO span) RuleExpr::Not only works with tokens",
-                    );
-                    *node = RuleExpr::error();
-                }
-            }
-            RuleExpr::OneOrMore(expr) => {
-                let expr = expr.take();
-                *node = RuleExpr::Sequence(vec![expr.clone(), RuleExpr::Loop(Box::new(expr))]);
-            }
-            _ => (),
         }
+        RuleExpr::OneOrMore(expr) => {
+            let expr = expr.take();
+            *node = RuleExpr::Sequence(vec![expr.clone(), RuleExpr::Loop(Box::new(expr))]);
+        }
+        _ => (),
     });
 }

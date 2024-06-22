@@ -283,7 +283,7 @@ pub fn visit_affix_leaves(
     }
 }
 
-fn lower_pratt(current_rule: RuleHandle, vec: &Vec<crate::convert::RuleDef>) -> RuleExpr {
+fn lower_pratt(current_rule: RuleHandle, vec: &Vec<RuleHandle>, cx: &LoweringCx) -> RuleExpr {
     let handle_expr = |expr: &mut RuleExpr, prefix: bool| {
         if let RuleExpr::Transition(Transition::Rule(rule)) = expr {
             if *rule == current_rule {
@@ -301,8 +301,10 @@ fn lower_pratt(current_rule: RuleHandle, vec: &Vec<crate::convert::RuleDef>) -> 
     let mut atoms = Vec::new();
     let mut suffixes = Vec::new();
     let mut bp_offset = 1;
-    for rule in vec {
+    for &handle in vec {
+        let rule = &cx.file.rules[handle];
         let mut expr = rule.expr.clone();
+
         let has_prefix = visit_affix_leaves(&mut expr, true, &mut |expr| handle_expr(expr, true));
         let has_suffix = visit_affix_leaves(&mut expr, false, &mut |expr| handle_expr(expr, false));
 
@@ -352,7 +354,8 @@ fn lower_pratt(current_rule: RuleHandle, vec: &Vec<crate::convert::RuleDef>) -> 
             });
         }
 
-        // expr.to_sequence().push(RuleExpr::Transition(Transition::CloseSpan(todo!())));
+        expr.to_sequence()
+            .push(RuleExpr::Transition(Transition::CloseSpan(handle)));
 
         let dest = match kind {
             PrattExprKind::Atom | PrattExprKind::Prefix => &mut atoms,
@@ -375,7 +378,7 @@ fn lower_expr(
     cx: &mut LoweringCx,
 ) {
     expr.visit_nodes_bottom_up_mut(|node| match node {
-        RuleExpr::Pratt(vec) => *node = lower_pratt(rule, vec),
+        RuleExpr::Pratt(vec) => *node = lower_pratt(rule, vec, cx),
         RuleExpr::InlineCall(call) => *node = inline_call(call, inlines, cx),
         RuleExpr::Not(expr) => {
             if let RuleExpr::Transition(Transition::Token(token)) = **expr {

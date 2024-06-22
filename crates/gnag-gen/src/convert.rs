@@ -122,26 +122,35 @@ pub struct ConvertedFile {
 }
 
 impl ConvertedFile {
-    // fn convert(&mut self, src: &str, err: &ErrorAccumulator, file: &ParsedFile) {}
     pub fn new(src: &str, err: &ErrorAccumulator, file: &ParsedFile) -> ConvertedFile {
         let file_ast = ast::file(&file.root, &file.arena).unwrap();
 
         let mut cx = ConvertCx::new(src, err);
+        // find all visible rules and tokens for name resolution during true conversion
         cx.scan_ast(&file_ast);
 
-        let ir_tokens = cx.ast_tokens.map_ref(|handle| convert_token(&cx, handle));
-        let ir_rules = cx
-            .ast_rules
-            .map_ref(|handle| convert_rule(&cx, handle, &[], &ir_tokens));
-        let ir_inlines = cx
+        let tokens = cx.ast_tokens.map_ref(|handle| convert_token(&cx, handle));
+
+        let mut rules = cx.ast_rules.map_fill(RuleDef {
+            span: StrSpan::empty(),
+            attributes: Default::default(),
+            name: Default::default(),
+            expr: RuleExpr::empty(),
+        });
+
+        for (handle, ast) in cx.ast_rules.iter_kv() {
+            rules[handle] = convert_rule(&cx, ast, &[], &tokens, &mut rules);
+        }
+
+        let inlines = cx
             .ast_inlines
-            .map_ref(|handle| convert_inline_rule(&cx, handle, &ir_tokens));
+            .map_ref(|handle| convert_inline_rule(&cx, handle, &tokens, &mut rules));
 
         ConvertedFile {
             name_to_item: std::mem::take(&mut cx.name_to_item),
-            tokens: ir_tokens,
-            rules: ir_rules,
-            inlines: ir_inlines,
+            tokens,
+            rules,
+            inlines,
         }
     }
     pub fn get_token_name(&self, handle: TokenHandle) -> &str {
@@ -219,6 +228,7 @@ fn convert_inline_rule(
     cx: &ConvertCx,
     ast: &ast::SynRule,
     ir_tokens: &HandleVec<TokenHandle, TokenDef>,
+    rules: &mut HandleVec<RuleHandle, RuleDef>,
 ) -> InlineDef {
     let parameters = ast
         .paramaters
@@ -235,7 +245,7 @@ fn convert_inline_rule(
         })
         .collect::<Vec<_>>();
 
-    let body = convert_rule(cx, ast, &parameters, ir_tokens);
+    let body = convert_rule(cx, ast, &parameters, ir_tokens, rules);
 
     InlineDef { parameters, body }
 }
@@ -245,6 +255,7 @@ fn convert_rule(
     ast: &ast::SynRule,
     parameters: &[String],
     ir_tokens: &HandleVec<TokenHandle, TokenDef>,
+    rules: &mut HandleVec<RuleHandle, RuleDef>,
 ) -> RuleDef {
     let mut attributes = RuleAttributes::default();
     for attr in &ast.attributes {
@@ -262,7 +273,7 @@ fn convert_rule(
         attributes,
         name: ast.name.resolve_owned(cx),
         expr: ast.expression.as_ref().map_or(RuleExpr::empty(), |e| {
-            convert_expression(cx, e, &parameters, ir_tokens)
+            convert_expression(cx, e, &parameters, ir_tokens, rules)
         }),
     };
 
@@ -307,6 +318,7 @@ fn convert_expression(
     expr: &ast::Expression,
     parameters: &[String],
     ir_tokens: &HandleVec<TokenHandle, TokenDef>,
+    rules: &mut HandleVec<RuleHandle, RuleDef>,
 ) -> RuleExpr {
     match expr {
         ast::Expression::Ident(a) => {
@@ -346,28 +358,29 @@ fn convert_expression(
                 RuleExpr::error()
             }
         }
-        ast::Expression::PrattExpr(rules) => {
-            let rules = rules
+        ast::Expression::PrattExpr(vec) => {
+            let handles = vec
                 .exprs
                 .iter()
                 .map(|r| {
                     if r.inline {
                         cx.error(r.span, "Rules inside a pratt expression cannot be inline");
                     }
-                    convert_rule(cx, r, &[], ir_tokens)
+                    let body = convert_rule(cx, r, &[], ir_tokens, rules);
+                    rules.push(body)
                 })
                 .collect();
-            RuleExpr::Pratt(rules)
+            RuleExpr::Pratt(handles)
         }
         ast::Expression::Paren(a) => match &a.expr {
-            Some(e) => convert_expression(cx, e, parameters, ir_tokens),
+            Some(e) => convert_expression(cx, e, parameters, ir_tokens, rules),
             None => RuleExpr::empty(),
         },
         ast::Expression::CallExpr(a) => {
             let expression = a
                 .args
                 .as_ref()
-                .map(|e| convert_expression(cx, e, parameters, ir_tokens));
+                .map(|e| convert_expression(cx, e, parameters, ir_tokens, rules));
 
             let name = a.name.resolve(cx);
 
@@ -412,7 +425,9 @@ fn convert_expression(
             }
         }
         ast::Expression::PostExpr(a) => {
-            let inner = Box::new(convert_expression(cx, &a.expr, parameters, ir_tokens));
+            let inner = Box::new(convert_expression(
+                cx, &a.expr, parameters, ir_tokens, rules,
+            ));
             match a.kind {
                 ast::PostExprKind::Question => RuleExpr::Maybe(inner),
                 ast::PostExprKind::Star => RuleExpr::Loop(inner),
@@ -421,14 +436,14 @@ fn convert_expression(
         }
         ast::Expression::BinExpr(_) => {
             let mut vec = Vec::new();
-            binary_expression(cx, expr, parameters, ir_tokens, &mut vec);
+            binary_expression(cx, expr, parameters, ir_tokens, &mut vec, rules);
             RuleExpr::Choice(vec)
         }
         ast::Expression::SeqExpr(seq) => {
             let vec = seq
                 .exprs
                 .iter()
-                .map(|e| convert_expression(cx, e, parameters, ir_tokens))
+                .map(|e| convert_expression(cx, e, parameters, ir_tokens, rules))
                 .collect();
             RuleExpr::Sequence(vec)
         }
@@ -441,14 +456,15 @@ fn binary_expression(
     parameters: &[String],
     tokens: &HandleVec<TokenHandle, TokenDef>,
     vec: &mut Vec<RuleExpr>,
+    rules: &mut HandleVec<RuleHandle, RuleDef>,
 ) {
     match expr {
         ast::Expression::BinExpr(a) => {
-            binary_expression(cx, &a.left, parameters, tokens, vec);
-            binary_expression(cx, &a.right, parameters, tokens, vec);
+            binary_expression(cx, &a.left, parameters, tokens, vec, rules);
+            binary_expression(cx, &a.right, parameters, tokens, vec, rules);
         }
         _ => {
-            vec.push(convert_expression(cx, expr, parameters, tokens));
+            vec.push(convert_expression(cx, expr, parameters, tokens, rules));
         }
     }
 }

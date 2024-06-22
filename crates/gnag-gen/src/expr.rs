@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use gnag::{handle::TypedHandle, simple_handle, StrSpan};
 
-use crate::convert::{ConvertedFile, InlineHandle, RuleDef, RuleHandle, TokenHandle};
+use crate::convert::{ConvertedFile, InlineHandle, RuleHandle, TokenHandle};
 
 #[derive(Clone, Debug)]
 pub struct CallExpr {
@@ -122,7 +122,7 @@ pub enum RuleExpr {
     },
 
     // pratt
-    Pratt(Vec<RuleDef>),
+    Pratt(Vec<RuleHandle>),
 }
 
 impl RuleExpr {
@@ -193,12 +193,10 @@ impl RuleExpr {
                     a.visit_nodes_(top_down, fun);
                 }
             }
-            RuleExpr::Pratt(rules) => {
-                for a in rules {
-                    a.expr.visit_nodes_(top_down, fun);
-                }
-            }
-            RuleExpr::Transition(_) | RuleExpr::InlineParameter(_) | RuleExpr::Commit => {}
+            RuleExpr::Pratt(_)
+            | RuleExpr::Transition(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::Commit => {}
         }
         if !top_down {
             fun(self);
@@ -226,12 +224,10 @@ impl RuleExpr {
                     a.visit_nodes_mut_(top_down, fun);
                 }
             }
-            RuleExpr::Pratt(rules) => {
-                for a in rules {
-                    a.expr.visit_nodes_mut_(top_down, fun);
-                }
-            }
-            RuleExpr::Transition(_) | RuleExpr::InlineParameter(_) | RuleExpr::Commit => {}
+            RuleExpr::Pratt(_)
+            | RuleExpr::Transition(_)
+            | RuleExpr::InlineParameter(_)
+            | RuleExpr::Commit => {}
         }
         if !top_down {
             fun(self);
@@ -296,7 +292,7 @@ impl RuleExpr {
 
                 for rule in rules {
                     print_indent(buf);
-                    display_nested(buf, &rule.name, &rule.expr);
+                    write!(buf, "  {}", file.rules[*rule].name);
                 }
 
                 Ok(())

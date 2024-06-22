@@ -295,14 +295,6 @@ pub struct PrattExpr {
     pub exprs: Vec<SynRule>,
 }
 
-// Atom = Ident | String | RegexString
-// CallExpr = '<' Ident Expr? '>'
-// ParenExpr = '(' Expr ')'
-// PostExpr = Expr ('?' | '*' | '+')
-// SeqExpr = Expr Expr+
-// BinExpr = Expr '|' Expr
-// PrattExpr = 'pratt' '{' (Newline | Rule)* '}'
-
 #[derive(Debug)]
 pub enum Expression {
     Ident(StrSpan),
@@ -314,38 +306,6 @@ pub enum Expression {
     BinExpr(BinExpr),
     SeqExpr(SeqExpr),
     PrattExpr(PrattExpr),
-}
-
-impl Expression {
-    pub fn visit(&self, fun: &mut dyn FnMut(&Expression)) {
-        fun(self);
-        match self {
-            Expression::Paren(a) => _ = a.expr.as_ref().map(|e| e.visit(fun)),
-            Expression::CallExpr(a) => {
-                if let Some(e) = &a.args {
-                    e.visit(fun);
-                }
-            }
-            Expression::PostExpr(a) => a.expr.visit(fun),
-            Expression::BinExpr(a) => {
-                a.left.visit(fun);
-                a.right.visit(fun);
-            }
-            Expression::SeqExpr(a) => {
-                for e in &a.exprs {
-                    e.visit(fun);
-                }
-            }
-            Expression::PrattExpr(a) => {
-                for rule in &a.exprs {
-                    if let Some(e) = &rule.expression {
-                        e.visit(fun);
-                    }
-                }
-            }
-            Expression::Ident(_) | Expression::Literal(_) => {}
-        }
-    }
 }
 
 fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {

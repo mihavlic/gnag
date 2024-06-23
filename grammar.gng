@@ -40,12 +40,10 @@ rules {
     @root
     File = (Newline | Tokens | Rules)*
 
-    Tokens = 'tokens' <brace_delimited_lines Token>
-    Rules = 'rules' <brace_delimited_lines Rule>
+    Tokens = 'tokens' <rules_block>
+    Rules = 'rules' <rules_block>
 
     Attribute = '@' Ident Newline?
-    Token = Attribute* Ident '=' String Newline?
-
     Parameters = '(' <comma_list Ident> ')'
     Rule = Attribute* Ident Parameters? '=' Expr Newline?
 
@@ -56,7 +54,7 @@ rules {
         Atom = Ident | String
         CallExpr = '<' Ident Expr? '>'
         ParenExpr = '(' Expr ')'
-        PrattExpr = 'pratt' <brace_delimited_lines Rule>
+        PrattExpr = 'pratt' <rules_block>
 
         PostExpr = Expr ('?' | '*' | '+')
         SeqExpr = Expr Expr+
@@ -68,6 +66,6 @@ rules {
     # BraceDelimited = <delimited '{' '}'>
     # BracketDelimited = <delimited '[' ']'>
 
-    brace_delimited_lines(statement) = Newline* '{' (Newline | statement)* '}'
+    rules_block() = Newline* '{' (Newline | Rule)* '}'
     comma_list(element) = <separated_list element ','>
 }

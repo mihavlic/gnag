@@ -982,7 +982,7 @@ pub fn file(p: &mut Parser) -> bool {
     true
 }
 
-fn brace_delimited_lines(p: &mut Parser, fun: fn(&mut Parser) -> bool) {
+fn inline_rules_block(p: &mut Parser) {
     while p.token(Newline) {}
     p.token(LCurly);
     loop {
@@ -990,7 +990,7 @@ fn brace_delimited_lines(p: &mut Parser, fun: fn(&mut Parser) -> bool) {
         if p.token(Newline) {
             continue;
         }
-        if fun(p) {
+        if rule(p) {
             continue;
         }
         p.restore(checkpoint);
@@ -999,7 +999,7 @@ fn brace_delimited_lines(p: &mut Parser, fun: fn(&mut Parser) -> bool) {
     p.token(RCurly);
 }
 
-// Tokens = 'tokens' '{' (Newline | Token)* '}'
+// Tokens = 'tokens' '{' (Newline | Rule)* '}'
 fn tokens(p: &mut Parser) -> bool {
     let m = p.open();
 
@@ -1007,7 +1007,7 @@ fn tokens(p: &mut Parser) -> bool {
         return false;
     }
 
-    brace_delimited_lines(p, token);
+    inline_rules_block(p);
 
     p.close(m, TreeKind::Tokens);
     true
@@ -1021,7 +1021,7 @@ fn rules(p: &mut Parser) -> bool {
         return false;
     }
 
-    brace_delimited_lines(p, rule);
+    inline_rules_block(p);
 
     p.close(m, TreeKind::Rules);
     true
@@ -1038,22 +1038,6 @@ fn attribute(p: &mut Parser) -> bool {
     p.token(Newline);
 
     p.close(m, TreeKind::Attribute);
-    true
-}
-
-// Token = Attribute* Ident '=' String
-fn token(p: &mut Parser) -> bool {
-    let m = p.open();
-
-    while attribute(p) {}
-    if !p.token(Ident) {
-        return false;
-    }
-    p.expect(Equals);
-    p.expect(Literal);
-    p.token(Newline);
-
-    p.close(m, TreeKind::TokenRule);
     true
 }
 
@@ -1145,7 +1129,7 @@ fn base_expr(p: &mut Parser) -> bool {
         }
         PrattKeyword => {
             p.advance();
-            brace_delimited_lines(p, rule);
+            inline_rules_block(p);
             p.close(m, TreeKind::PrattExpr);
         }
         _ => return false,

@@ -365,7 +365,7 @@ pub fn display_code(
                 mut fail,
             } => {
                 print_indent(buf, indent);
-                let transition = nodes[condition].transition;
+                let transition = &nodes[condition].transition;
                 let effects = transition.effects();
 
                 fn print_action(

@@ -1,4 +1,4 @@
-use std::fmt::Write;
+use std::{fmt::Write, rc::Rc};
 
 use gnag::{handle::TypedHandle, simple_handle, StrSpan};
 
@@ -16,9 +16,11 @@ simple_handle! {
     pub VariableHandle
 }
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transition {
     Error,
+    ByteSet(Rc<[u8]>),
+    Bytes(Rc<[u8]>),
     Token(TokenHandle),
     Rule(RuleHandle),
     PrattRule(RuleHandle, u32),
@@ -47,6 +49,8 @@ impl Transition {
     pub fn effects(&self) -> TransitionEffects {
         match self {
             Transition::Error
+            | Transition::ByteSet(_)
+            | Transition::Bytes(_)
             | Transition::Token(_)
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
@@ -63,6 +67,8 @@ impl Transition {
     pub fn advances_parser(&self) -> bool {
         match self {
             Transition::Error
+            | Transition::ByteSet(_)
+            | Transition::Bytes(_)
             | Transition::Token(_)
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
@@ -83,6 +89,8 @@ impl Transition {
     ) -> std::fmt::Result {
         match *self {
             Transition::Error => write!(f, "Error"),
+            Transition::ByteSet(ref a) => write!(f, "ByteSet({})", String::from_utf8_lossy(a)),
+            Transition::Bytes(ref a) => write!(f, "Bytes({})", String::from_utf8_lossy(a)),
             Transition::Token(a) => write!(f, "Token({})", file.tokens[a].name),
             Transition::Rule(a) => write!(f, "Rule({})", file.rules[a].name),
             Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", file.rules[a].name),

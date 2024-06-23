@@ -263,7 +263,9 @@ impl<'a> GraphBuilder<'a> {
                 success: incoming,
                 fail: vec![],
             },
-            RuleExpr::Transition(transition) => self.single_transition(&incoming, *transition),
+            RuleExpr::Transition(transition) => {
+                self.single_transition(&incoming, transition.clone())
+            }
             RuleExpr::Sequence(vec) => {
                 let save_variable = self.new_variable();
                 let save = self.single_transition(&incoming, Transition::SaveState(save_variable));
@@ -435,8 +437,8 @@ impl<'a> GraphBuilder<'a> {
         incoming: &[IncomingEdge],
         transition: Transition,
     ) -> PegResult {
-        let node = self.new_node(transition, incoming);
         let effects = transition.effects();
+        let node = self.new_node(transition, incoming);
         PegResult {
             entry: Some(node),
             success: match effects {
@@ -941,7 +943,7 @@ pub fn debug_graphviz(
                 buf,
                 k,
                 v.success,
-                Some(v.transition),
+                Some(&v.transition),
                 Some(style),
                 index_offset,
                 file,
@@ -951,7 +953,7 @@ pub fn debug_graphviz(
                 buf,
                 k,
                 v.success,
-                Some(v.transition),
+                Some(&v.transition),
                 None,
                 index_offset,
                 file,
@@ -1027,7 +1029,7 @@ fn print_dot_edge(
     buf: &mut dyn Write,
     from: NodeHandle,
     to: Option<NodeHandle>,
-    transition: Option<Transition>,
+    transition: Option<&Transition>,
     style: Option<&str>,
     index_offset: usize,
     file: &ConvertedFile,

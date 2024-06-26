@@ -38,10 +38,9 @@ tokens {
 
 rules {
     @root
-    File = (Newline | Tokens | Rules)*
+    File = (Newline | TokensOrRules)*
 
-    Tokens = 'tokens' <rules_block>
-    Rules = 'rules' <rules_block>
+    TokensOrRules = ('tokens' | 'rules') <rules_block>
 
     Attribute = '@' Ident Newline?
     Parameters = '(' <comma_list Ident> ')'

@@ -29,9 +29,7 @@ pub enum TreeKind {
     File,
       ErrorTree,
       Attribute,
-      Tokens,
-        TokenRule,
-      Rules,
+      TokensOrRules,
         SynRule,
             Parameters,
       SynExpr,
@@ -965,12 +963,7 @@ pub fn file(p: &mut Parser) -> bool {
                 break 'choice;
             }
 
-            if tokens(p) {
-                break 'choice;
-            }
-
-            p.restore(checkpoint);
-            if rules(p) {
+            if tokens_or_rules(p) {
                 break 'choice;
             }
 
@@ -999,31 +992,17 @@ fn inline_rules_block(p: &mut Parser) {
     p.token(RCurly);
 }
 
-// Tokens = 'tokens' '{' (Newline | Rule)* '}'
-fn tokens(p: &mut Parser) -> bool {
+// TokensOrRules = ('tokens' | 'rules') '{' (Newline | Rule)* '}'
+fn tokens_or_rules(p: &mut Parser) -> bool {
     let m = p.open();
 
-    if !p.token(TokensKeyword) {
+    if !p.token(TokensKeyword) && !p.token(RulesKeyword) {
         return false;
     }
 
     inline_rules_block(p);
 
-    p.close(m, TreeKind::Tokens);
-    true
-}
-
-// Rules = 'rules' '{' (Newline | Rule)* '}'
-fn rules(p: &mut Parser) -> bool {
-    let m = p.open();
-
-    if !p.token(RulesKeyword) {
-        return false;
-    }
-
-    inline_rules_block(p);
-
-    p.close(m, TreeKind::Rules);
+    p.close(m, TreeKind::TokensOrRules);
     true
 }
 

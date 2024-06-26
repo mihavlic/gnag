@@ -30,13 +30,7 @@ impl ParsedFile {
 #[derive(Debug)]
 pub struct File {
     pub span: StrSpan,
-    pub items: Vec<Item>,
-}
-
-#[derive(Debug)]
-pub enum Item {
-    Tokens(Tokens),
-    Rules(Rules),
+    pub items: Vec<TokensOrRules>,
 }
 
 pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
@@ -46,8 +40,7 @@ pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
 
     for c in tree.children(arena) {
         match c.kind {
-            NodeKind::Tree(TreeKind::Tokens) => items.extend(tokens(c, arena).map(Item::Tokens)),
-            NodeKind::Tree(TreeKind::Rules) => items.extend(rules(c, arena).map(Item::Rules)),
+            NodeKind::Tree(TreeKind::TokensOrRules) => items.extend(tokens_or_rules(c, arena)),
             _ => {}
         }
     }
@@ -58,50 +51,37 @@ pub fn file(tree: &Node, arena: &[Node]) -> Option<File> {
     })
 }
 
-#[derive(Debug)]
-pub struct Tokens {
-    pub span: StrSpan,
-    pub rules: Vec<TokenRule>,
-}
-
-fn tokens(tree: &Node, arena: &[Node]) -> Option<Tokens> {
-    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Tokens));
-
-    let mut rules = Vec::new();
-
-    for c in tree.children(arena) {
-        match c.kind {
-            NodeKind::Tree(TreeKind::TokenRule) => rules.extend(token_rule(c, arena)),
-            _ => {}
-        }
-    }
-
-    Some(Tokens {
-        span: tree.span,
-        rules,
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleKind {
+    Tokens,
+    Rules,
 }
 
 #[derive(Debug)]
-pub struct Rules {
+pub struct TokensOrRules {
     pub span: StrSpan,
+    pub kind: RuleKind,
     pub rules: Vec<SynRule>,
 }
 
-fn rules(tree: &Node, arena: &[Node]) -> Option<Rules> {
-    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::Rules));
+fn tokens_or_rules(tree: &Node, arena: &[Node]) -> Option<TokensOrRules> {
+    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::TokensOrRules));
 
     let mut rules = Vec::new();
+    let mut kind = None;
 
     for c in tree.children(arena) {
         match c.kind {
+            NodeKind::Token(TokenKind::TokensKeyword) => kind = Some(RuleKind::Tokens),
+            NodeKind::Token(TokenKind::RulesKeyword) => kind = Some(RuleKind::Rules),
             NodeKind::Tree(TreeKind::SynRule) => rules.extend(rule(c, arena)),
             _ => {}
         }
     }
 
-    Some(Rules {
+    Some(TokensOrRules {
         span: tree.span,
+        kind: kind?,
         rules,
     })
 }
@@ -127,44 +107,6 @@ fn attribute(tree: &Node, arena: &[Node]) -> Option<Attribute> {
     Some(Attribute {
         span: tree.span,
         name: name?,
-    })
-}
-
-#[derive(Debug)]
-pub enum TokenValue {
-    String,
-    Regex,
-}
-
-#[derive(Debug)]
-pub struct TokenRule {
-    pub span: StrSpan,
-    pub name: StrSpan,
-    pub attributes: Vec<Attribute>,
-    pub pattern: StrSpan,
-}
-
-fn token_rule(tree: &Node, arena: &[Node]) -> Option<TokenRule> {
-    assert_eq!(tree.kind, NodeKind::Tree(TreeKind::TokenRule));
-
-    let mut name = None;
-    let mut value = None;
-    let mut attrs = Vec::new();
-
-    for c in tree.children(arena) {
-        match c.kind {
-            NodeKind::Tree(TreeKind::Attribute) => attrs.extend(attribute(c, arena)),
-            NodeKind::Token(TokenKind::Ident) => name = Some(c.span),
-            NodeKind::Token(TokenKind::Literal) => value = Some(c.span),
-            _ => {}
-        }
-    }
-
-    Some(TokenRule {
-        span: tree.span,
-        name: name?,
-        attributes: attrs,
-        pattern: value?,
     })
 }
 

@@ -125,8 +125,10 @@ fn run() -> Result<(), ()> {
     }
 
     if do_converted || none_enabled {
-        for (handle, token) in converted.tokens.iter_kv() {
-            println!("token {}: {:#?}", handle.name(&converted), token.pattern);
+        for (handle, rule) in converted.tokens.iter_kv() {
+            println!("\nrule {}:", handle.name(&converted),);
+            rule.expr
+                .display_with_indent(&mut StdoutSink, 1, &converted);
         }
         for (handle, rule) in converted.rules.iter_kv() {
             println!("\nrule {}:", handle.name(&converted),);
@@ -137,8 +139,9 @@ fn run() -> Result<(), ()> {
     }
 
     if do_lowered || none_enabled {
-        for (handle, token) in lowered.tokens.iter_kv() {
-            println!("token {}: {token}", handle.name(&converted));
+        for (handle, rule) in lowered.tokens.iter_kv() {
+            println!("\nrule {}:", handle.name(&converted),);
+            rule.display_with_indent(&mut StdoutSink, 1, &converted);
         }
         for (handle, rule) in lowered.rules.iter_kv() {
             println!("\nrule {}:", handle.name(&converted));

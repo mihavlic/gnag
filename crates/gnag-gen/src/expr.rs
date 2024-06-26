@@ -2,11 +2,12 @@ use std::{fmt::Write, rc::Rc};
 
 use gnag::{handle::TypedHandle, simple_handle, StrSpan};
 
-use crate::convert::{ConvertedFile, InlineHandle, RuleHandle, TokenHandle};
+use crate::convert::{ConvertedFile, RuleHandle, TokenHandle};
 
 #[derive(Clone, Debug)]
 pub struct CallExpr {
-    pub template: InlineHandle,
+    pub name: String,
+    pub name_span: StrSpan,
     pub parameters: Vec<RuleExpr>,
     // TODO use a more consistent solution
     pub span: StrSpan,
@@ -19,8 +20,10 @@ simple_handle! {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transition {
     Error,
+    // lexer
     ByteSet(Rc<[u8]>),
     Bytes(Rc<[u8]>),
+    // parser
     Token(TokenHandle),
     Rule(RuleHandle),
     PrattRule(RuleHandle, u32),
@@ -121,6 +124,10 @@ pub enum RuleExpr {
     // inline rules (eliminated during lowering)
     InlineParameter(usize),
     InlineCall(Box<CallExpr>),
+    UnresolvedIdentifier {
+        name: Rc<str>,
+        name_span: StrSpan,
+    },
 
     // `Not` only supports tokens, but at this point it may also contain an InlineParameter, we will check this later
     Not(Box<RuleExpr>),
@@ -130,7 +137,7 @@ pub enum RuleExpr {
     },
 
     // pratt
-    Pratt(Vec<RuleHandle>),
+    Pratt(Rc<[RuleHandle]>),
 }
 
 impl RuleExpr {
@@ -146,6 +153,9 @@ impl RuleExpr {
     }
     pub fn rule(handle: RuleHandle) -> RuleExpr {
         RuleExpr::Transition(Transition::Rule(handle))
+    }
+    pub fn bytes(bytes: impl Into<Rc<[u8]>>) -> RuleExpr {
+        RuleExpr::Transition(Transition::Bytes(bytes.into()))
     }
     pub fn visit_nodes_top_down(&self, mut fun: impl FnMut(&RuleExpr)) {
         self.visit_nodes_(true, &mut fun)
@@ -204,6 +214,7 @@ impl RuleExpr {
             RuleExpr::Pratt(_)
             | RuleExpr::Transition(_)
             | RuleExpr::InlineParameter(_)
+            | RuleExpr::UnresolvedIdentifier { .. }
             | RuleExpr::Commit => {}
         }
         if !top_down {
@@ -235,6 +246,7 @@ impl RuleExpr {
             RuleExpr::Pratt(_)
             | RuleExpr::Transition(_)
             | RuleExpr::InlineParameter(_)
+            | RuleExpr::UnresolvedIdentifier { .. }
             | RuleExpr::Commit => {}
         }
         if !top_down {
@@ -281,8 +293,11 @@ impl RuleExpr {
             RuleExpr::Maybe(a) => display_nested(buf, "Maybe", a),
             RuleExpr::InlineParameter(a) => writeln!(buf, "InlineParameter({a})"),
             RuleExpr::InlineCall(a) => {
-                write!(buf, "InlineCall {}", a.template.name(file));
+                write!(buf, "InlineCall {}", a.name);
                 display_slice(buf, "", &a.parameters)
+            }
+            RuleExpr::UnresolvedIdentifier { name, name_span: _ } => {
+                write!(buf, "UnresolvedIdentifier({name})")
             }
             RuleExpr::Not(a) => display_nested(buf, "Not", a),
             RuleExpr::SeparatedList { element, separator } => {
@@ -298,7 +313,7 @@ impl RuleExpr {
             RuleExpr::Pratt(rules) => {
                 writeln!(buf, "pratt");
 
-                for rule in rules {
+                for rule in &**rules {
                     print_indent(buf);
                     write!(buf, "  {}", file.rules[*rule].name);
                 }

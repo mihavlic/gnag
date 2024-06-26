@@ -130,11 +130,6 @@ pub struct GraphBuilder<'a> {
     // a sidechannel to give information to convert_expr for pratt conversion
     current_rule: Option<RuleHandle>,
     variables: HandleCounter<VariableHandle>,
-
-    // scratch data for rule conversion
-    // TODO use a bump allocator and allocate as needed
-    scratch1: HandleBitset<NodeHandle>,
-    scratch2: HandleBitset<NodeHandle>,
 }
 
 impl<'a> GraphBuilder<'a> {
@@ -144,8 +139,6 @@ impl<'a> GraphBuilder<'a> {
             err,
             current_rule: None,
             variables: HandleCounter::new(),
-            scratch1: Default::default(),
-            scratch2: Default::default(),
         }
     }
     pub fn convert_file(
@@ -479,22 +472,22 @@ impl<'a> GraphBuilder<'a> {
             on_stack.remove(child);
         }
     }
-    fn visit_edges_once_dfs(
+    pub(crate) fn visit_edges_once_dfs(
         nodes: &HandleVec<NodeHandle, PegNode>,
         entry: NodeHandle,
-        explored: &mut HandleBitset<NodeHandle>,
-        scratch: &mut HandleBitset<NodeHandle>,
         //                           parent       child     transition           is_backward_edge
         mut fun: impl FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>, bool) -> bool,
     ) {
-        explored.clear();
-        scratch.clear();
+        // TODO allocate these in some bump allocator
+        let mut explored = HandleBitset::with_capacity(nodes.len());
+        let mut scratch = HandleBitset::with_capacity(nodes.len());
+
         Self::visit_edges_dfs_impl(
             nodes,
             None,
             entry,
             None,
-            scratch,
+            &mut scratch,
             &mut |parent, child, transition, is_back_edge| {
                 let should_continue = fun(parent, child, transition, is_back_edge);
                 let mut already_explored = false;
@@ -505,12 +498,9 @@ impl<'a> GraphBuilder<'a> {
             },
         );
     }
-    fn visit_edges_dfs_then_topological(
+    pub(crate) fn visit_edges_dfs_then_topological(
         nodes: &HandleVec<NodeHandle, PegNode>,
         entry: NodeHandle,
-
-        explored: &mut HandleBitset<NodeHandle>,
-        scratch: &mut HandleBitset<NodeHandle>,
 
         mut dfs: impl FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>, bool),
         mut topological: impl FnMut(Option<NodeHandle>, NodeHandle, Option<&Transition>),
@@ -524,8 +514,6 @@ impl<'a> GraphBuilder<'a> {
         Self::visit_edges_once_dfs(
             nodes,
             entry,
-            explored,
-            scratch,
             |parent, child, transition, is_backward_edge| {
                 dfs(parent, child, transition, is_backward_edge);
                 if !is_backward_edge {
@@ -540,8 +528,6 @@ impl<'a> GraphBuilder<'a> {
         Self::visit_edges_once_dfs(
             nodes,
             entry,
-            explored,
-            scratch,
             |parent, child, transition, is_backward_edge| {
                 if !is_backward_edge {
                     topological(parent, child, transition);
@@ -556,48 +542,33 @@ impl<'a> GraphBuilder<'a> {
             },
         );
     }
-    fn visit_nodes_topological(
+    pub(crate) fn visit_nodes_topological(
         nodes: &HandleVec<NodeHandle, PegNode>,
         entry: NodeHandle,
-
-        explored: &mut HandleBitset<NodeHandle>,
-        scratch: &mut HandleBitset<NodeHandle>,
 
         mut topological: impl FnMut(NodeHandle),
     ) {
         let mut parent_count = nodes.map_fill(0);
-        Self::visit_edges_once_dfs(
-            nodes,
-            entry,
-            explored,
-            scratch,
-            |_, child, _, is_backward_edge| {
-                if !is_backward_edge {
-                    parent_count[child] += 1;
-                }
-                true
-            },
-        );
+        Self::visit_edges_once_dfs(nodes, entry, |_, child, _, is_backward_edge| {
+            if !is_backward_edge {
+                parent_count[child] += 1;
+            }
+            true
+        });
 
         assert_eq!(parent_count[entry], 1);
 
-        Self::visit_edges_once_dfs(
-            nodes,
-            entry,
-            explored,
-            scratch,
-            |_, child, _, is_backward_edge| {
-                if !is_backward_edge {
-                    let parents = &mut parent_count[child];
-                    *parents -= 1;
-                    if *parents == 0 {
-                        topological(child);
-                        return true;
-                    }
+        Self::visit_edges_once_dfs(nodes, entry, |_, child, _, is_backward_edge| {
+            if !is_backward_edge {
+                let parents = &mut parent_count[child];
+                *parents -= 1;
+                if *parents == 0 {
+                    topological(child);
+                    return true;
                 }
-                false
-            },
-        );
+            }
+            false
+        });
     }
     /// Maps the state of the parser through the graph and transitively propagates state resets
     /// to the earliest checkpoint.
@@ -672,25 +643,16 @@ impl<'a> GraphBuilder<'a> {
             }
         }
 
-        let Self {
-            nodes,
-            scratch1: explored,
-            scratch2: scratch,
-            ..
-        } = self;
-
         let mut variables: SecondaryVec<VariableHandle, ParserState> =
             SecondaryVec::with_capacity(self.variables.len());
-        let mut states = RefCell::new(SecondaryVec::with_capacity_for(nodes));
+        let mut states = RefCell::new(SecondaryVec::with_capacity(self.nodes.len()));
         let mut used_variables = HandleBitset::with_capacity(self.variables.len());
 
         states.get_mut().insert(entry, ParserState::original(entry));
 
         Self::visit_edges_dfs_then_topological(
-            nodes,
+            &mut self.nodes,
             entry,
-            explored,
-            scratch,
             |_, child, _, is_back_edge| {
                 if is_back_edge {
                     // loops are hard to think about so we conservatively mark all loop entrances as original
@@ -833,19 +795,12 @@ impl<'a> GraphBuilder<'a> {
     ///
     /// Returns the new handle to the entry.
     fn reorder(&mut self, entry: NodeHandle) -> NodeHandle {
-        let Self {
-            nodes,
-            scratch1: explored,
-            scratch2: scratch,
-            ..
-        } = self;
-
         // old_node -> new_node
-        let mut renames = SecondaryVec::with_capacity(nodes.len());
+        let mut renames = SecondaryVec::with_capacity(self.nodes.len());
         // new_node -> old_node
         let mut collect = HandleVec::new();
 
-        Self::visit_nodes_topological(nodes, entry, explored, scratch, |node| {
+        Self::visit_nodes_topological(&self.nodes, entry, |node| {
             let new_handle = collect.push(node);
             let previous = renames.insert(node, new_handle);
             assert!(previous.is_none());

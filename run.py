@@ -2,7 +2,7 @@
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import time, sys, subprocess, os
+import time, sys, subprocess, io
 
 should_run = True
 
@@ -41,7 +41,8 @@ try:
             should_run = False
             process = subprocess.run(["cargo", "run", "--bin", "dump", "--"] + args, capture_output=dot)
             if dot:
-                print(process.stderr)
+                sys.stderr.buffer.write(process.stderr)
+                sys.stderr.flush()
                 dotp = subprocess.run(["dot", "-T", "pdf", "-o", "target/dot.pdf"], input=process.stdout)
 
         if not watch:

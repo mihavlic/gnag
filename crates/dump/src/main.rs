@@ -5,8 +5,9 @@ use std::{
 
 use gnag::{ast::ParsedFile, ctx::ErrorAccumulator};
 use gnag_gen::{
+    compile::CompiledFile,
     convert::ConvertedFile,
-    graph::{debug_graphviz, debug_statements, GraphBuilder},
+    graph::{debug_graphviz, debug_statements},
     lower::LoweredFile,
     structure::{display_code, GraphStructuring},
 };
@@ -113,10 +114,7 @@ fn run() -> Result<(), ()> {
     report();
     let lowered = LoweredFile::new(&src, &err, &converted);
     report();
-    let graphs = {
-        let mut graph_builder = GraphBuilder::new(&err);
-        graph_builder.convert_file(!no_optimize, &lowered)
-    };
+    let compiled = CompiledFile::new(&err, &lowered, !no_optimize);
     report();
 
     if do_ast || none_enabled {
@@ -153,15 +151,15 @@ fn run() -> Result<(), ()> {
     if do_dot || none_enabled {
         let mut offset = 0;
         println!("digraph G {{");
-        for (handle, nodes) in graphs.iter_kv() {
+        for (handle, graph) in compiled.rules.iter_kv() {
             debug_graphviz(
-                nodes,
+                &graph.nodes,
                 &mut StdoutSink,
                 handle.name(&converted),
                 offset,
                 &converted,
             );
-            offset += nodes.len();
+            offset += graph.nodes.len();
 
             println!();
         }
@@ -169,28 +167,30 @@ fn run() -> Result<(), ()> {
     }
 
     if do_statements || none_enabled {
-        for (handle, nodes) in graphs.iter_kv() {
+        for (handle, graph) in compiled.rules.iter_kv() {
             println!("rule {}", handle.name(&converted));
-            debug_statements(nodes, &mut StdoutSink, &converted);
+            debug_statements(&graph.nodes, &mut StdoutSink, &converted);
             println!();
         }
     }
 
-    let structures = graphs.map_ref(GraphStructuring::new);
+    let structures = compiled
+        .rules
+        .map_ref(|graph| GraphStructuring::new(&graph.nodes));
 
     if do_scopes || none_enabled {
-        for ((_, structuring), nodes) in structures.iter_kv().zip(graphs.iter()) {
-            structuring.debug_scopes(&mut StdoutSink, &nodes, &converted);
+        for ((_, structuring), graph) in structures.iter_kv().zip(compiled.rules.iter()) {
+            structuring.debug_scopes(&mut StdoutSink, &graph.nodes, &converted);
 
             println!();
         }
     }
 
     if do_code || none_enabled {
-        for ((handle, structuring), nodes) in structures.iter_kv().zip(graphs.iter()) {
+        for ((handle, structuring), graph) in structures.iter_kv().zip(compiled.rules.iter()) {
             print!("rule {} ", handle.name(&converted));
-            let statements = structuring.emit_code(true, true, nodes);
-            display_code(&mut StdoutSink, &statements, nodes, &converted);
+            let statements = structuring.emit_code(true, true, &graph.nodes);
+            display_code(&mut StdoutSink, &statements, &graph.nodes, &converted);
 
             println!();
         }

@@ -1,3 +1,4 @@
+pub mod compile;
 pub mod convert;
 pub mod expr;
 pub mod graph;

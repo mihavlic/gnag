@@ -11,9 +11,8 @@ use gnag::{
 };
 
 use crate::{
-    convert::{ConvertedFile, RuleHandle},
+    convert::{ConvertedFile, RuleHandle, TokenHandle},
     expr::{RuleExpr, Transition, TransitionEffects, VariableHandle},
-    lower::LoweredFile,
 };
 
 simple_handle! {
@@ -124,11 +123,17 @@ impl PegResult {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TokenOrRule {
+    Token(TokenHandle),
+    Rule(RuleHandle),
+}
+
 pub struct GraphBuilder<'a> {
     nodes: HandleVec<NodeHandle, PegNode>,
     err: &'a ErrorAccumulator,
     // a sidechannel to give information to convert_expr for pratt conversion
-    current_rule: Option<RuleHandle>,
+    current_rule: Option<TokenOrRule>,
     variables: HandleCounter<VariableHandle>,
 }
 
@@ -141,40 +146,56 @@ impl<'a> GraphBuilder<'a> {
             variables: HandleCounter::new(),
         }
     }
-    pub fn convert_file(
+    pub fn convert_rule(
         &mut self,
+        handle: TokenOrRule,
+        expr: &RuleExpr,
         optimize: bool,
-        lowered: &LoweredFile,
-    ) -> HandleVec<RuleHandle, HandleVec<NodeHandle, PegNode>> {
-        self.clear();
-        lowered.rules.map_ref_with_key(|handle, expr| {
-            self.clear();
-            let entry = self.convert_rule(handle, expr);
-            if let Some(handle) = entry {
-                if optimize {
-                    self.optimize(handle);
-                }
-            }
-            self.get_nodes().clone()
-        })
-    }
-    pub fn convert_rule(&mut self, handle: RuleHandle, expr: &RuleExpr) -> Option<NodeHandle> {
+    ) -> NodeHandle {
         // good code right here
         self.current_rule = Some(handle);
         let mut result = self.convert_expr(expr, vec![]);
         self.current_rule = None;
 
         if let Some(_) = result.entry {
-            if !matches!(expr, RuleExpr::Pratt(_)) {
-                let success =
-                    self.single_transition(&result.success, Transition::CloseSpan(handle));
-                result.success = success.success;
+            if let TokenOrRule::Rule(handle) = handle {
+                if !matches!(expr, RuleExpr::Pratt(_)) {
+                    let span =
+                        self.single_transition(&result.success, Transition::CloseSpan(handle));
+                    result.success = span.success;
+                }
             }
+
+            self.single_transition(&result.success, Transition::Return(true));
+            self.single_transition(&result.fail, Transition::Return(false));
+        } else {
+            result = self.single_transition(&result.fail, Transition::Return(false));
+        }
+
+        let mut entry = result.entry.unwrap();
+
+        if optimize {
+            entry = self.optimize(entry).unwrap();
+        }
+
+        entry
+    }
+    pub fn convert_token(&mut self, _handle: TokenHandle, expr: &RuleExpr) -> Option<NodeHandle> {
+        self.current_rule = None;
+        let result = self.convert_expr(expr, vec![]);
+
+        if let Some(_) = result.entry {
+            // we do not close spans for tokens
             self.single_transition(&result.success, Transition::Return(true));
             self.single_transition(&result.fail, Transition::Return(false));
         }
 
         result.entry
+    }
+    pub fn finish(&mut self) -> HandleVec<NodeHandle, PegNode> {
+        let nodes = self.get_nodes().clone();
+        self.clear();
+        nodes
     }
     /// Reorder the graph into a topological order which is suitable for lowering to code, Removes reduntand parser state resets.
     /// The new graph only contains nodes reachable from the entry.

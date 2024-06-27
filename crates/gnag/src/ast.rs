@@ -576,40 +576,40 @@ impl DescribedString {
 #[test]
 fn test_describe_simple() {
     // src indices   0123456789
-    let str: &str = "##'heyahey'##";
-    // out indices      0123456
+    let str: &str = "'heyahey'";
+    // out indices    0123456
 
     let describe = DescribedString::new(str).unwrap();
 
-    assert_eq!(describe.find_offset(0), Some(3));
-    assert_eq!(describe.find_offset(1), Some(4));
-    assert_eq!(describe.find_offset(2), Some(5));
-    assert_eq!(describe.find_offset(3), Some(6));
-    assert_eq!(describe.find_offset(4), Some(7));
-    assert_eq!(describe.find_offset(5), Some(8));
-    assert_eq!(describe.find_offset(6), Some(9));
+    assert_eq!(describe.find_offset(0), Some(1));
+    assert_eq!(describe.find_offset(1), Some(2));
+    assert_eq!(describe.find_offset(2), Some(3));
+    assert_eq!(describe.find_offset(3), Some(4));
+    assert_eq!(describe.find_offset(4), Some(5));
+    assert_eq!(describe.find_offset(5), Some(6));
+    assert_eq!(describe.find_offset(6), Some(7));
 }
 
 #[test]
 fn test_describe_escapes() {
-    // src indices    0123456789
-    let str: &str = r"##'h\ng\np'##";
-    // out indices       01 23 4
+    // src indices    012345678
+    let str: &str = r"'h\ng\np'";
+    // out indices     01 23 4
 
     let describe = DescribedString::new(str).unwrap();
 
-    assert_eq!(describe.find_offset(0), Some(3));
-    assert_eq!(describe.find_offset(1), Some(4));
-    assert_eq!(describe.find_offset(2), Some(6));
-    assert_eq!(describe.find_offset(3), Some(7));
-    assert_eq!(describe.find_offset(4), Some(9));
+    assert_eq!(describe.find_offset(0), Some(1));
+    assert_eq!(describe.find_offset(1), Some(2));
+    assert_eq!(describe.find_offset(2), Some(4));
+    assert_eq!(describe.find_offset(3), Some(5));
+    assert_eq!(describe.find_offset(4), Some(7));
 }
 
 #[rustfmt::skip]
 #[test]
 fn test_extract_string() {
-    let src = r"###'hi\nthis\tis your mother👍'###";
-    let out =      "hi\nthis\tis your mother👍";
+    let src = r"'hi\nthis\tis your mother👍'";
+    let out =   "hi\nthis\tis your mother👍";
 
     let span = StrSpan {
         start: 0,

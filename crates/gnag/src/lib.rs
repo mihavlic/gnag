@@ -519,6 +519,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    pub fn is_boundary(&self, predicate: impl std::ops::Fn(u8) -> bool) -> bool {
+        match self.peek() {
+            Some(b) => !predicate(b),
+            None => true,
+        }
+    }
+
     pub fn consume(&mut self, value: u8) -> bool {
         if self.peek() == Some(value) {
             self.next();
@@ -586,14 +593,16 @@ pub fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
             b'.' => Dot,
             b'=' => Equals,
             _ => 'choice: {
+                let is_ident_char = |c| matches!(c, b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9');
+
                 l.restore_pos(pos);
-                if l.sequence(b"tokens") {
+                if l.sequence(b"tokens") && l.is_boundary(is_ident_char) {
                     break 'choice TokensKeyword;
                 }
-                if l.sequence(b"rules") {
+                if l.sequence(b"rules") && l.is_boundary(is_ident_char) {
                     break 'choice RulesKeyword;
                 }
-                if l.sequence(b"pratt") {
+                if l.sequence(b"pratt") && l.is_boundary(is_ident_char) {
                     break 'choice PrattKeyword;
                 }
                 let is_regex = l.consume(b'r');
@@ -608,10 +617,7 @@ pub fn lex(l: &mut Lexer) -> (Vec<Token>, Vec<Token>) {
                 }
 
                 l.restore_pos(pos);
-                if !l
-                    .consume_while(|c| matches!(c, b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'))
-                    .is_empty()
-                {
+                if !l.consume_while(is_ident_char).is_empty() {
                     break 'choice Ident;
                 }
                 l.restore_pos(pos);
@@ -1181,7 +1187,7 @@ fn node_find() {
 
     let (tokens, trivia) = lex(&mut lexer);
     let mut parser = crate::Parser::new(str, tokens, trivia);
-    rule(&mut parser);
+    file(&mut parser);
 
     let mut arena = Vec::new();
     let root = parser.build_tree(&mut arena);

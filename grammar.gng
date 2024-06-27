@@ -5,8 +5,6 @@ tokens {
     Whitespace = r'[ \t]+'
     @skip
     Comment = r'//.*$'
-    @error
-    ErrorToken = r'\S+'
 
     String = r'TODO' # 'r'? <string_like '\''> # TODO
 
@@ -34,6 +32,8 @@ tokens {
     Comma = ','
     Dot = '.'
     Equals = '='
+
+    Error = r'\S+' | <any>
 }
 
 rules {

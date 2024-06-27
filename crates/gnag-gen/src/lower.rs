@@ -360,10 +360,15 @@ fn lower_pratt(
         };
         dest.push(expr);
     }
-    let mangled = RuleExpr::Sequence(vec![
-        RuleExpr::Choice(atoms),
-        RuleExpr::Loop(Box::new(RuleExpr::Choice(suffixes))),
-    ]);
+
+    let mangled = if suffixes.is_empty() {
+        RuleExpr::Choice(atoms)
+    } else {
+        RuleExpr::Sequence(vec![
+            RuleExpr::Choice(atoms),
+            RuleExpr::Loop(Box::new(RuleExpr::Choice(suffixes))),
+        ])
+    };
 
     mangled
 }

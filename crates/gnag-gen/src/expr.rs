@@ -103,6 +103,15 @@ impl Transition {
             Transition::Dummy(value) => write!(f, "Dummy({value})"),
         }
     }
+    pub fn display_as_string(
+        &self,
+        f: &mut dyn Write,
+        file: &crate::convert::ConvertedFile,
+    ) -> std::fmt::Result {
+        let mut buf = String::with_capacity(16);
+        self.display(&mut buf, file).unwrap();
+        write!(f, "{buf:?}")
+    }
 }
 
 #[derive(Clone, Debug)]

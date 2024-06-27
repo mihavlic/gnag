@@ -1003,13 +1003,12 @@ fn print_dot_edge(
         (start, "_dangling")
     };
 
-    write!(buf, "    v{start} -> v{end}{suffix}[label=\"");
+    write!(buf, "    v{start} -> v{end}{suffix}[label=");
     if let Some(transition) = transition {
-        transition.display(buf, file);
+        transition.display_as_string(buf, file);
     } else {
-        write!(buf, "Fail");
+        write!(buf, "\"Fail\"");
     }
-    write!(buf, "\"");
 
     if let Some(style) = style {
         write!(buf, ",{style}");

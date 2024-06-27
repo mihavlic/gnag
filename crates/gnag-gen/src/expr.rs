@@ -277,8 +277,11 @@ impl RuleExpr {
 
         print_indent(buf);
         match self {
-            RuleExpr::Transition(transition) => transition.display(buf, file),
-            RuleExpr::Commit => write!(buf, "Commit"),
+            RuleExpr::Transition(transition) => {
+                transition.display(buf, file);
+                writeln!(buf)
+            }
+            RuleExpr::Commit => writeln!(buf, "Commit"),
             RuleExpr::Sequence(a) => display_slice(buf, "Sequence", a),
             RuleExpr::Choice(a) => display_slice(buf, "Choice", a),
             RuleExpr::Loop(a) => display_nested(buf, "Loop", a),
@@ -286,7 +289,7 @@ impl RuleExpr {
             RuleExpr::Maybe(a) => display_nested(buf, "Maybe", a),
             RuleExpr::InlineParameter(a) => write!(buf, "InlineParameter({a})"),
             RuleExpr::InlineCall(a) => {
-                write!(buf, "InlineCall {}", a.name);
+                write!(buf, "InlineCall(\"{}\")", a.name);
                 display_slice(buf, "", &a.parameters)
             }
             RuleExpr::UnresolvedIdentifier { name, name_span: _ } => {
@@ -310,6 +313,5 @@ impl RuleExpr {
                 Ok(())
             }
         };
-        writeln!(buf);
     }
 }

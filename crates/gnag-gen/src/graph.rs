@@ -5,13 +5,14 @@ use std::{
 };
 
 use gnag::{
+    ast::RuleKind,
     ctx::ErrorAccumulator,
     handle::{Bitset, HandleBitset, HandleCounter, HandleVec, SecondaryVec, TypedHandle},
     simple_handle, StrSpan,
 };
 
 use crate::{
-    convert::{ConvertedFile, RuleHandle, TokenHandle},
+    convert::{ConvertedFile, RuleHandle},
     expr::{RuleExpr, Transition, TransitionEffects, VariableHandle},
 };
 
@@ -123,17 +124,11 @@ impl PegResult {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TokenOrRule {
-    Token(TokenHandle),
-    Rule(RuleHandle),
-}
-
 pub struct GraphBuilder<'a> {
     nodes: HandleVec<NodeHandle, PegNode>,
     err: &'a ErrorAccumulator,
     // a sidechannel to give information to convert_expr for pratt conversion
-    current_rule: Option<TokenOrRule>,
+    current_rule: Option<RuleHandle>,
     variables: HandleCounter<VariableHandle>,
 }
 
@@ -148,7 +143,8 @@ impl<'a> GraphBuilder<'a> {
     }
     pub fn convert_rule(
         &mut self,
-        handle: TokenOrRule,
+        handle: RuleHandle,
+        kind: RuleKind,
         expr: &RuleExpr,
         optimize: bool,
     ) -> NodeHandle {
@@ -158,7 +154,7 @@ impl<'a> GraphBuilder<'a> {
         self.current_rule = None;
 
         if let Some(_) = result.entry {
-            if let TokenOrRule::Rule(handle) = handle {
+            if kind == RuleKind::Rules {
                 if !matches!(expr, RuleExpr::Pratt(_)) {
                     let span =
                         self.single_transition(&result.success, Transition::CloseSpan(handle));
@@ -179,18 +175,6 @@ impl<'a> GraphBuilder<'a> {
         }
 
         entry
-    }
-    pub fn convert_token(&mut self, _handle: TokenHandle, expr: &RuleExpr) -> Option<NodeHandle> {
-        self.current_rule = None;
-        let result = self.convert_expr(expr, vec![]);
-
-        if let Some(_) = result.entry {
-            // we do not close spans for tokens
-            self.single_transition(&result.success, Transition::Return(true));
-            self.single_transition(&result.fail, Transition::Return(false));
-        }
-
-        result.entry
     }
     pub fn finish(&mut self) -> HandleVec<NodeHandle, PegNode> {
         let nodes = self.get_nodes().clone();

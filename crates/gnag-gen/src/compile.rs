@@ -1,8 +1,8 @@
 use gnag::{ctx::ErrorAccumulator, handle::HandleVec};
 
 use crate::{
-    convert::{RuleHandle, TokenHandle},
-    graph::{GraphBuilder, NodeHandle, PegNode, TokenOrRule},
+    convert::{ConvertedFile, RuleHandle},
+    graph::{GraphBuilder, NodeHandle, PegNode},
     lower::LoweredFile,
 };
 
@@ -12,26 +12,25 @@ pub struct CompiledGraph {
 }
 
 pub struct CompiledFile {
-    pub tokens: HandleVec<TokenHandle, CompiledGraph>,
     pub rules: HandleVec<RuleHandle, CompiledGraph>,
 }
 
 impl CompiledFile {
-    pub fn new(err: &ErrorAccumulator, file: &LoweredFile, optimize: bool) -> CompiledFile {
+    pub fn new(
+        err: &ErrorAccumulator,
+        converted: &ConvertedFile,
+        file: &LoweredFile,
+        optimize: bool,
+    ) -> CompiledFile {
         let mut builder = GraphBuilder::new(err);
 
-        let tokens = file.tokens.map_ref_with_key(|handle, expr| {
-            let entry = builder.convert_rule(TokenOrRule::Token(handle), expr, optimize);
-            let nodes = builder.finish();
-            CompiledGraph { entry, nodes }
-        });
-
         let rules = file.rules.map_ref_with_key(|handle, expr| {
-            let entry = builder.convert_rule(TokenOrRule::Rule(handle), expr, optimize);
+            let converted = &converted.rules[handle];
+            let entry = builder.convert_rule(handle, converted.kind, expr, optimize);
             let nodes = builder.finish();
             CompiledGraph { entry, nodes }
         });
 
-        CompiledFile { tokens, rules }
+        CompiledFile { rules }
     }
 }

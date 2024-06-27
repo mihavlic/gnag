@@ -2,7 +2,7 @@ use std::{fmt::Write, rc::Rc};
 
 use gnag::{handle::TypedHandle, simple_handle, StrSpan};
 
-use crate::convert::{ConvertedFile, RuleHandle, TokenHandle};
+use crate::convert::{ConvertedFile, RuleHandle};
 
 #[derive(Clone, Debug)]
 pub struct CallExpr {
@@ -24,13 +24,12 @@ pub enum Transition {
     ByteSet(Rc<[u8]>),
     Bytes(Rc<[u8]>),
     // parser
-    Token(TokenHandle),
     Rule(RuleHandle),
     PrattRule(RuleHandle, u32),
     CompareBindingPower(u32),
     // builtins
     Any,
-    Not(TokenHandle),
+    Not(RuleHandle), // currently must be a token rule
     // function start/end
     SaveState(VariableHandle),
     RestoreState(VariableHandle),
@@ -54,7 +53,6 @@ impl Transition {
             Transition::Error
             | Transition::ByteSet(_)
             | Transition::Bytes(_)
-            | Transition::Token(_)
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
             | Transition::CompareBindingPower(_)
@@ -72,7 +70,6 @@ impl Transition {
             Transition::Error
             | Transition::ByteSet(_)
             | Transition::Bytes(_)
-            | Transition::Token(_)
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
             | Transition::Any
@@ -92,17 +89,16 @@ impl Transition {
     ) -> std::fmt::Result {
         match *self {
             Transition::Error => write!(f, "Error"),
-            Transition::ByteSet(ref a) => write!(f, "ByteSet({})", String::from_utf8_lossy(a)),
-            Transition::Bytes(ref a) => write!(f, "Bytes({})", String::from_utf8_lossy(a)),
-            Transition::Token(a) => write!(f, "Token({})", file.tokens[a].name),
-            Transition::Rule(a) => write!(f, "Rule({})", file.rules[a].name),
-            Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", file.rules[a].name),
+            Transition::ByteSet(ref a) => write!(f, "ByteSet({:?})", String::from_utf8_lossy(a)),
+            Transition::Bytes(ref a) => write!(f, "Bytes({:?})", String::from_utf8_lossy(a)),
+            Transition::Rule(a) => write!(f, "Rule({})", a.name(file)),
+            Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", a.name(file)),
             Transition::CompareBindingPower(power) => write!(f, "CompareBindingPower({power})"),
             Transition::Any => write!(f, "Any"),
-            Transition::Not(a) => write!(f, "Not({})", file.tokens[a].name),
+            Transition::Not(a) => write!(f, "Not({})", a.name(file)),
             Transition::SaveState(a) => write!(f, "SaveState({})", a.index()),
             Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
-            Transition::CloseSpan(a) => write!(f, "CloseSpan({})", file.rules[a].name),
+            Transition::CloseSpan(a) => write!(f, "CloseSpan({})", a.name(file)),
             Transition::Return(value) => write!(f, "Return({value})"),
             Transition::Dummy(value) => write!(f, "Dummy({value})"),
         }
@@ -147,9 +143,6 @@ impl RuleExpr {
     }
     pub fn error() -> RuleExpr {
         RuleExpr::Transition(Transition::Error)
-    }
-    pub fn token(handle: TokenHandle) -> RuleExpr {
-        RuleExpr::Transition(Transition::Token(handle))
     }
     pub fn rule(handle: RuleHandle) -> RuleExpr {
         RuleExpr::Transition(Transition::Rule(handle))
@@ -291,22 +284,18 @@ impl RuleExpr {
             RuleExpr::Loop(a) => display_nested(buf, "Loop", a),
             RuleExpr::OneOrMore(a) => display_nested(buf, "OneOrMore", a),
             RuleExpr::Maybe(a) => display_nested(buf, "Maybe", a),
-            RuleExpr::InlineParameter(a) => writeln!(buf, "InlineParameter({a})"),
+            RuleExpr::InlineParameter(a) => write!(buf, "InlineParameter({a})"),
             RuleExpr::InlineCall(a) => {
                 write!(buf, "InlineCall {}", a.name);
                 display_slice(buf, "", &a.parameters)
             }
             RuleExpr::UnresolvedIdentifier { name, name_span: _ } => {
-                write!(buf, "UnresolvedIdentifier({name})")
+                write!(buf, "UnresolvedIdentifier(\"{name}\")")
             }
             RuleExpr::Not(a) => display_nested(buf, "Not", a),
             RuleExpr::SeparatedList { element, separator } => {
                 writeln!(buf, "SeparatedList");
                 element.display_with_indent(buf, indent + 1, file);
-                for _ in 0..=indent {
-                    write!(buf, "  ");
-                }
-                writeln!(buf, "---");
                 separator.display_with_indent(buf, indent + 1, file);
                 Ok(())
             }
@@ -315,11 +304,12 @@ impl RuleExpr {
 
                 for rule in &**rules {
                     print_indent(buf);
-                    write!(buf, "  {}", file.rules[*rule].name);
+                    write!(buf, "  {}", rule.name(file));
                 }
 
                 Ok(())
             }
         };
+        writeln!(buf);
     }
 }

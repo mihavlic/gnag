@@ -1,7 +1,7 @@
 use std::borrow::Borrow;
 
 use gnag::{
-    ast::{self, ParsedFile, SynRule},
+    ast::{self, ParsedFile, RuleKind, SynRule},
     ctx::{ErrorAccumulator, SpanExt},
     handle::HandleVec,
     StrSpan,
@@ -10,21 +10,13 @@ use gnag::{
 use crate::expr::{CallExpr, RuleExpr, Transition};
 
 gnag::simple_handle! {
-    pub TokenHandle,
     pub RuleHandle,
-    pub InlineHandle,
-    pub AstItemHandle
-}
-
-impl TokenHandle {
-    pub fn name(self, file: &ConvertedFile) -> &str {
-        file.tokens[self].name.as_str()
-    }
+    pub InlineHandle
 }
 
 impl RuleHandle {
     pub fn name(self, file: &ConvertedFile) -> &str {
-        file.rules[self].name.as_str()
+        file.rules[self].body.name.as_str()
     }
 }
 
@@ -44,7 +36,7 @@ pub struct RuleAttributes {
 }
 
 #[derive(Debug, Clone)]
-pub struct RuleDef {
+pub struct RuleBody {
     pub span: StrSpan,
     pub attributes: RuleAttributes,
     pub name: String,
@@ -53,14 +45,19 @@ pub struct RuleDef {
 }
 
 #[derive(Debug)]
+pub struct RuleDef {
+    pub kind: RuleKind,
+    pub body: RuleBody,
+}
+
+#[derive(Debug)]
 pub struct InlineDef {
     pub parameters: Vec<String>,
-    pub body: RuleDef,
+    pub body: RuleBody,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
-    Token(TokenHandle),
     Rule(RuleHandle),
     Inline(InlineHandle),
 }
@@ -84,7 +81,6 @@ impl HandleKind {
 
 #[derive(Default)]
 pub struct ConvertedFile {
-    pub tokens: HandleVec<TokenHandle, RuleDef>,
     pub rules: HandleVec<RuleHandle, RuleDef>,
     pub inlines: HandleVec<InlineHandle, InlineDef>,
 }
@@ -109,7 +105,7 @@ impl ConvertedFile {
             match block.kind {
                 ast::RuleKind::Tokens => {
                     for rule in &block.rules {
-                        self.add_token(cx, rule);
+                        self.add_rule(cx, rule, RuleKind::Tokens);
                     }
                 }
                 ast::RuleKind::Rules => {
@@ -117,7 +113,7 @@ impl ConvertedFile {
                         if rule.inline {
                             self.add_inline(cx, rule);
                         } else {
-                            self.add_rule(cx, rule);
+                            self.add_rule(cx, rule, RuleKind::Rules);
                         }
                     }
                 }
@@ -131,16 +127,10 @@ impl ConvertedFile {
         }
     }
 
-    fn add_token(&mut self, cx: &ConvertCx, rule: &SynRule) -> TokenHandle {
+    fn add_rule(&mut self, cx: &ConvertCx, rule: &SynRule, kind: RuleKind) -> RuleHandle {
         self.check_no_parameters(cx, rule);
         let body = self.convert_rule(cx, rule, &[]);
-        self.tokens.push(body)
-    }
-
-    fn add_rule(&mut self, cx: &ConvertCx, rule: &SynRule) -> RuleHandle {
-        self.check_no_parameters(cx, rule);
-        let body = self.convert_rule(cx, rule, &[]);
-        self.rules.push(body)
+        self.rules.push(RuleDef { kind, body })
     }
 
     fn add_inline(&mut self, cx: &ConvertCx, rule: &SynRule) -> InlineHandle {
@@ -168,7 +158,7 @@ impl ConvertedFile {
         cx: &ConvertCx,
         ast: &ast::SynRule,
         parameters: &[String],
-    ) -> RuleDef {
+    ) -> RuleBody {
         let mut attributes = RuleAttributes::default();
         for attr in &ast.attributes {
             match attr.name.resolve(cx) {
@@ -185,15 +175,13 @@ impl ConvertedFile {
             self.convert_expression(cx, e, parameters)
         });
 
-        let rule = RuleDef {
+        RuleBody {
             span: ast.span,
             attributes,
             name: ast.name.resolve_owned(cx),
             name_span: ast.name,
             expr,
-        };
-
-        rule
+        }
     }
 
     fn convert_expression(
@@ -203,10 +191,17 @@ impl ConvertedFile {
         parameters: &[String],
     ) -> RuleExpr {
         match expr {
-            ast::Expression::Ident(a) => RuleExpr::UnresolvedIdentifier {
-                name: a.resolve_owned(cx).into(),
-                name_span: *a,
-            },
+            ast::Expression::Ident(a) => {
+                let name = a.resolve(cx);
+                if let Some(index) = parameters.iter().position(|p| p == name) {
+                    RuleExpr::InlineParameter(index)
+                } else {
+                    RuleExpr::UnresolvedIdentifier {
+                        name: name.into(),
+                        name_span: *a,
+                    }
+                }
+            }
             ast::Expression::Literal(a) => {
                 let value = ast::extract_str_literal(a.resolve(cx)).map(|(s, _)| s);
                 if let Some(value) = value {
@@ -220,7 +215,7 @@ impl ConvertedFile {
                 let handles = vec
                     .exprs
                     .iter()
-                    .map(|rule| self.add_rule(cx, rule))
+                    .map(|rule| self.add_rule(cx, rule, RuleKind::Rules))
                     .collect();
                 RuleExpr::Pratt(handles)
             }

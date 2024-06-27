@@ -114,7 +114,7 @@ fn run() -> Result<(), ()> {
     report();
     let lowered = LoweredFile::new(&src, &err, &converted);
     report();
-    let compiled = CompiledFile::new(&err, &lowered, !no_optimize);
+    let compiled = CompiledFile::new(&err, &converted, &lowered, !no_optimize);
     report();
 
     if do_ast || none_enabled {
@@ -123,24 +123,22 @@ fn run() -> Result<(), ()> {
     }
 
     if do_converted || none_enabled {
-        for (handle, rule) in converted.tokens.iter_kv() {
-            println!("\nrule {}:", handle.name(&converted),);
-            rule.expr
-                .display_with_indent(&mut StdoutSink, 1, &converted);
-        }
         for (handle, rule) in converted.rules.iter_kv() {
             println!("\nrule {}:", handle.name(&converted),);
-            rule.expr
+            rule.body
+                .expr
                 .display_with_indent(&mut StdoutSink, 1, &converted);
         }
         println!();
+        for (handle, rule) in converted.inlines.iter_kv() {
+            println!("\ninline {}:", handle.name(&converted),);
+            rule.body
+                .expr
+                .display_with_indent(&mut StdoutSink, 1, &converted);
+        }
     }
 
     if do_lowered || none_enabled {
-        for (handle, rule) in lowered.tokens.iter_kv() {
-            println!("\nrule {}:", handle.name(&converted),);
-            rule.display_with_indent(&mut StdoutSink, 1, &converted);
-        }
         for (handle, rule) in lowered.rules.iter_kv() {
             println!("\nrule {}:", handle.name(&converted));
             rule.display_with_indent(&mut StdoutSink, 1, &converted);

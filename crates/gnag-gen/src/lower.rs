@@ -1,47 +1,26 @@
 use std::{
     borrow::Borrow,
     collections::{hash_map::Entry, HashMap},
-    fmt::{Debug, Display},
 };
 
 use crate::{
-    convert::{
-        ConvertedFile, HandleKind, InlineHandle, ItemKind, RuleDef, RuleHandle, TokenHandle,
-    },
+    convert::{ConvertedFile, HandleKind, InlineHandle, ItemKind, RuleBody, RuleHandle},
     expr::{CallExpr, RuleExpr, Transition},
     pratt::{Associativity, PrattExprKind},
 };
 use gnag::{
+    ast::RuleKind,
     ctx::ErrorAccumulator,
     handle::{HandleVec, SecondaryVec},
     StrSpan,
 };
-
-#[derive(Debug)]
-pub enum LoweredTokenPattern {
-    Regex(regex_syntax::hir::Hir),
-    RustCode(String),
-    Literal(Vec<u8>),
-    Error,
-}
-
-impl Display for LoweredTokenPattern {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Regex(a) => write!(f, "Regex({a})"),
-            Self::RustCode(a) => write!(f, "Regex({a:?})"),
-            Self::Literal(a) => write!(f, "Regex({:?})", String::from_utf8_lossy(a)),
-            Self::Error => write!(f, "Error"),
-        }
-    }
-}
 
 struct LoweringCx<'a, 'b, 'c> {
     src: &'a str,
     err: &'b ErrorAccumulator,
     file: &'c ConvertedFile,
     name_to_item: HashMap<&'c str, ItemKind>,
-    literal_to_token: HashMap<&'c [u8], TokenHandle>,
+    literal_to_token: HashMap<&'c [u8], RuleHandle>,
     inlined_inlines: SecondaryVec<InlineHandle, RuleExpr>,
     stack: Vec<InlineHandle>,
 }
@@ -71,7 +50,7 @@ impl<'a, 'b, 'c> LoweringCx<'a, 'b, 'c> {
         }
     }
 
-    fn add_item(&mut self, body: &'c RuleDef, handle: ItemKind) {
+    fn add_item(&mut self, body: &'c RuleBody, handle: ItemKind) {
         match self.name_to_item.entry(&body.name) {
             Entry::Occupied(_) => {
                 self.error(body.name_span, "Duplicate item name");
@@ -82,7 +61,7 @@ impl<'a, 'b, 'c> LoweringCx<'a, 'b, 'c> {
         }
     }
 
-    fn add_literal(&mut self, value: &'c [u8], handle: TokenHandle) {
+    fn add_literal(&mut self, value: &'c [u8], handle: RuleHandle) {
         match self.literal_to_token.entry(value) {
             Entry::Occupied(_) => {
                 // Do nothing, duplicate token expressions are not an error
@@ -94,14 +73,13 @@ impl<'a, 'b, 'c> LoweringCx<'a, 'b, 'c> {
     }
 
     fn populate_hashmaps(&mut self) {
-        for (handle, rule) in self.file.tokens.iter_kv() {
-            self.add_item(rule, ItemKind::Token(handle));
-            if let RuleExpr::Transition(Transition::Bytes(bytes)) = &rule.expr {
-                self.add_literal(bytes, handle);
-            }
-        }
         for (handle, rule) in self.file.rules.iter_kv() {
-            self.add_item(rule, ItemKind::Rule(handle));
+            self.add_item(&rule.body, ItemKind::Rule(handle));
+            if rule.kind == RuleKind::Tokens {
+                if let RuleExpr::Transition(Transition::Bytes(bytes)) = &rule.body.expr {
+                    self.add_literal(bytes, handle);
+                }
+            }
         }
         for (handle, rule) in self.file.inlines.iter_kv() {
             self.add_item(&rule.body, ItemKind::Inline(handle));
@@ -164,7 +142,6 @@ impl<'a, 'b, 'c> LoweringCx<'a, 'b, 'c> {
             Some(_) if kind.is_none() => handle,
             Some(ItemKind::Inline(_)) if kind == Some(HandleKind::Inline) => handle,
             Some(ItemKind::Rule(_)) if kind == Some(HandleKind::Rule) => handle,
-            Some(ItemKind::Token(_)) if kind == Some(HandleKind::Token) => handle,
             Some(_) => {
                 self.error(
                     name_span,
@@ -286,12 +263,17 @@ pub fn visit_affix_leaves(
 }
 
 fn lower_pratt(
-    parent: Option<RuleOrToken>,
+    parent: Option<RuleHandle>,
     children: &[RuleHandle],
     lowered_rules: &HandleVec<RuleHandle, RuleExpr>,
     cx: &mut LoweringCx,
 ) -> RuleExpr {
-    let Some(RuleOrToken::Rule(current_rule)) = parent else {
+    let parent = parent.filter(|handle| {
+        let converted = &cx.file.rules[*handle];
+        converted.kind == RuleKind::Rules
+    });
+
+    let Some(current_rule) = parent else {
         cx.error(
             StrSpan::empty(),
             "(TODO span) pratt expressions can only be in Rules",
@@ -326,7 +308,7 @@ fn lower_pratt(
         let kind = match has_prefix {
             Some(true) => {
                 if has_suffix == Some(true) {
-                    let assoc = match rule.attributes.right_assoc {
+                    let assoc = match rule.body.attributes.right_assoc {
                         true => Associativity::Right,
                         false => Associativity::Left,
                     };
@@ -336,7 +318,7 @@ fn lower_pratt(
                 }
             }
             Some(false) => {
-                if has_suffix != Some(true) || rule.attributes.atom {
+                if has_suffix != Some(true) || rule.body.attributes.atom {
                     PrattExprKind::Atom
                 } else {
                     PrattExprKind::Prefix
@@ -386,15 +368,8 @@ fn lower_pratt(
     mangled
 }
 
-#[derive(Clone, Copy)]
-pub enum RuleOrToken {
-    Rule(RuleHandle),
-    Token(TokenHandle),
-}
-
 fn lower_reference(name: &str, name_span: StrSpan, cx: &mut LoweringCx) -> RuleExpr {
     match cx.get_handle_by_name(name, name_span, None) {
-        Some(ItemKind::Token(a)) => RuleExpr::token(a),
         Some(ItemKind::Rule(a)) => RuleExpr::rule(a),
         Some(ItemKind::Inline(_)) => {
             cx.error(name_span, "Use <> syntax for inlines");
@@ -405,7 +380,7 @@ fn lower_reference(name: &str, name_span: StrSpan, cx: &mut LoweringCx) -> RuleE
 }
 
 fn lower_expr(
-    parent: Option<RuleOrToken>,
+    parent: Option<RuleHandle>,
     expr: &mut RuleExpr,
     lowered_rules: &HandleVec<RuleHandle, RuleExpr>,
     cx: &mut LoweringCx,
@@ -420,19 +395,22 @@ fn lower_expr(
             *node = lower_reference(&**name, *name_span, cx);
         }
         RuleExpr::Transition(Transition::Bytes(bytes)) => {
-            if let Some(RuleOrToken::Rule(_)) = parent {
-                *node = match cx.literal_to_token.get(&**bytes) {
-                    Some(a) => RuleExpr::token(*a),
-                    None => {
-                        cx.error(StrSpan::empty(), "(TODO span) No matching token");
-                        RuleExpr::error()
+            if let Some(handle) = parent {
+                let converted = &cx.file.rules[handle];
+                if converted.kind == RuleKind::Rules {
+                    *node = match cx.literal_to_token.get(&**bytes) {
+                        Some(a) => RuleExpr::rule(*a),
+                        None => {
+                            cx.error(StrSpan::empty(), "(TODO span) No matching token");
+                            RuleExpr::error()
+                        }
                     }
                 }
             }
         }
         RuleExpr::Not(expr) => {
-            if let RuleExpr::Transition(Transition::Token(token)) = **expr {
-                *node = RuleExpr::Transition(Transition::Not(token));
+            if let RuleExpr::Transition(Transition::Rule(handle)) = **expr {
+                *node = RuleExpr::Transition(Transition::Not(handle));
             } else {
                 cx.error(
                     StrSpan::empty(),
@@ -450,7 +428,6 @@ fn lower_expr(
 }
 
 pub struct LoweredFile {
-    pub tokens: HandleVec<TokenHandle, RuleExpr>,
     pub rules: HandleVec<RuleHandle, RuleExpr>,
 }
 
@@ -460,32 +437,16 @@ impl LoweredFile {
         cx.populate_hashmaps();
         cx.populate_inlines();
 
-        let mut rules = file.rules.map_ref(|body| body.expr.clone());
+        let mut rules = file.rules.map_ref(|rule| rule.body.expr.clone());
 
         for handle in rules.iter_keys() {
             let mut expr = rules[handle].take();
             // borrowchecker crimes because pratt lowering needs to look at its children
             // which are thankfully ordered such that they always get lowered before their parent
-            lower_expr(
-                Some(RuleOrToken::Rule(handle)),
-                &mut expr,
-                &mut rules,
-                &mut cx,
-            );
+            lower_expr(Some(handle), &mut expr, &mut rules, &mut cx);
             _ = std::mem::replace(&mut rules[handle], expr);
         }
 
-        let tokens = file.tokens.map_ref_with_key(|handle, body| {
-            let mut expr = body.expr.clone();
-            lower_expr(
-                Some(RuleOrToken::Token(handle)),
-                &mut expr,
-                &mut rules,
-                &mut cx,
-            );
-            expr
-        });
-
-        LoweredFile { tokens, rules }
+        LoweredFile { rules }
     }
 }

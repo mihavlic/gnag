@@ -1,7 +1,7 @@
 use std::hash::Hasher;
 
 use anyhow::Context;
-use gnag::{ctx::SpanExt, handle::HandleVec, NodeKind, StrSpan};
+use gnag::{ctx::SpanExt, handle::HandleVec, StrSpan, TreeKind};
 use gnag_gen::{
     convert::{AstItem, RuleExpr},
     generate::{ExprConstant, VariableHandle},
@@ -110,11 +110,11 @@ pub fn completion(
         }
 
         match node.kind {
-            NodeKind::Tree(gnag::TreeKind::CallExpr) => {
+            TreeKind::Tree(gnag::TreeKind::CallExpr) => {
                 let ident = node
                     .children(&parsed.arena)
                     .iter()
-                    .find(|c| c.kind == NodeKind::Token(gnag::TokenKind::Ident));
+                    .find(|c| c.kind == TreeKind::Token(gnag::TokenKind::Ident));
 
                 if let Some(ident) = ident {
                     if cursor <= ident.span.end {
@@ -133,16 +133,16 @@ pub fn completion(
                     break;
                 }
             }
-            NodeKind::Tree(gnag::TreeKind::SynRule) => {
+            TreeKind::Tree(gnag::TreeKind::SynRule) => {
                 rule = converted.find_rule_handle(cursor);
                 filter = CompletionFilter::Symbols;
                 break;
             }
-            NodeKind::Tree(gnag::TreeKind::File) => {
+            TreeKind::Tree(gnag::TreeKind::File) => {
                 filter = CompletionFilter::Toplevel;
                 break;
             }
-            NodeKind::Token(_) => unreachable!(),
+            TreeKind::Token(_) => unreachable!(),
             _ => {}
         }
     }
@@ -157,7 +157,7 @@ pub fn completion(
         }
 
         let current = trace.current().unwrap();
-        if current.kind == NodeKind::Token(gnag::TokenKind::Ident) {
+        if current.kind == TreeKind::Token(gnag::TokenKind::Ident) {
             let span = StrSpan {
                 start: current.span.start,
                 end: cursor,

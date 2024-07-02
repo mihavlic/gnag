@@ -303,7 +303,7 @@ pub trait ParsedFileExt {
         }
     }
     fn node_identifier_text<'b>(&self, file: &'b LspFile, node: &Node) -> Option<&'b str> {
-        if node.kind == gnag::NodeKind::Token(gnag::TokenKind::Ident) {
+        if node.kind == gnag::TreeKind::Token(gnag::TokenKind::Ident) {
             Some(node.span.resolve(file))
         } else {
             None

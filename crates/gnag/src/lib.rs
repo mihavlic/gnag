@@ -10,9 +10,10 @@ use std::ops::{Index, Range};
 ///  https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
 ///  - https://github.com/matklad/minipratt/blob/master/src/bin/pratt.rs
 
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[rustfmt::skip]
-pub enum TokenKind {
+pub enum TreeKind {
     Comment, Newline, Whitespace,
 
     Ident, Literal, Number,
@@ -20,12 +21,8 @@ pub enum TokenKind {
   
     LParen, RParen, LCurly, RCurly, LBracket, RBracket, LAngle, RAngle,
     TokensKeyword, RulesKeyword, PrattKeyword,
-    At, Comma, Dot, Pipe, Colon, Question, Plus, Star, Equals
-}
+    At, Comma, Dot, Pipe, Colon, Question, Plus, Star, Equals,
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[rustfmt::skip]
-pub enum TreeKind {
     File,
       ErrorTree,
       Attribute,
@@ -43,7 +40,7 @@ pub enum TreeKind {
 }
 
 use ast::ParsedFile;
-use TokenKind::*;
+use TreeKind::*;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TokenSpan {
@@ -102,19 +99,13 @@ impl StrSpan {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Token {
-    kind: TokenKind,
+    kind: TreeKind,
     span: StrSpan,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NodeKind {
-    Tree(TreeKind),
-    Token(TokenKind),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Node {
-    pub kind: NodeKind,
+    pub kind: TreeKind,
     pub span: StrSpan,
     pub children: Range<u32>,
 }
@@ -374,20 +365,16 @@ impl<'a> TreeTrace<'a> {
     }
     pub fn backward_contain_kind(&self, kind: TreeKind) -> bool {
         for node in self.backward_iter() {
-            if let NodeKind::Tree(k) = node.kind {
-                if k == kind {
-                    return true;
-                }
+            if node.kind == kind {
+                return true;
             }
         }
         false
     }
     pub fn ancestor_contain_kind(&self, kind: TreeKind) -> bool {
         for node in self.ancestor_iter() {
-            if let NodeKind::Tree(k) = node.kind {
-                if k == kind {
-                    return true;
-                }
+            if node.kind == kind {
+                return true;
             }
         }
         false
@@ -437,10 +424,7 @@ impl Node {
         for _ in 0..level {
             _ = buf.write_str("  ");
         }
-        match self.kind {
-            NodeKind::Tree(a) => _ = write!(buf, "{:?}", a),
-            NodeKind::Token(a) => _ = write!(buf, "{:?}", a),
-        }
+        _ = write!(buf, "{:?}", self.kind);
         if self.children.is_empty() {
             _ = write!(buf, " {:?}", self.span.as_str(src));
         }
@@ -747,7 +731,7 @@ impl<'a> Parser<'a> {
                         start_idx = stack.len();
                     }
                     stack.push(Node {
-                        kind: NodeKind::Token(token.kind),
+                        kind: token.kind,
                         span: token.span,
                         children: 0..0,
                     });
@@ -764,7 +748,7 @@ impl<'a> Parser<'a> {
                     let token = merged_tokens.next().unwrap();
                     pos = token.span.end;
                     stack.push(Node {
-                        kind: NodeKind::Token(token.kind),
+                        kind: token.kind,
                         span: token.span,
                         children: 0..0,
                     });
@@ -779,7 +763,7 @@ impl<'a> Parser<'a> {
 
             stack.truncate(start_idx);
             stack.push(Node {
-                kind: NodeKind::Tree(span.kind),
+                kind: span.kind,
                 span: span.span,
                 children: start..end,
             });
@@ -882,11 +866,11 @@ impl<'a> Parser<'a> {
         self.pos as usize == self.tokens.len()
     }
 
-    pub fn peek(&self) -> Option<TokenKind> {
+    pub fn peek(&self) -> Option<TreeKind> {
         self.nth(0)
     }
 
-    pub fn nth(&self, lookahead: u32) -> Option<TokenKind> {
+    pub fn nth(&self, lookahead: u32) -> Option<TreeKind> {
         self.nth_impl(lookahead).map(|it| it.kind)
     }
 
@@ -895,12 +879,12 @@ impl<'a> Parser<'a> {
     }
 
     #[inline]
-    pub fn at(&self, kind: TokenKind) -> bool {
+    pub fn at(&self, kind: TreeKind) -> bool {
         self.nth(0) == Some(kind)
     }
 
     #[inline]
-    pub fn at_any(&self, kinds: &[TokenKind]) -> bool {
+    pub fn at_any(&self, kinds: &[TreeKind]) -> bool {
         if let Some(any) = self.nth(0) {
             kinds.contains(&any)
         } else {
@@ -908,7 +892,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn token(&mut self, kind: TokenKind) -> bool {
+    pub fn token(&mut self, kind: TreeKind) -> bool {
         if self.at(kind) {
             self.advance();
             true
@@ -917,7 +901,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn expect(&mut self, kind: TokenKind) -> bool {
+    pub fn expect(&mut self, kind: TreeKind) -> bool {
         if self.at(kind) {
             self.advance();
             true
@@ -932,7 +916,7 @@ pub trait RecoverMethod {
     fn recover(&self, p: &mut Parser);
 }
 
-pub struct RecoverUntil<'a>(&'a [TokenKind]);
+pub struct RecoverUntil<'a>(&'a [TreeKind]);
 impl<'a> RecoverMethod for RecoverUntil<'a> {
     #[cold]
     fn recover(&self, p: &mut Parser) {
@@ -944,7 +928,7 @@ impl<'a> RecoverMethod for RecoverUntil<'a> {
     }
 }
 
-pub struct StepRecoverUntil<'a>(&'a [TokenKind]);
+pub struct StepRecoverUntil<'a>(&'a [TreeKind]);
 impl<'a> RecoverMethod for StepRecoverUntil<'a> {
     #[cold]
     fn recover(&self, p: &mut Parser) {
@@ -1195,7 +1179,7 @@ fn node_find() {
     assert_eq!(
         root.find_leaf(0, &arena),
         Some(&Node {
-            kind: NodeKind::Token(RulesKeyword),
+            kind: RulesKeyword,
             span: StrSpan { start: 0, end: 5 },
             children: 0..0
         })

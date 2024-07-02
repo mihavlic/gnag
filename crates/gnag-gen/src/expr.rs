@@ -23,6 +23,7 @@ pub enum Transition {
     // lexer
     ByteSet(Rc<[u8]>),
     Bytes(Rc<[u8]>),
+    Keyword(Rc<[u8]>),
     // parser
     Rule(RuleHandle),
     PrattRule(RuleHandle, u32),
@@ -53,6 +54,7 @@ impl Transition {
             Transition::Error
             | Transition::ByteSet(_)
             | Transition::Bytes(_)
+            | Transition::Keyword(_)
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
             | Transition::CompareBindingPower(_)
@@ -74,7 +76,8 @@ impl Transition {
             | Transition::PrattRule(_, _)
             | Transition::Any
             | Transition::Not(_) => true,
-            Transition::CompareBindingPower(_)
+            Transition::Keyword(_)
+            | Transition::CompareBindingPower(_)
             | Transition::SaveState(_)
             | Transition::RestoreState(_)
             | Transition::CloseSpan(_)
@@ -91,6 +94,7 @@ impl Transition {
             Transition::Error => write!(f, "Error"),
             Transition::ByteSet(ref a) => write!(f, "ByteSet({:?})", String::from_utf8_lossy(a)),
             Transition::Bytes(ref a) => write!(f, "Bytes({:?})", String::from_utf8_lossy(a)),
+            Transition::Keyword(ref a) => write!(f, "Keyword({:?})", String::from_utf8_lossy(a)),
             Transition::Rule(a) => write!(f, "Rule({})", a.name(file)),
             Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", a.name(file)),
             Transition::CompareBindingPower(power) => write!(f, "CompareBindingPower({power})"),
@@ -156,8 +160,14 @@ impl RuleExpr {
     pub fn rule(handle: RuleHandle) -> RuleExpr {
         RuleExpr::Transition(Transition::Rule(handle))
     }
+    pub fn close_span(handle: RuleHandle) -> RuleExpr {
+        RuleExpr::Transition(Transition::CloseSpan(handle))
+    }
     pub fn bytes(bytes: impl Into<Rc<[u8]>>) -> RuleExpr {
         RuleExpr::Transition(Transition::Bytes(bytes.into()))
+    }
+    pub fn keyword(bytes: impl Into<Rc<[u8]>>) -> RuleExpr {
+        RuleExpr::Transition(Transition::Keyword(bytes.into()))
     }
     pub fn visit_nodes_top_down(&self, mut fun: impl FnMut(&RuleExpr)) {
         self.visit_nodes_(true, &mut fun)

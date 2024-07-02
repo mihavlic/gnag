@@ -8,12 +8,15 @@ tokens {
 
     String = r'TODO' # 'r'? <string_like '\''> # TODO
 
-    InlineKeyword = 'inline'
-    TokensKeywords = 'tokens'
-    RulesKeyword = 'rules'
-    PrattKeyword = 'pratt'
-    GroupKeyword = 'group'
+    @word
     Ident = r'\w+' # <class_word>
+    
+    @keyword InlineKeyword = 'inline'
+    @keyword TokensKeywords = 'tokens'
+    @keyword RulesKeyword = 'rules'
+    @keyword PrattKeyword = 'pratt'
+    @keyword GroupKeyword = 'group'
+
     Number = r'[0-9]+' # <charset '0-9'>+
     LCurly = '{'
     RCurly = '}'

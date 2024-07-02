@@ -18,11 +18,17 @@ impl RuleHandle {
     pub fn name(self, file: &ConvertedFile) -> &str {
         file.rules[self].body.name.as_str()
     }
+    pub fn span(self, file: &ConvertedFile) -> StrSpan {
+        file.rules[self].body.name_span
+    }
 }
 
 impl InlineHandle {
     pub fn name(self, file: &ConvertedFile) -> &str {
         file.inlines[self].body.name.as_str()
+    }
+    pub fn span(self, file: &ConvertedFile) -> StrSpan {
+        file.inlines[self].body.name_span
     }
 }
 
@@ -33,6 +39,8 @@ pub struct RuleAttributes {
     pub left_assoc: bool,
     pub right_assoc: bool,
     pub skip: bool,
+    pub word: bool,
+    pub keyword: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +91,7 @@ impl HandleKind {
 pub struct ConvertedFile {
     pub rules: HandleVec<RuleHandle, RuleDef>,
     pub inlines: HandleVec<InlineHandle, InlineDef>,
+    pub lexer: Option<RuleHandle>,
 }
 
 impl ConvertedFile {
@@ -96,6 +105,20 @@ impl ConvertedFile {
         let cx = ConvertCx::new(src, err);
 
         this.convert_file(&cx, &ast);
+        if let Some(lexer) = this.create_lexer_expr(&cx) {
+            let def = RuleDef {
+                kind: RuleKind::Tokens,
+                body: RuleBody {
+                    span: StrSpan::empty(),
+                    attributes: RuleAttributes::default(),
+                    name: "Lexer".into(),
+                    name_span: StrSpan::empty(),
+                    expr: lexer,
+                },
+            };
+            let handle = this.rules.push(def);
+            this.lexer = Some(handle);
+        }
 
         this
     }
@@ -167,6 +190,8 @@ impl ConvertedFile {
                 "right" => attributes.right_assoc = true,
                 "atom" => attributes.atom = true,
                 "skip" => attributes.skip = true,
+                "word" => attributes.word = true,
+                "keyword" => attributes.keyword = true,
                 _ => cx.error(attr.name, "Unknown attribute"),
             }
         }
@@ -284,6 +309,95 @@ impl ConvertedFile {
                 RuleExpr::Sequence(vec)
             }
         }
+    }
+
+    fn create_lexer_expr(&self, cx: &ConvertCx) -> Option<RuleExpr> {
+        let mut has_word_token = false;
+        let mut keyword_tokens = Vec::new();
+        for (handle, rule) in self.rules.iter_kv() {
+            let span = handle.span(self);
+            let is_word = rule.body.attributes.word;
+            let is_keyword = rule.body.attributes.keyword;
+
+            if is_word {
+                if is_keyword {
+                    cx.error(span, "Token cannot be both @word and @keyword");
+                }
+                if has_word_token {
+                    cx.error(span, "Only one @word token may exist");
+                }
+                has_word_token = true;
+            }
+
+            if is_keyword {
+                let body = &self.rules[handle].body.expr;
+                let bytes = match body {
+                    RuleExpr::Transition(Transition::Bytes(b)) => Some(b.clone()),
+                    _ => None,
+                };
+
+                if bytes.is_none() {
+                    cx.error(
+                        span,
+                        "(TODO span) @keyword tokens must only be a string literal",
+                    );
+                }
+
+                keyword_tokens.push((handle, bytes));
+            }
+        }
+
+        let mut token_exprs = Vec::new();
+        for (handle, rule) in self.rules.iter_kv() {
+            let span = handle.span(self);
+            let is_word = rule.body.attributes.word;
+            let is_keyword = rule.body.attributes.keyword;
+
+            if rule.kind == RuleKind::Tokens {
+                if is_keyword && !has_word_token {
+                    cx.error(span, "Missing @keyword token");
+                }
+
+                if is_keyword && has_word_token {
+                    // keyword token gets parsed as a subset of the word token
+                }
+                if is_word {
+                    let mut close_spans = Vec::with_capacity(keyword_tokens.len() + 1);
+                    for (handle, bytes) in &keyword_tokens {
+                        if let Some(bytes) = bytes {
+                            close_spans.push(RuleExpr::Sequence(vec![
+                                RuleExpr::keyword(bytes.clone()),
+                                RuleExpr::close_span(*handle),
+                            ]));
+                        }
+                    }
+                    close_spans.push(RuleExpr::close_span(handle));
+
+                    token_exprs.push(RuleExpr::Sequence(vec![
+                        RuleExpr::rule(handle),
+                        RuleExpr::Choice(close_spans),
+                    ]));
+                } else {
+                    token_exprs.push(RuleExpr::Sequence(vec![
+                        RuleExpr::rule(handle),
+                        RuleExpr::close_span(handle),
+                    ]));
+                }
+            } else {
+                if is_keyword {
+                    cx.error(span, "@keyword must be a token");
+                }
+                if is_word {
+                    cx.error(span, "@word must be a token");
+                }
+            }
+        }
+
+        if token_exprs.is_empty() {
+            return None;
+        }
+
+        Some(RuleExpr::Choice(token_exprs))
     }
 
     fn binary_expression(

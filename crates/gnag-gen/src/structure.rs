@@ -3,9 +3,9 @@ use crate::expr::Transition;
 use crate::expr::TransitionEffects;
 use crate::graph::NodeHandle;
 use crate::graph::PegNode;
-use crate::scope_tree::ScopeHandle;
 use crate::scope_tree::ScopeKind;
 use crate::scope_tree::ScopeNode;
+use crate::scope_tree::ScopeNodeHandle;
 use crate::scope_tree::ScopeVisit;
 use gnag::handle::HandleBitset;
 use gnag::handle::HandleCounter;
@@ -15,8 +15,8 @@ use std::fmt::Write;
 
 #[derive(Clone, Default)]
 struct StatementJumps {
-    jump_forward: Option<ScopeHandle>,
-    back_edge: Option<ScopeHandle>,
+    jump_forward: Option<ScopeNodeHandle>,
+    back_edge: Option<ScopeNodeHandle>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,31 +27,23 @@ pub(crate) struct BlockCondition {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BlockStatement {
+    pub(crate) handle: ScopeNodeHandle,
     pub(crate) kind: ScopeKind,
     pub(crate) condition: Option<BlockCondition>,
 }
 
-impl From<ScopeKind> for BlockStatement {
-    fn from(kind: ScopeKind) -> Self {
-        BlockStatement {
-            kind,
-            condition: None,
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FlowAction {
-    Break(ScopeHandle),
-    Continue(ScopeHandle),
+    Break(ScopeNodeHandle),
+    Continue(ScopeNodeHandle),
     Panic,
     None,
 }
 
 #[derive(Clone)]
 pub enum Statement {
-    Open(ScopeHandle, BlockStatement),
-    Close(ScopeHandle),
+    Open(BlockStatement),
+    Close(ScopeNodeHandle),
     Statement {
         condition: NodeHandle,
         success: FlowAction,
@@ -150,7 +142,11 @@ impl GraphStructuring {
 
         self.tree.visit_dfs(|event| match event {
             ScopeVisit::Open(scope) => {
-                statements.push(Statement::Open(scope.handle, scope.kind.into()));
+                statements.push(Statement::Open(BlockStatement {
+                    handle: scope.handle,
+                    kind: scope.kind,
+                    condition: None,
+                }));
             }
             ScopeVisit::Statement(handle) => {
                 let node = &nodes[handle];
@@ -220,7 +216,7 @@ impl GraphStructuring {
             i += 1;
 
             let next = statements.get(i).cloned();
-            if let Statement::Open(scope_handle, block) = &mut statements[open_index] {
+            if let Statement::Open(block) = &mut statements[open_index] {
                 if block.condition.is_some() {
                     continue;
                 }
@@ -241,10 +237,10 @@ impl GraphStructuring {
                 };
 
                 let eligible = match (success, fail) {
-                    (FlowAction::Break(scope), FlowAction::None) if scope == *scope_handle => {
+                    (FlowAction::Break(scope), FlowAction::None) if scope == block.handle => {
                         Some(true)
                     }
-                    (FlowAction::None, FlowAction::Break(scope)) if scope == *scope_handle => {
+                    (FlowAction::None, FlowAction::Break(scope)) if scope == block.handle => {
                         Some(false)
                     }
                     _ => None,
@@ -271,25 +267,25 @@ impl GraphStructuring {
 
 pub(crate) fn mark_used_labels<'a>(
     statements: &'a [Statement],
-    stack: &mut Vec<(ScopeHandle, &'a BlockStatement)>,
-) -> HandleBitset<ScopeHandle> {
+    stack: &mut Vec<&'a BlockStatement>,
+) -> HandleBitset<ScopeNodeHandle> {
     let mut bitset = HandleBitset::new();
     for statement in statements {
         match statement {
-            Statement::Open(handle, block) => {
-                stack.push((*handle, block));
+            Statement::Open(block) => {
+                stack.push(block);
             }
             Statement::Close(_) => _ = stack.pop(),
             &Statement::Statement { success, fail, .. } => {
-                let &(current_scope, block) = stack.last().unwrap();
+                let block = *stack.last().unwrap();
                 let force_label = block.kind == ScopeKind::Block;
                 if let FlowAction::Break(handle) | FlowAction::Continue(handle) = success {
-                    if current_scope != handle || force_label {
+                    if block.handle != handle || force_label {
                         bitset.insert(handle);
                     }
                 }
                 if let FlowAction::Break(handle) | FlowAction::Continue(handle) = fail {
-                    if current_scope != handle || force_label {
+                    if block.handle != handle || force_label {
                         bitset.insert(handle);
                     }
                 }
@@ -322,12 +318,12 @@ pub fn display_code(
         let current = i;
         i += 1;
         match &statements[current] {
-            Statement::Open(handle, block) => {
+            Statement::Open(block) => {
                 print_indent(buf, indent);
 
-                let print_label = used_labels.contains(*handle);
+                let print_label = used_labels.contains(block.handle);
                 if print_label && !(block.kind == ScopeKind::Block && block.condition.is_some()) {
-                    write!(buf, "'b{handle}: ");
+                    write!(buf, "'b{}: ", block.handle);
                 }
 
                 match (block.kind, block.condition) {
@@ -345,7 +341,7 @@ pub fn display_code(
 
                         write!(buf, " {{");
                         if print_label && kind == ScopeKind::Block {
-                            write!(buf, " 'b{handle}: {{");
+                            write!(buf, " 'b{}: {{", block.handle);
                         }
                     }
                 }
@@ -355,7 +351,7 @@ pub fn display_code(
                     i += 1;
                 } else {
                     indent += 1;
-                    stack.push((*handle, block));
+                    stack.push(block);
                     writeln!(buf);
                 }
             }
@@ -373,7 +369,7 @@ pub fn display_code(
                     action: FlowAction,
                     prefix: &str,
                     suffix: &str,
-                    stack: &[(ScopeHandle, &BlockStatement)],
+                    stack: &[&BlockStatement],
                 ) {
                     write!(buf, "{prefix}");
                     match action {
@@ -383,9 +379,9 @@ pub fn display_code(
                         FlowAction::None => {}
                     }
                     if let FlowAction::Break(scope) | FlowAction::Continue(scope) = action {
-                        let (current_scope, block) = *stack.last().unwrap();
+                        let block = *stack.last().unwrap();
                         let force_label = block.kind == ScopeKind::Block;
-                        if current_scope != scope || force_label {
+                        if block.handle != scope || force_label {
                             write!(buf, " 'b{scope}");
                         }
                     }
@@ -462,8 +458,8 @@ pub fn display_code(
                 indent -= 1;
                 print_indent(buf, indent);
 
-                let (scope, block) = stack.pop().unwrap();
-                if used_labels.contains(scope)
+                let block = stack.pop().unwrap();
+                if used_labels.contains(block.handle)
                     && block.kind == ScopeKind::Block
                     && block.condition.is_some()
                 {

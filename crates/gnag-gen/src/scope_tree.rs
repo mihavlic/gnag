@@ -10,10 +10,10 @@ use std::fmt::Formatter;
 use std::fmt::Write;
 
 simple_handle! {
-    pub ScopeHandle
+    pub ScopeNodeHandle
 }
 
-impl Display for ScopeHandle {
+impl Display for ScopeNodeHandle {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
@@ -33,7 +33,7 @@ pub enum ScopeKind {
 
 #[derive(Debug)]
 pub struct ScopeNode {
-    pub handle: ScopeHandle,
+    pub handle: ScopeNodeHandle,
     pub kind: ScopeKind,
     pub start: NodeHandle,
     pub end: NodeHandle,
@@ -41,7 +41,7 @@ pub struct ScopeNode {
 }
 
 impl ScopeNode {
-    pub fn new(handle: ScopeHandle, start: NodeHandle, end: NodeHandle) -> ScopeNode {
+    pub fn new(handle: ScopeNodeHandle, start: NodeHandle, end: NodeHandle) -> ScopeNode {
         ScopeNode {
             handle,
             kind: ScopeKind::Block,
@@ -112,11 +112,11 @@ impl ScopeNode {
     }
     pub fn add_scope(
         &mut self,
-        counter: &mut HandleCounter<ScopeHandle>,
+        counter: &mut HandleCounter<ScopeNodeHandle>,
         start: NodeHandle,
         end: NodeHandle,
         kind: ScopeKind,
-    ) -> ScopeHandle {
+    ) -> ScopeNodeHandle {
         assert!(self.contains_range(start, end));
 
         for child in &mut self.children {
@@ -191,7 +191,7 @@ impl ScopeNode {
         }
         fun(ScopeVisit::Close(self));
     }
-    pub fn find_scope_with_end(&self, end: NodeHandle) -> Option<ScopeHandle> {
+    pub fn find_scope_with_end(&self, end: NodeHandle) -> Option<ScopeNodeHandle> {
         let mut this = self;
         'outer: loop {
             if self.end == end {
@@ -208,7 +208,7 @@ impl ScopeNode {
             return None;
         }
     }
-    pub fn find_scope_with_start(&self, start: NodeHandle) -> Option<ScopeHandle> {
+    pub fn find_scope_with_start(&self, start: NodeHandle) -> Option<ScopeNodeHandle> {
         let mut this = self;
         'outer: loop {
             if self.start == start {

@@ -135,10 +135,77 @@ impl GraphStructuring {
     ) -> Vec<Statement> {
         let mut statements = Vec::new();
 
-        let mut last_statement = None;
-        let mut last_scope = None;
-        let mut first_loop = None;
-        let mut last_loop = None;
+        struct StatementFixup {
+            previous_statement: Option<usize>,
+            outermost_scope: Option<ScopeNodeHandle>,
+            innermost_loop: Option<ScopeNodeHandle>,
+            outermost_loop: Option<ScopeNodeHandle>,
+        }
+
+        impl StatementFixup {
+            fn new() -> StatementFixup {
+                Self {
+                    previous_statement: None,
+                    outermost_scope: None,
+                    innermost_loop: None,
+                    outermost_loop: None,
+                }
+            }
+            fn fixup_previous_statement(&mut self, statements: &mut [Statement]) {
+                if let Some(previous) = self.previous_statement {
+                    if let Some(innermost_loop) = self.innermost_loop {
+                        let Statement::Statement {
+                            condition: _,
+                            success,
+                            fail,
+                        } = &mut statements[previous]
+                        else {
+                            unreachable!()
+                        };
+
+                        let Some(outermost_scope) = self.outermost_scope else {
+                            unreachable!()
+                        };
+
+                        // before fixup, FlowAction::None is considered to mean "the next statement"
+                        // we insert breaks if needed to preserve this behaviour
+                        if let FlowAction::None = success {
+                            *success = FlowAction::Break(outermost_scope);
+                        }
+                        if let FlowAction::None = fail {
+                            *fail = FlowAction::Break(outermost_scope);
+                        }
+                        // if we're continuing in the last statement of the loop, we don't need to explicitly continue
+                        if let FlowAction::Continue(scope) = success {
+                            if *scope == innermost_loop {
+                                *success = FlowAction::None;
+                            }
+                        }
+                        if let FlowAction::Continue(scope) = fail {
+                            if *scope == innermost_loop {
+                                *fail = FlowAction::None;
+                            }
+                        }
+                    }
+                }
+                self.previous_statement = None;
+            }
+            fn set_next_statement(&mut self, next_statement_index: usize) {
+                self.previous_statement = Some(next_statement_index);
+                self.outermost_scope = None;
+                self.innermost_loop = None;
+                self.outermost_loop = None;
+            }
+            fn on_close(&mut self, scope: &ScopeNode) {
+                self.outermost_scope = Some(scope.handle);
+                if scope.kind == ScopeKind::Loop {
+                    self.innermost_loop.get_or_insert(scope.handle);
+                    self.outermost_loop = Some(scope.handle);
+                }
+            }
+        }
+
+        let mut fixup = StatementFixup::new();
 
         self.tree.visit_dfs(|event| match event {
             ScopeVisit::Open(scope) => {
@@ -149,43 +216,11 @@ impl GraphStructuring {
                 }));
             }
             ScopeVisit::Statement(handle) => {
+                fixup.fixup_previous_statement(&mut statements);
+                fixup.set_next_statement(statements.len());
+
                 let node = &nodes[handle];
                 let next = handle.next();
-
-                if let Some(last) = last_statement {
-                    if let Some(first_loop) = first_loop {
-                        let Statement::Statement {
-                            condition: _,
-                            success,
-                            fail,
-                        } = &mut statements[last]
-                        else {
-                            unreachable!()
-                        };
-
-                        if let FlowAction::None = success {
-                            *success = FlowAction::Break(last_loop.unwrap());
-                        }
-                        if let FlowAction::None = fail {
-                            *fail = FlowAction::Break(last_loop.unwrap());
-                        }
-                        if let FlowAction::Continue(scope) = success {
-                            if *scope == first_loop {
-                                *success = FlowAction::None;
-                            }
-                        }
-                        if let FlowAction::Continue(scope) = fail {
-                            if *scope == first_loop {
-                                *fail = FlowAction::None;
-                            }
-                        }
-                    }
-                }
-
-                last_statement = Some(statements.len());
-                first_loop = None;
-                last_loop = None;
-                last_scope = None;
 
                 statements.push(Statement::Statement {
                     condition: handle,
@@ -194,15 +229,14 @@ impl GraphStructuring {
                 });
             }
             ScopeVisit::Close(scope) => {
-                statements.push(Statement::Close(scope.handle));
+                fixup.on_close(scope);
 
-                last_scope = Some(scope.handle);
-                if scope.kind == ScopeKind::Loop {
-                    first_loop.get_or_insert(scope.handle);
-                    last_loop = Some(scope.handle);
-                }
+                statements.push(Statement::Close(scope.handle));
             }
         });
+
+        // finish off any remaining statement
+        fixup.fixup_previous_statement(&mut statements);
 
         if !create_while && !create_if {
             return statements;

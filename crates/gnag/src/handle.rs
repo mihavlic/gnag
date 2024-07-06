@@ -12,7 +12,7 @@ pub trait TypedHandle {
 
 #[macro_export]
 macro_rules! simple_handle {
-    ($($visibility:vis $name:ident),+) => {
+    ($($visibility:vis $name:ident),+ $(,)?) => {
         $(
             #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
             #[repr(transparent)]

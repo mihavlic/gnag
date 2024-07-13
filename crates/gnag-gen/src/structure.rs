@@ -40,10 +40,25 @@ pub enum FlowAction {
     None,
 }
 
+impl FlowAction {
+    pub fn flow_target_scope_if_needed<'a>(
+        self,
+        current_scope: &BlockStatement,
+    ) -> Option<ScopeNodeHandle> {
+        if let FlowAction::Break(handle) | FlowAction::Continue(handle) = self {
+            // you cannot break out of a normal block without it having a label
+            if current_scope.kind == ScopeKind::Block || current_scope.handle != handle {
+                return Some(handle);
+            }
+        }
+        None
+    }
+}
+
 #[derive(Clone)]
 pub enum Statement {
     Open(BlockStatement),
-    Close(ScopeNodeHandle),
+    Close,
     Statement {
         condition: NodeHandle,
         success: FlowAction,
@@ -129,12 +144,11 @@ impl GraphStructuring {
     }
     pub fn emit_code(
         &self,
+        statements: &mut Vec<Statement>,
         create_while: bool,
         create_if: bool,
         nodes: &HandleVec<NodeHandle, PegNode>,
-    ) -> Vec<Statement> {
-        let mut statements = Vec::new();
-
+    ) {
         struct StatementFixup {
             previous_statement: Option<usize>,
             outermost_scope: Option<ScopeNodeHandle>,
@@ -205,6 +219,8 @@ impl GraphStructuring {
             }
         }
 
+        statements.clear();
+
         let mut fixup = StatementFixup::new();
 
         self.tree.visit_dfs(|event| match event {
@@ -216,7 +232,7 @@ impl GraphStructuring {
                 }));
             }
             ScopeVisit::Statement(handle) => {
-                fixup.fixup_previous_statement(&mut statements);
+                fixup.fixup_previous_statement(statements);
                 fixup.set_next_statement(statements.len());
 
                 let node = &nodes[handle];
@@ -230,16 +246,15 @@ impl GraphStructuring {
             }
             ScopeVisit::Close(scope) => {
                 fixup.on_close(scope);
-
-                statements.push(Statement::Close(scope.handle));
+                statements.push(Statement::Close);
             }
         });
 
         // finish off any remaining statement
-        fixup.fixup_previous_statement(&mut statements);
+        fixup.fixup_previous_statement(statements);
 
         if !create_while && !create_if {
-            return statements;
+            return;
         }
 
         // we need to do this in a second pass because some ::Continue may be turned into ::None
@@ -286,8 +301,6 @@ impl GraphStructuring {
                 }
             }
         }
-
-        statements
     }
     pub fn debug_scopes(
         &self,
@@ -309,19 +322,14 @@ pub(crate) fn mark_used_labels<'a>(
             Statement::Open(block) => {
                 stack.push(block);
             }
-            Statement::Close(_) => _ = stack.pop(),
+            Statement::Close => _ = stack.pop(),
             &Statement::Statement { success, fail, .. } => {
-                let block = *stack.last().unwrap();
-                let force_label = block.kind == ScopeKind::Block;
-                if let FlowAction::Break(handle) | FlowAction::Continue(handle) = success {
-                    if block.handle != handle || force_label {
-                        bitset.insert(handle);
-                    }
+                let current_scope = *stack.last().unwrap();
+                if let Some(handle) = success.flow_target_scope_if_needed(current_scope) {
+                    bitset.insert(handle);
                 }
-                if let FlowAction::Break(handle) | FlowAction::Continue(handle) = fail {
-                    if block.handle != handle || force_label {
-                        bitset.insert(handle);
-                    }
+                if let Some(handle) = fail.flow_target_scope_if_needed(current_scope) {
+                    bitset.insert(handle);
                 }
             }
         }
@@ -380,7 +388,7 @@ pub fn display_code(
                     }
                 }
 
-                if let Some(Statement::Close(_)) = statements.get(i) {
+                if let Some(Statement::Close) = statements.get(i) {
                     writeln!(buf, " }}");
                     i += 1;
                 } else {
@@ -488,7 +496,7 @@ pub fn display_code(
                     }
                 }
             }
-            Statement::Close(_) => {
+            Statement::Close => {
                 indent -= 1;
                 print_indent(buf, indent);
 

@@ -185,9 +185,11 @@ fn run() -> Result<(), ()> {
     }
 
     if do_code || none_enabled {
+        let mut statements = Vec::new();
         for ((handle, structuring), graph) in structures.iter_kv().zip(compiled.rules.iter()) {
             print!("rule {} ", handle.name(&converted));
-            let statements = structuring.emit_code(true, true, &graph.nodes);
+
+            structuring.emit_code(&mut statements, true, true, &graph.nodes);
             display_code(&mut StdoutSink, &statements, &graph.nodes, &converted);
 
             println!();

@@ -721,7 +721,16 @@ impl Expression {
             write!(buf, "{{\n");
             for a in block.statements.iter() {
                 a.display(buf, module, function);
-                write!(buf, ";\n");
+                if !matches!(
+                    a,
+                    Expression::Block(..)
+                        | Expression::Loop(..)
+                        | Expression::While { .. }
+                        | Expression::If { .. }
+                ) {
+                    write!(buf, ";");
+                }
+                write!(buf, "\n");
             }
             write!(buf, "}}");
         }
@@ -734,6 +743,22 @@ impl Expression {
             write!(buf, "{keyword}");
             if let Some(label) = label {
                 write!(buf, " 'b{}", label.index());
+            }
+        }
+
+        fn display_in_parens(
+            expr: &Expression,
+            buf: &mut dyn std::fmt::Write,
+            module: &CodeFile,
+            function: Option<&FunctionBody>,
+        ) {
+            let need_parens = matches!(expr, Expression::Binary { .. } | Expression::Unary { .. });
+            if need_parens {
+                write!(buf, "(");
+            }
+            expr.display(buf, module, function);
+            if need_parens {
+                write!(buf, ")");
             }
         }
 
@@ -827,19 +852,16 @@ impl Expression {
                     BinaryOp::Equal => "==",
                     BinaryOp::NotEqual => "!=",
                 };
-                write!(buf, "(");
-                left.display(buf, module, function);
+                display_in_parens(left, buf, module, function);
                 write!(buf, " {op} ");
-                right.display(buf, module, function);
-                write!(buf, ")");
+                display_in_parens(right, buf, module, function);
             }
             Expression::Unary { op, expr } => {
                 let op = match op {
                     UnaryOp::Negate => "!",
                 };
-                write!(buf, "({op}");
-                expr.display(buf, module, function);
-                write!(buf, ")");
+                write!(buf, "{op}");
+                display_in_parens(expr, buf, module, function);
             }
             Expression::Break(label) => {
                 break_or_return(buf, "break", label);

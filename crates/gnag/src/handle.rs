@@ -8,6 +8,7 @@ use std::{
 pub trait TypedHandle {
     fn new(index: usize) -> Self;
     fn index(self) -> usize;
+    fn index_u32(self) -> u32;
 }
 
 #[macro_export]
@@ -26,6 +27,10 @@ macro_rules! simple_handle {
                 #[inline]
                 fn index(self) -> usize {
                     self.0 as usize
+                }
+                #[inline]
+                fn index_u32(self) -> u32 {
+                    self.0
                 }
             }
         )+
@@ -90,6 +95,9 @@ impl<H, T> HandleVec<H, T> {
     pub fn new() -> Self {
         HandleVec(Vec::new(), PhantomData)
     }
+    pub fn from_vec(vector: Vec<T>) -> Self {
+        HandleVec(vector, PhantomData)
+    }
     pub fn map<A>(self, fun: impl FnMut(T) -> A) -> HandleVec<H, A> {
         HandleVec(self.into_iter().map(fun).collect(), PhantomData)
     }
@@ -134,7 +142,16 @@ impl<H, T> HandleVec<H, T> {
         self.0.last_mut()
     }
     pub fn as_slice(&self) -> &[T] {
+        self.0.as_slice()
+    }
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self.0.as_mut_slice()
+    }
+    pub fn as_vec(&self) -> &Vec<T> {
         &self.0
+    }
+    pub fn as_mut_vec(&mut self) -> &mut Vec<T> {
+        &mut self.0
     }
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
@@ -144,6 +161,10 @@ impl<H, T> HandleVec<H, T> {
     }
     pub fn clear(&mut self) {
         self.0.clear()
+    }
+    pub fn take(&mut self) -> Self {
+        let vec = std::mem::take(&mut self.0);
+        Self::from_vec(vec)
     }
 }
 
@@ -467,7 +488,7 @@ impl<H> Clone for HandleBitset<H> {
     }
 }
 
-impl<H: TypedHandle> HandleBitset<H> {
+impl<H> HandleBitset<H> {
     pub fn new() -> HandleBitset<H> {
         Self {
             set: Bitset::new(),
@@ -480,9 +501,18 @@ impl<H: TypedHandle> HandleBitset<H> {
             spooky: PhantomData,
         }
     }
+    pub fn with_capacity_filled(capacity: usize, fill: bool) -> HandleBitset<H> {
+        Self {
+            set: Bitset::with_capacity_filled(capacity, fill),
+            spooky: PhantomData,
+        }
+    }
     pub fn clear(&mut self) {
         self.set.clear();
     }
+}
+
+impl<H: TypedHandle> HandleBitset<H> {
     pub fn replace(&mut self, handle: H, value: bool) -> bool {
         self.set.replace(handle.index(), value)
     }
@@ -510,9 +540,20 @@ impl Bitset {
         Self { set: Vec::new() }
     }
     pub fn with_capacity(capacity: usize) -> Bitset {
+        let bytes = std::mem::size_of::<usize>();
+        let words = (capacity + bytes - 1) / bytes;
         Self {
-            set: Vec::with_capacity(capacity),
+            set: Vec::with_capacity(words),
         }
+    }
+    pub fn with_capacity_filled(capacity: usize, fill: bool) -> Bitset {
+        let mut this = Self::with_capacity(capacity);
+        let pattern = match fill {
+            true => usize::MAX,
+            false => 0,
+        };
+        this.set.resize(this.set.capacity(), pattern);
+        this
     }
     pub fn clear(&mut self) {
         self.set.clear();

@@ -5,6 +5,7 @@ use std::{
 
 use gnag::{ast::ParsedFile, ctx::ErrorAccumulator};
 use gnag_gen::{
+    code::CodeFile,
     compile::CompiledFile,
     convert::ConvertedFile,
     graph::{debug_graphviz, debug_statements},
@@ -55,6 +56,8 @@ fn run() -> Result<(), ()> {
     let mut do_scopes = false;
     let mut do_code = false;
     let mut no_optimize = false;
+    let mut do_file = false;
+    let mut no_format = false;
 
     let mut none_enabled = true;
     args.retain(|arg| {
@@ -67,6 +70,8 @@ fn run() -> Result<(), ()> {
             "--scopes" => do_scopes = true,
             "--code" => do_code = true,
             "--no-optimize" => no_optimize = true,
+            "--file" => do_file = true,
+            "--no-format" => no_format = true,
             _ => return true,
         }
         none_enabled = false;
@@ -115,6 +120,8 @@ fn run() -> Result<(), ()> {
     let lowered = LoweredFile::new(&src, &err, &converted);
     report();
     let compiled = CompiledFile::new(&err, &converted, &lowered, !no_optimize);
+    report();
+    let code = CodeFile::new(&err, &converted, &compiled);
     report();
 
     if do_ast || none_enabled {
@@ -185,16 +192,36 @@ fn run() -> Result<(), ()> {
     }
 
     if do_code || none_enabled {
-        let mut statements = Vec::new();
         for ((handle, structuring), graph) in structures.iter_kv().zip(compiled.rules.iter()) {
             print!("rule {} ", handle.name(&converted));
 
-            structuring.emit_code(&mut statements, true, true, &graph.nodes);
+            let statements = structuring.emit_code(true, true, &graph.nodes);
             display_code(&mut StdoutSink, &statements, &graph.nodes, &converted);
 
             println!();
         }
     }
 
+    if do_file || none_enabled {
+        let mut buffer = String::new();
+        code.display(&mut buffer);
+
+        let result = please_format(&buffer);
+        if let Err(err) = &result {
+            eprintln!("{err}");
+        }
+
+        if result.is_err() || no_format {
+            println!("{buffer}");
+        } else {
+            print!("{}", result.unwrap());
+        }
+    }
+
     Ok(())
+}
+
+fn please_format(input: &str) -> syn::Result<String> {
+    let syntax_tree = syn::parse_file(input)?;
+    Ok(prettyplease::unparse(&syntax_tree))
 }

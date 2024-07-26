@@ -144,11 +144,10 @@ impl GraphStructuring {
     }
     pub fn emit_code(
         &self,
-        statements: &mut Vec<Statement>,
         create_while: bool,
         create_if: bool,
         nodes: &HandleVec<NodeHandle, PegNode>,
-    ) {
+    ) -> Vec<Statement> {
         struct StatementFixup {
             previous_statement: Option<usize>,
             outermost_scope: Option<ScopeNodeHandle>,
@@ -219,7 +218,7 @@ impl GraphStructuring {
             }
         }
 
-        statements.clear();
+        let mut statements = Vec::new();
 
         let mut fixup = StatementFixup::new();
 
@@ -232,7 +231,7 @@ impl GraphStructuring {
                 }));
             }
             ScopeVisit::Statement(handle) => {
-                fixup.fixup_previous_statement(statements);
+                fixup.fixup_previous_statement(&mut statements);
                 fixup.set_next_statement(statements.len());
 
                 let node = &nodes[handle];
@@ -251,10 +250,10 @@ impl GraphStructuring {
         });
 
         // finish off any remaining statement
-        fixup.fixup_previous_statement(statements);
+        fixup.fixup_previous_statement(&mut statements);
 
         if !create_while && !create_if {
-            return;
+            return statements;
         }
 
         // we need to do this in a second pass because some ::Continue may be turned into ::None
@@ -301,6 +300,8 @@ impl GraphStructuring {
                 }
             }
         }
+
+        statements
     }
     pub fn debug_scopes(
         &self,

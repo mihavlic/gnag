@@ -916,18 +916,6 @@ pub trait RecoverMethod {
     fn recover(&self, p: &mut Parser);
 }
 
-pub struct RecoverUntil<'a>(&'a [TreeKind]);
-impl<'a> RecoverMethod for RecoverUntil<'a> {
-    #[cold]
-    fn recover(&self, p: &mut Parser) {
-        let m = p.open();
-        while !(p.eof() || p.at_any(self.0)) {
-            p.advance()
-        }
-        p.close_with_err(m, "Recover until");
-    }
-}
-
 pub struct StepRecoverUntil<'a>(&'a [TreeKind]);
 impl<'a> RecoverMethod for StepRecoverUntil<'a> {
     #[cold]

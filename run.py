@@ -22,9 +22,17 @@ args = sys.argv[1:]
 
 dot = '--dot' in args
 watch = '--watch' in args
+release = '--release' in args
 
 if watch:
     args.remove('--watch')
+
+if release:
+    args.remove('--release')
+
+if "--repeats" in args:
+    print("--repeats is used, suppressing errors", file=sys.stderr)
+    args += ['--errors', 'off']
 
 files = [x for x in args if not x.startswith('--')]
 
@@ -39,7 +47,13 @@ try:
     while True:
         if should_run:
             should_run = False
-            process = subprocess.run(["cargo", "run", "--bin", "dump", "--"] + args, capture_output=dot)
+            command = ["cargo", "run", "--quiet", "--bin", "dump"]
+            
+            if release:
+                command += ['--release']
+
+            process = subprocess.run(command + ["--"] + args, capture_output=dot)
+            
             if dot:
                 sys.stderr.buffer.write(process.stderr)
                 sys.stderr.flush()

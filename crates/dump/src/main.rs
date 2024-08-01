@@ -107,12 +107,19 @@ impl Display for UnitPrinter {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ErrorReporting {
+    On,
+    Eager,
+    Off,
+}
+
 pub struct PhaseRunner<'a, 'b, 'c> {
     src: &'a str,
     file: &'b Path,
     err: &'c ErrorAccumulator,
     linemap: LineMap,
-    eager_errors: bool,
+    errors: ErrorReporting,
     do_bench: bool,
     bytes: usize,
     iters: u32,
@@ -123,7 +130,7 @@ impl<'a, 'b, 'c> PhaseRunner<'a, 'b, 'c> {
         src: &'a str,
         file: &'b Path,
         err: &'c ErrorAccumulator,
-        eager_errors: bool,
+        errors: ErrorReporting,
         do_bench: bool,
         iters: u32,
     ) -> PhaseRunner<'a, 'b, 'c> {
@@ -133,7 +140,7 @@ impl<'a, 'b, 'c> PhaseRunner<'a, 'b, 'c> {
             err,
             file,
             linemap: LineMap::new(src),
-            eager_errors,
+            errors,
             do_bench,
             bytes: src.len(),
             iters,
@@ -159,13 +166,17 @@ impl<'a, 'b, 'c> PhaseRunner<'a, 'b, 'c> {
         if self.do_bench {
             eprintln!("{name}\t {time}\t {throughput}/s");
         }
-        if self.eager_errors {
+        if self.errors == ErrorReporting::Eager {
             self.report_errors();
         }
 
         output
     }
     pub fn report_errors(&self) {
+        if self.errors == ErrorReporting::Off {
+            return;
+        }
+
         let file = self.file.display();
         for e in self.err.get().iter() {
             let Utf16Pos { line, character } = self.linemap.offset_to_utf16(self.src, e.span.start);
@@ -190,7 +201,7 @@ fn run() -> Result<(), ()> {
     let mut do_file = false;
     let mut no_format = false;
 
-    let mut eager_errors = false;
+    let mut errors = ErrorReporting::On;
 
     let mut do_bench = false;
     let mut bench_iters = 1;
@@ -211,7 +222,14 @@ fn run() -> Result<(), ()> {
             "--no-optimize" => no_optimize = true,
             "--file" => do_file = true,
             "--no-format" => no_format = true,
-            "--eager-errors" => eager_errors = true,
+            "--errors" => {
+                let next = iter.next().expect("Expected argument");
+                match next {
+                    "eager" => errors = ErrorReporting::Eager,
+                    "off" => errors = ErrorReporting::Off,
+                    _ => panic!("Unexpected argument to --errors"),
+                }
+            }
             "--bench" => do_bench = true,
             "--iters" => {
                 bench_iters = iter
@@ -230,8 +248,6 @@ fn run() -> Result<(), ()> {
             _ => files.push(arg),
         }
     }
-
-    let none_enabled = files.len() == args.len();
 
     match files.len() {
         0 => {
@@ -261,7 +277,7 @@ fn run() -> Result<(), ()> {
 
     let err = ErrorAccumulator::new();
 
-    let runner = PhaseRunner::new(&src, file, &err, eager_errors, do_bench, bench_iters);
+    let runner = PhaseRunner::new(&src, file, &err, errors, do_bench, bench_iters);
 
     let parsed = runner.run("parse", || ParsedFile::new(&src, &err));
     let converted = runner.run("convert", || ConvertedFile::new(&src, &err, &parsed));
@@ -273,12 +289,12 @@ fn run() -> Result<(), ()> {
 
     runner.report_errors();
 
-    if do_ast || none_enabled {
+    if do_ast {
         let string = parsed.root.pretty_print_with_file(&src, &parsed);
         println!("{string}");
     }
 
-    if do_converted || none_enabled {
+    if do_converted {
         for (handle, rule) in converted.rules.iter_kv() {
             println!("\nrule {}:", handle.name(&converted),);
             rule.body
@@ -294,7 +310,7 @@ fn run() -> Result<(), ()> {
         }
     }
 
-    if do_lowered || none_enabled {
+    if do_lowered {
         for (handle, rule) in lowered.rules.iter_kv() {
             println!("\nrule {}:", handle.name(&converted));
             rule.display_with_indent(&mut StdoutSink, 1, &converted);
@@ -302,7 +318,7 @@ fn run() -> Result<(), ()> {
         println!();
     }
 
-    if do_dot || none_enabled {
+    if do_dot {
         let mut offset = 0;
         println!("digraph G {{");
         for (handle, graph) in compiled.rules.iter_kv() {
@@ -320,7 +336,7 @@ fn run() -> Result<(), ()> {
         println!("}}\n");
     }
 
-    if do_statements || none_enabled {
+    if do_statements {
         for (handle, graph) in compiled.rules.iter_kv() {
             println!("rule {}", handle.name(&converted));
             debug_statements(&graph.nodes, &mut StdoutSink, &converted);
@@ -332,7 +348,7 @@ fn run() -> Result<(), ()> {
         .rules
         .map_ref(|graph| GraphStructuring::new(&graph.nodes));
 
-    if do_scopes || none_enabled {
+    if do_scopes {
         for ((_, structuring), graph) in structures.iter_kv().zip(compiled.rules.iter()) {
             structuring.debug_scopes(&mut StdoutSink, &graph.nodes, &converted);
 
@@ -340,7 +356,7 @@ fn run() -> Result<(), ()> {
         }
     }
 
-    if do_code || none_enabled {
+    if do_code {
         for ((handle, structuring), graph) in structures.iter_kv().zip(compiled.rules.iter()) {
             print!("rule {} ", handle.name(&converted));
 
@@ -351,7 +367,7 @@ fn run() -> Result<(), ()> {
         }
     }
 
-    if do_file || none_enabled {
+    if do_file {
         let mut buffer = String::new();
         code.display(&mut buffer);
 

@@ -189,7 +189,9 @@ impl<'a> GraphBuilder<'a> {
         let mut deleted = HandleBitset::new();
         self.merge_state_resets(entry, &mut deleted);
         entry = self.apply_deletes(entry, &deleted)?;
-        Some(self.reorder(entry))
+        entry = self.reorder(entry);
+
+        Some(entry)
     }
     pub fn get_node(&self, node: NodeHandle) -> Option<&PegNode> {
         self.nodes.get(node)

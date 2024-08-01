@@ -396,7 +396,7 @@ impl CodeFile {
             constant.type_.display(buf, self);
             write!(buf, " = ");
             constant.value.display(buf, self, None);
-            write!(buf, ";");
+            write!(buf, ";\n");
         }
 
         for (handle, function) in self.functions.iter_kv() {
@@ -451,7 +451,7 @@ impl CodeFile {
                 if !is_block {
                     write!(buf, " {{\n");
                 }
-                body.expr.display(buf, self, Some(body));
+                body.expr.display(buf, self, Some(function));
                 if !is_block {
                     write!(buf, "\n}}");
                 }
@@ -803,7 +803,7 @@ impl Expression {
         &self,
         buf: &mut dyn std::fmt::Write,
         module: &CodeFile,
-        function: Option<&FunctionBody>,
+        function: Option<&Function>,
     ) {
         fn display_block(
             label: Option<BlockLabel>,
@@ -813,7 +813,7 @@ impl Expression {
             buf: &mut dyn std::fmt::Write,
             // cx: &CodeFileCx,
             module: &CodeFile,
-            function: Option<&FunctionBody>,
+            function: Option<&Function>,
         ) {
             if let Some(label) = label {
                 write!(buf, "'b{}: ", label.index());
@@ -859,7 +859,7 @@ impl Expression {
             expr: &Expression,
             buf: &mut dyn std::fmt::Write,
             module: &CodeFile,
-            function: Option<&FunctionBody>,
+            function: Option<&Function>,
         ) {
             let need_parens = matches!(expr, Expression::Binary { .. } | Expression::Unary { .. });
             if need_parens {
@@ -881,9 +881,13 @@ impl Expression {
             Expression::Call { handle, arguments } => {
                 let name = handle.name(module);
                 write!(buf, "{name}(");
+                let mut first = true;
                 for a in arguments {
+                    if !first {
+                        write!(buf, ", ");
+                    }
+                    first = false;
                     a.display(buf, module, function);
-                    write!(buf, ", ");
                 }
                 write!(buf, ")");
             }
@@ -988,7 +992,7 @@ impl Expression {
                 }
             }
             Expression::DeclareVariable { handle, value } => {
-                let (name, type_) = &function.unwrap().variables[*handle];
+                let (name, type_) = function.unwrap().get_variable(*handle);
 
                 write!(buf, "let {name}: ");
                 type_.display(buf, module);
@@ -999,14 +1003,17 @@ impl Expression {
                 }
             }
             Expression::StoreVariable(handle, value) => {
-                write!(buf, "let v{} = ", handle.index());
+                let (name, _) = function.unwrap().get_variable(*handle);
+                write!(buf, "let {name} = ");
                 value.display(buf, module, function);
             }
             Expression::AccessVariable(handle) => {
-                write!(buf, "v{}", handle.index());
+                let (name, _) = function.unwrap().get_variable(*handle);
+                write!(buf, "{name}");
             }
             Expression::AccessArgument(index) => {
-                write!(buf, "argument{index}");
+                let (name, _) = function.unwrap().get_argument(*index);
+                write!(buf, "{name}");
             }
             Expression::FunctionPointer(handle) => {
                 let name = handle.name(module);
@@ -1051,6 +1058,17 @@ pub struct Function {
     pub arguments: Vec<(String, Type)>,
     pub return_type: Type,
     pub body: Option<FunctionBody>,
+}
+
+impl Function {
+    pub fn get_argument(&self, index: u32) -> (&str, &Type) {
+        let (name, ty) = &self.arguments[index as usize];
+        (name.as_str(), ty)
+    }
+    pub fn get_variable(&self, handle: VariableHandle) -> (&str, &Type) {
+        let (name, ty) = &self.body.as_ref().unwrap().variables[handle];
+        (name.as_str(), ty)
+    }
 }
 
 pub struct FunctionBody {
@@ -1265,13 +1283,18 @@ impl GeneratedItems {
         module: &mut CodeFile,
         cx: &CodeFileCx,
     ) -> HandleVec<RuleHandle, FunctionHandle> {
+        let lexer = items.lexer.as_type().to_ref_mut();
+        let parser = items.parser.as_type().to_ref_mut();
+
+        let lexer_arg = ("l", &lexer);
+        let parser_arg = ("p", &parser);
+
         cx.converted.rules.map_ref_with_key(|handle, rule| {
-            let name = match rule.kind {
-                RuleKind::Tokens => "l",
-                RuleKind::Rules => "p",
+            let object = match rule.kind {
+                RuleKind::Tokens => lexer_arg,
+                RuleKind::Rules => parser_arg,
             };
-            let object = items.rule_class_type(rule.kind);
-            let args = [(name, &object), ("min_bp", &Type::U32)];
+            let args = [object, ("min_bp", &Type::U32)];
             let args = match is_pratt_rule.contains(handle) {
                 true => &args[..],
                 false => &args[..1],

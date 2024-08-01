@@ -2,14 +2,17 @@ use gnag::{
     ast::RuleKind,
     ctx::ErrorAccumulator,
     handle::{HandleBitset, HandleVec, SecondaryVec, TypedHandle},
-    simple_handle,
+    simple_handle, StrSpan,
 };
 
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use crate::{
     compile::CompiledFile,
-    convert::{ConvertedFile, RuleHandle},
+    convert::{ConvertedFile, RuleDef, RuleHandle},
     expr::{self, RuleExpr, Transition, TransitionEffects},
     scope_tree::{ScopeKind, ScopeNodeHandle},
     structure::{mark_used_labels, FlowAction, GraphStructuring, Statement},
@@ -20,6 +23,7 @@ simple_handle! {
     pub StructHandle,
     pub EnumHandle,
     pub ForeignTypeHandle,
+    pub ConstantHandle,
 }
 
 impl FunctionHandle {
@@ -33,7 +37,7 @@ impl StructHandle {
         &module.structs[self].name
     }
     pub fn as_type(self) -> Type {
-        Type::Item(ItemType::Struct(self))
+        Type::Item(ItemHandle::Struct(self))
     }
 }
 
@@ -42,7 +46,7 @@ impl EnumHandle {
         &module.enums[self].name
     }
     pub fn as_type(self) -> Type {
-        Type::Item(ItemType::Enum(self))
+        Type::Item(ItemHandle::Enum(self))
     }
 }
 
@@ -51,24 +55,37 @@ impl ForeignTypeHandle {
         &module.foreign_types[self].name
     }
     pub fn as_type(self) -> Type {
-        Type::Item(ItemType::Foreign(self))
+        Type::Item(ItemHandle::Foreign(self))
     }
 }
 
-pub struct InitialItems {
-    pub lexer: Type,
-    pub parser: Type,
+impl ConstantHandle {
+    pub fn name(self, module: &CodeFile) -> &str {
+        &module.constants[self].name
+    }
+    pub fn as_type(self) -> Type {
+        Type::Item(ItemHandle::Constant(self))
+    }
+}
+
+pub struct ForeignItems {
+    pub lexer: ForeignTypeHandle,
+    pub parser: ForeignTypeHandle,
+
+    pub language_nodes: StructHandle,
+    pub language: StructHandle,
+
+    pub span_start: ForeignTypeHandle,
     pub lexer_position: ForeignTypeHandle,
     pub parser_position: ForeignTypeHandle,
 
-    pub tree_kind: EnumHandle,
-    pub tree_kind_name: FunctionHandle,
-    pub tree_kind_is_skip: FunctionHandle,
-    pub tree_kind_is_token: FunctionHandle,
+    pub node_event: ForeignTypeHandle,
+    pub node_kind: ForeignTypeHandle,
+    pub node_kind_new: FunctionHandle,
 
     pub lexer_save_position: FunctionHandle,
     pub lexer_restore_position: FunctionHandle,
-    pub lexer_close_span: FunctionHandle,
+    pub lexer_finish_token: FunctionHandle,
 
     pub lexer_bytes: FunctionHandle,
     pub lexer_set: FunctionHandle,
@@ -78,6 +95,7 @@ pub struct InitialItems {
 
     pub parser_save_position: FunctionHandle,
     pub parser_restore_position: FunctionHandle,
+    pub parser_open_span: FunctionHandle,
     pub parser_close_span: FunctionHandle,
 
     pub parser_token: FunctionHandle,
@@ -85,45 +103,70 @@ pub struct InitialItems {
     pub parser_not: FunctionHandle,
 }
 
-impl InitialItems {
-    pub fn register(module: &mut CodeFile, cx: &CodeFileCx) -> InitialItems {
-        let lexer = module.register_foreign_type("Lexer").as_type().ref_mut_of();
-        let parser = module
-            .register_foreign_type("Parser")
-            .as_type()
-            .ref_mut_of();
+impl ForeignItems {
+    pub fn register(module: &mut CodeFile) -> ForeignItems {
+        let lexer = module.register_foreign_type("Lexer");
+        let parser = module.register_foreign_type("Parser");
 
+        let lexer_ref = lexer.as_type().clone().to_ref();
+        let lexer_mut = lexer.as_type().clone().to_ref_mut();
+        let parser_ref = parser.as_type().clone().to_ref();
+        let parser_mut = parser.as_type().clone().to_ref_mut();
+
+        let language_nodes = module.register_struct(
+            "LanguageNodes",
+            &[
+                ("skip_bound", &Type::U16),
+                ("token_bound", &Type::U16),
+                ("total_bound", &Type::U16),
+                (
+                    "names",
+                    &Type::Str.to_static_ref().to_slice().to_static_ref(),
+                ),
+            ],
+        );
+        let language = module.register_struct(
+            "Language",
+            &[
+                (
+                    "lexer_entry",
+                    &Type::FunctionPointer(std::slice::from_ref(&lexer_mut).into()),
+                ),
+                (
+                    "parser_entry",
+                    &Type::FunctionPointer(std::slice::from_ref(&parser_mut).into()),
+                ),
+                ("nodes", &language_nodes.as_type()),
+            ],
+        );
+
+        let span_start = module.register_foreign_type("SpanStart");
         let lexer_position = module.register_foreign_type("LexerPosition");
         let parser_position = module.register_foreign_type("ParserPosition");
-        let tree_kind = Self::register_tree_kind("TreeKind", module, cx);
 
-        let lexer_arg = ("self", &lexer);
-        let parser_arg = ("self", &parser);
+        let node_event = module.register_foreign_type("NodeEvent");
+        let node_kind = module.register_foreign_type("NodeKind");
+        let node_kind_new =
+            module.declare_function("NodeKind::new", &[("raw", &Type::U16)], node_kind);
+
+        let lexer_arg = ("self", &lexer_ref);
+        let lexer_mut_arg = ("self", &lexer_mut);
+        let parser_arg = ("self", &parser_ref);
+        let parser_mut_arg = ("self", &parser_mut);
+        let span_start_arg = ("start", &span_start.as_type());
         let lexer_position_arg = ("position", &lexer_position.as_type());
         let parser_position_arg = ("position", &parser_position.as_type());
-        let token_arg = ("token", &tree_kind.as_type());
-        let bytes_arg = ("bytes", &Type::Bytes);
+        let token_arg = ("kind", &node_kind.as_type());
 
-        InitialItems {
-            tree_kind,
-            tree_kind_name: module.register_function(
-                "tree_kind_name",
-                &[("self", tree_kind.into())],
-                Type::String,
-                Self::name_of_variant_function_body(tree_kind, &module),
-            ),
-            tree_kind_is_skip: module.register_function(
-                "tree_kind_name",
-                &[("self", tree_kind.into())],
-                Type::String,
-                Self::name_of_variant_function_body(tree_kind, &module),
-            ),
-            tree_kind_is_token: module.register_function(
-                "tree_kind_name",
-                &[("self", tree_kind.into())],
-                Type::String,
-                Self::name_of_variant_function_body(tree_kind, &module),
-            ),
+        let bytes_arg = ("bytes", &Type::U8.to_slice().to_ref());
+
+        ForeignItems {
+            node_event,
+            node_kind,
+            node_kind_new,
+            language,
+            language_nodes,
+
             lexer_save_position: module.declare_function(
                 "save_position",
                 &[lexer_arg],
@@ -131,91 +174,65 @@ impl InitialItems {
             ),
             lexer_restore_position: module.declare_function(
                 "restore_position",
-                &[lexer_arg, lexer_position_arg],
+                &[lexer_mut_arg, lexer_position_arg],
                 Type::Unit,
             ),
-            lexer_close_span: module.declare_function(
-                "close_span",
-                &[lexer_arg, lexer_position_arg],
-                Type::Unit,
+            lexer_finish_token: module.declare_function(
+                "finish_token",
+                &[lexer_mut_arg, token_arg],
+                span_start.as_type(),
             ),
 
-            lexer_bytes: module.declare_function("bytes", &[lexer_arg, bytes_arg], Type::Bool),
-            lexer_set: module.declare_function("set", &[lexer_arg, bytes_arg], Type::Bool),
-            lexer_keyword: module.declare_function("keyword", &[lexer_arg, bytes_arg], Type::Bool),
-            lexer_any: module.declare_function("any", &[lexer_arg], Type::Bool),
-            lexer_not: module.declare_function("not", &[lexer_arg], Type::Bool),
+            lexer_bytes: module.declare_function("bytes", &[lexer_mut_arg, bytes_arg], Type::Bool),
+            lexer_set: module.declare_function("set", &[lexer_mut_arg, bytes_arg], Type::Bool),
+            lexer_keyword: module.declare_function(
+                "keyword",
+                &[lexer_mut_arg, bytes_arg],
+                Type::Bool,
+            ),
+            lexer_any: module.declare_function("any", &[lexer_mut_arg], Type::Bool),
+            lexer_not: module.declare_function("not", &[lexer_mut_arg], Type::Bool),
+
             parser_save_position: module.declare_function(
                 "save_position",
                 &[parser_arg],
                 parser_position,
             ),
-
             parser_restore_position: module.declare_function(
                 "restore_position",
-                &[parser_arg, parser_position_arg],
+                &[parser_mut_arg, parser_position_arg],
                 Type::Unit,
+            ),
+            parser_open_span: module.declare_function(
+                "open_span",
+                &[parser_mut_arg],
+                span_start.as_type(),
             ),
             parser_close_span: module.declare_function(
                 "close_span",
-                &[parser_arg, parser_position_arg],
+                &[parser_mut_arg, span_start_arg],
                 Type::Unit,
             ),
-            parser_token: module.declare_function("token", &[parser_arg, token_arg], Type::Bool),
-            parser_any: module.declare_function("any", &[parser_arg], Type::Bool),
-            parser_not: module.declare_function("not", &[parser_arg, token_arg], Type::Bool),
+            parser_token: module.declare_function(
+                "token",
+                &[parser_mut_arg, token_arg],
+                Type::Bool,
+            ),
+            parser_any: module.declare_function("any", &[parser_mut_arg], Type::Bool),
+            parser_not: module.declare_function("not", &[parser_mut_arg, token_arg], Type::Bool),
 
             lexer,
             parser,
+            span_start,
             lexer_position,
             parser_position,
         }
     }
-    pub fn register_tree_kind(name: &str, module: &mut CodeFile, cx: &CodeFileCx) -> EnumHandle {
-        let mut variants = cx
-            .rule_to_tree_kind_value
-            .iter_kv()
-            .map(|(rule, enum_value)| (rule.name(&cx.converted).to_owned(), *enum_value as usize))
-            .collect::<Vec<_>>();
 
-        variants.sort_by_key(|(_, value)| *value);
-
-        module.enums.push(Enum {
-            name: name.into(),
-            variants,
-        })
-    }
-    pub fn name_of_variant_function_body(handle: EnumHandle, module: &CodeFile) -> FunctionBody {
-        let item = &module.enums[handle];
-        let branches = item
-            .variants
-            .iter()
-            .enumerate()
-            .map(|(variant_index, (name, _))| {
-                let pattern = Value::EnumVariant(handle, variant_index as u32);
-                let name = Expression::Value(Value::String(name.as_str().into()));
-                (pattern, name)
-            })
-            .collect();
-
-        let expression = Expression::Match {
-            condition: Box::new(Expression::AccessArgument(0)),
-            branches,
-            default: Some(Box::new(Expression::Value(Value::String(
-                "__unknown".into(),
-            )))),
-        };
-
-        FunctionBody {
-            variables: HandleVec::new(),
-            expr: expression,
-        }
-    }
-
-    pub fn rule_class_type(&self, kind: RuleKind) -> &Type {
+    pub fn rule_class_type(&self, kind: RuleKind) -> Type {
         match kind {
-            RuleKind::Tokens => &self.lexer,
-            RuleKind::Rules => &self.parser,
+            RuleKind::Tokens => self.lexer.as_type(),
+            RuleKind::Rules => self.parser.as_type(),
         }
     }
 }
@@ -224,9 +241,6 @@ pub struct CodeFileCx<'a, 'b, 'c> {
     pub err: &'a ErrorAccumulator,
     pub converted: &'b ConvertedFile,
     pub compiled: &'c CompiledFile,
-    pub skip_tokens_bound: u16,
-    pub tokens_bound: u16,
-    pub rule_to_tree_kind_value: SecondaryVec<RuleHandle, u32>,
 }
 
 impl<'a, 'b, 'c> CodeFileCx<'a, 'b, 'c> {
@@ -235,56 +249,11 @@ impl<'a, 'b, 'c> CodeFileCx<'a, 'b, 'c> {
         converted: &'b ConvertedFile,
         compiled: &'c CompiledFile,
     ) -> CodeFileCx<'a, 'b, 'c> {
-        let (skip_tokens_bound, tokens_bound, collected) = Self::make_tree_kind(converted);
-
         Self {
             err,
             converted,
             compiled,
-            skip_tokens_bound,
-            tokens_bound,
-            rule_to_tree_kind_value: collected,
         }
-    }
-    fn make_tree_kind(converted: &ConvertedFile) -> (u16, u16, SecondaryVec<RuleHandle, u32>) {
-        // first collect all rules which need handles
-        let mut rules = converted
-            .rules
-            .iter_kv()
-            .filter_map(|(handle, rule)| {
-                if Some(handle) == converted.lexer {
-                    return None;
-                }
-                Some((
-                    rule.kind == RuleKind::Rules,
-                    !rule.body.attributes.skip,
-                    handle,
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        // do a sort so that token rules are first
-        // we can do an unstable sort because all items are distinct due to RuleHandle
-        rules.sort_unstable();
-
-        let skip_tokens_count = rules
-            .partition_point(|(_, not_skip, _)| !not_skip)
-            .try_into()
-            .unwrap();
-
-        let tokens_count = rules
-            .partition_point(|(is_rules, _, _)| *is_rules)
-            .try_into()
-            .unwrap();
-
-        let mut collected_rules = SecondaryVec::with_capacity(converted.rules.len());
-
-        for (index, (.., rule)) in rules.iter().copied().enumerate() {
-            let index: u32 = index.try_into().unwrap();
-            collected_rules.insert(rule, index);
-        }
-
-        (skip_tokens_count, tokens_count, collected_rules)
     }
 }
 
@@ -294,6 +263,9 @@ pub struct CodeFile {
     pub structs: HandleVec<StructHandle, Struct>,
     pub enums: HandleVec<EnumHandle, Enum>,
     pub foreign_types: HandleVec<ForeignTypeHandle, ForeignType>,
+    pub constants: HandleVec<ConstantHandle, Constant>,
+
+    pub supressed_items: HashSet<ItemHandle>,
 }
 
 impl CodeFile {
@@ -306,10 +278,11 @@ impl CodeFile {
         compiled: &CompiledFile,
     ) -> CodeFile {
         let mut this = Self::empty();
-        let cx = CodeFileCx::new(err, converted, compiled);
 
-        let items = InitialItems::register(&mut this, &cx);
-        RuleToFunctionBuilder::register(&mut this, &items, &cx);
+        let items = ForeignItems::register(&mut this);
+
+        let cx = CodeFileCx::new(err, converted, compiled);
+        GeneratedItems::register(&mut this, &items, &cx);
 
         this
     }
@@ -366,18 +339,71 @@ impl CodeFile {
             body: None,
         })
     }
+    pub fn function_add_body(&mut self, function: FunctionHandle, body: FunctionBody) {
+        let fun = &mut self.functions[function];
+        assert!(fun.body.is_none());
+        fun.body = Some(body);
+    }
+    pub fn register_struct(
+        &mut self,
+        name: impl Into<String>,
+        fields: &[(&str, &Type)],
+    ) -> StructHandle {
+        let fields = fields
+            .into_iter()
+            .copied()
+            .map(|(a, b)| (a.to_string(), b.clone()))
+            .collect();
+
+        self.structs.push(Struct {
+            name: name.into(),
+            fields,
+        })
+    }
     pub fn register_foreign_type(&mut self, name: impl Into<String>) -> ForeignTypeHandle {
         self.foreign_types.push(ForeignType { name: name.into() })
+    }
+    pub fn register_constant(
+        &mut self,
+        name: impl Into<String>,
+        type_: impl Into<Type>,
+        value: Expression,
+    ) -> ConstantHandle {
+        self.constants.push(Constant {
+            name: name.into(),
+            type_: type_.into(),
+            value,
+        })
+    }
+    pub fn supress_item(&mut self, item: ItemHandle) {
+        self.supressed_items.insert(item);
     }
 
     #[allow(unused_must_use)]
     pub fn display(&self, buf: &mut dyn std::fmt::Write) {
-        for body in &self.foreign_types {
+        for (handle, body) in self.foreign_types.iter_kv() {
+            if self.supressed_items.contains(&ItemHandle::from(handle)) {
+                continue;
+            }
+
             let name = &body.name;
             writeln!(buf, "/// extern type {name}");
         }
 
-        for function in &self.functions {
+        for (_, constant) in self.constants.iter_kv() {
+            let name = &constant.name;
+            write!(buf, "pub const {name}: ");
+            constant.type_.display(buf, self);
+            write!(buf, " = ");
+            constant.value.display(buf, self, None);
+            write!(buf, ";");
+        }
+
+        for (handle, function) in self.functions.iter_kv() {
+            if self.supressed_items.contains(&ItemHandle::from(handle)) {
+                continue;
+            }
+
             if function.body.is_none() {
                 write!(buf, "/// extern ");
                 self.display_function(buf, function);
@@ -385,7 +411,11 @@ impl CodeFile {
             }
         }
 
-        for body in &self.structs {
+        for (handle, body) in self.structs.iter_kv() {
+            if self.supressed_items.contains(&ItemHandle::from(handle)) {
+                continue;
+            }
+
             let name = &body.name;
             write!(buf, "pub struct {name} {{\n");
             for (name, _type) in &body.fields {
@@ -396,7 +426,11 @@ impl CodeFile {
             write!(buf, "}}\n");
         }
 
-        for body in &self.enums {
+        for (handle, body) in self.enums.iter_kv() {
+            if self.supressed_items.contains(&ItemHandle::from(handle)) {
+                continue;
+            }
+
             let name = &body.name;
             write!(buf, "pub enum {name} {{\n",);
             for (name, value) in &body.variants {
@@ -405,7 +439,11 @@ impl CodeFile {
             write!(buf, "}}\n");
         }
 
-        for function in &self.functions {
+        for (handle, function) in self.functions.iter_kv() {
+            if self.supressed_items.contains(&ItemHandle::from(handle)) {
+                continue;
+            }
+
             if let Some(body) = &function.body {
                 write!(buf, "pub ");
                 self.display_function(buf, function);
@@ -442,19 +480,50 @@ impl CodeFile {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ItemType {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ItemHandle {
     Struct(StructHandle),
     Enum(EnumHandle),
     Foreign(ForeignTypeHandle),
+    Constant(ConstantHandle),
+    Function(FunctionHandle),
 }
 
-impl ItemType {
+impl From<StructHandle> for ItemHandle {
+    fn from(value: StructHandle) -> Self {
+        Self::Struct(value)
+    }
+}
+impl From<EnumHandle> for ItemHandle {
+    fn from(value: EnumHandle) -> Self {
+        Self::Enum(value)
+    }
+}
+impl From<ForeignTypeHandle> for ItemHandle {
+    fn from(value: ForeignTypeHandle) -> Self {
+        Self::Foreign(value)
+    }
+}
+impl From<ConstantHandle> for ItemHandle {
+    fn from(value: ConstantHandle) -> Self {
+        Self::Constant(value)
+    }
+}
+
+impl From<FunctionHandle> for ItemHandle {
+    fn from(value: FunctionHandle) -> Self {
+        Self::Function(value)
+    }
+}
+
+impl ItemHandle {
     pub fn name(self, module: &CodeFile) -> &str {
         match self {
-            ItemType::Struct(a) => a.name(module),
-            ItemType::Enum(a) => a.name(module),
-            ItemType::Foreign(a) => a.name(module),
+            ItemHandle::Struct(a) => a.name(module),
+            ItemHandle::Enum(a) => a.name(module),
+            ItemHandle::Foreign(a) => a.name(module),
+            ItemHandle::Constant(a) => a.name(module),
+            ItemHandle::Function(a) => a.name(module),
         }
     }
 }
@@ -470,12 +539,14 @@ pub enum Type {
     I16,
     I32,
     I64,
-    Bytes,
-    String,
+    Str,
     Unit,
-    Item(ItemType),
+    Item(ItemHandle),
+    StaticRef(Box<Type>),
     Ref(Box<Type>),
     RefMut(Box<Type>),
+    FunctionPointer(Box<[Type]>),
+    Slice(Box<Type>),
 }
 
 impl Type {
@@ -491,8 +562,7 @@ impl Type {
             Type::I16 => "i16",
             Type::I32 => "i32",
             Type::I64 => "i64",
-            Type::Bytes => "&[u8]",
-            Type::String => "&str",
+            Type::Str => "str",
             Type::Unit => "()",
             Type::Item(item) => item.name(module),
             Type::Ref(inner) => {
@@ -505,14 +575,44 @@ impl Type {
                 inner.display(buf, module);
                 return;
             }
+            Type::FunctionPointer(args) => {
+                write!(buf, "fn(");
+                let mut first = true;
+                for arg in args.iter() {
+                    if !first {
+                        write!(buf, ", ");
+                    }
+                    first = true;
+                    arg.display(buf, module);
+                }
+                write!(buf, ")");
+                return;
+            }
+            Type::StaticRef(inner) => {
+                write!(buf, "&'static ");
+                inner.display(buf, module);
+                return;
+            }
+            Type::Slice(inner) => {
+                write!(buf, "[");
+                inner.display(buf, module);
+                write!(buf, "]");
+                return;
+            }
         };
         write!(buf, "{name}");
     }
-    pub fn ref_of(self) -> Type {
+    pub fn to_ref(self) -> Type {
         Type::Ref(Box::new(self))
     }
-    pub fn ref_mut_of(self) -> Type {
+    pub fn to_static_ref(self) -> Type {
+        Type::StaticRef(Box::new(self))
+    }
+    pub fn to_ref_mut(self) -> Type {
         Type::RefMut(Box::new(self))
+    }
+    pub fn to_slice(self) -> Type {
+        Type::Slice(Box::new(self))
     }
 }
 
@@ -520,24 +620,24 @@ impl Type {
 // which cannot be inferred
 impl From<StructHandle> for Type {
     fn from(value: StructHandle) -> Self {
-        Type::Item(ItemType::Struct(value))
+        Type::Item(ItemHandle::Struct(value))
     }
 }
 
 impl From<EnumHandle> for Type {
     fn from(value: EnumHandle) -> Self {
-        Type::Item(ItemType::Enum(value))
+        Type::Item(ItemHandle::Enum(value))
     }
 }
 
 impl From<ForeignTypeHandle> for Type {
     fn from(value: ForeignTypeHandle) -> Self {
-        Type::Item(ItemType::Foreign(value))
+        Type::Item(ItemHandle::Foreign(value))
     }
 }
 
-impl From<ItemType> for Type {
-    fn from(value: ItemType) -> Self {
+impl From<ItemHandle> for Type {
+    fn from(value: ItemHandle) -> Self {
         Self::Item(value)
     }
 }
@@ -555,7 +655,7 @@ pub enum Value {
     I64(i64),
     EnumVariant(EnumHandle, u32),
     Bytes(Rc<[u8]>),
-    String(Rc<str>),
+    Str(Rc<str>),
     Unit,
 }
 
@@ -577,7 +677,7 @@ impl Value {
                 let (variant, _) = &module.enums[*a].variants[*index as usize];
                 write!(buf, "{name}::{variant}")
             }
-            Value::String(a) => {
+            Value::Str(a) => {
                 let deref: &str = &*a;
                 write!(buf, "{:?}", deref)
             }
@@ -633,6 +733,8 @@ pub enum BinaryOp {
 #[derive(Clone, Debug)]
 pub enum UnaryOp {
     Negate,
+    Ref,
+    RefMut,
 }
 
 #[derive(Clone, Debug)]
@@ -680,6 +782,13 @@ pub enum Expression {
     StoreVariable(VariableHandle, Box<Expression>),
     AccessVariable(VariableHandle),
     AccessArgument(u32),
+    Constant(ConstantHandle),
+    FunctionPointer(FunctionHandle),
+    RecordLiteral {
+        type_: ItemHandle,
+        fields: Vec<Expression>,
+    },
+    ArrayLiteral(Vec<Expression>),
 }
 
 impl From<Value> for Expression {
@@ -859,6 +968,8 @@ impl Expression {
             Expression::Unary { op, expr } => {
                 let op = match op {
                     UnaryOp::Negate => "!",
+                    UnaryOp::Ref => "&",
+                    UnaryOp::RefMut => "&mut ",
                 };
                 write!(buf, "{op}");
                 display_in_parens(expr, buf, module, function);
@@ -897,6 +1008,40 @@ impl Expression {
             Expression::AccessArgument(index) => {
                 write!(buf, "argument{index}");
             }
+            Expression::FunctionPointer(handle) => {
+                let name = handle.name(module);
+                write!(buf, "{name}");
+            }
+            Expression::RecordLiteral { type_, fields } => {
+                let ItemHandle::Struct(handle) = *type_ else {
+                    panic!("Expected struct");
+                };
+
+                let name = handle.name(module);
+                let body = &module.structs[handle];
+
+                assert!(body.fields.len() == fields.len());
+
+                write!(buf, "{name} {{\n");
+                for ((name, _), value) in body.fields.iter().zip(fields) {
+                    write!(buf, "  {name}: ");
+                    value.display(buf, module, function);
+                    write!(buf, ",\n");
+                }
+                write!(buf, "}}");
+            }
+            Expression::Constant(handle) => {
+                let name = handle.name(module);
+                write!(buf, "{name}");
+            }
+            Expression::ArrayLiteral(elements) => {
+                write!(buf, "[\n");
+                for expr in elements {
+                    expr.display(buf, module, function);
+                    write!(buf, ",\n");
+                }
+                write!(buf, "]");
+            }
         }
     }
 }
@@ -925,6 +1070,12 @@ pub struct Enum {
 
 pub struct ForeignType {
     pub name: String,
+}
+
+pub struct Constant {
+    pub name: String,
+    pub type_: Type,
+    pub value: Expression,
 }
 
 #[derive(Default)]
@@ -957,40 +1108,162 @@ impl RemapHandles {
     }
 }
 
-#[derive(Default)]
-struct RuleToFunctionBuilder {
+struct GeneratedItems {
+    #[allow(unused)]
+    language_entrypoint: ConstantHandle,
     is_pratt_rule: HandleBitset<RuleHandle>,
-    function_handles: HandleVec<RuleHandle, FunctionHandle>,
-    // per-function data
-    variables: HandleVec<VariableHandle, (String, Type)>,
-    sparse_variables: HashMap<expr::VariableHandle, VariableHandle>,
-    compact_scopes: RemapHandles,
-    scope_statements: Vec<Expression>,
+    rule_to_function: HandleVec<RuleHandle, FunctionHandle>,
+    rule_to_tree_kind_value: HandleVec<RuleHandle, ConstantHandle>,
 }
 
-impl RuleToFunctionBuilder {
-    fn register(module: &mut CodeFile, items: &InitialItems, cx: &CodeFileCx) {
-        let is_pratt_rule = Self::make_is_pratt(cx.converted);
+impl RuleBuilder {
+    pub fn clear(&mut self) {
+        self.variables.clear();
+        self.sparse_variables.clear();
+        self.compact_scopes.clear();
+        self.scope_statements.clear();
+    }
+}
 
-        let mut this = Self {
-            function_handles: Self::declare_functions(&is_pratt_rule, cx, items, module),
-            is_pratt_rule,
-            ..Default::default()
-        };
+impl GeneratedItems {
+    fn register(module: &mut CodeFile, items: &ForeignItems, cx: &CodeFileCx) {
+        let this = GeneratedItems::new(items, module, cx);
+        let mut builder = RuleBuilder::default();
 
         for handle in cx.compiled.rules.iter_keys() {
-            let body = this.convert_rule(handle, items, cx);
-
-            let reserved = this.function_handles[handle];
-            let function = &mut module.functions[reserved];
-            function.body = Some(body);
+            let body = builder.convert_rule(handle, items, &this, cx);
+            let reserved = this.rule_to_function[handle];
+            module.function_add_body(reserved, body);
         }
+    }
+    fn new(items: &ForeignItems, module: &mut CodeFile, cx: &CodeFileCx) -> GeneratedItems {
+        let is_pratt_rule = Self::make_is_pratt(cx.converted);
+
+        let rule_to_function = Self::declare_functions(&is_pratt_rule, items, module, cx);
+
+        let (language_entrypoint, rule_to_tree_kind_value) =
+            Self::make_node_kind_constants(&rule_to_function, items, module, cx);
+
+        Self {
+            rule_to_function,
+            is_pratt_rule,
+            rule_to_tree_kind_value,
+            language_entrypoint,
+        }
+    }
+    fn make_node_kind_constants(
+        rule_to_function: &HandleVec<RuleHandle, FunctionHandle>,
+        items: &ForeignItems,
+        module: &mut CodeFile,
+        cx: &CodeFileCx,
+    ) -> (ConstantHandle, HandleVec<RuleHandle, ConstantHandle>) {
+        let mut rules = Vec::with_capacity(cx.converted.rules.len());
+
+        let add_filter = |rules: &mut Vec<RuleHandle>, filter: fn(&RuleDef) -> bool| -> u16 {
+            rules.extend(cx.converted.rules.iter_kv().filter_map(|(handle, rule)| {
+                match filter(rule) {
+                    true => Some(handle),
+                    false => None,
+                }
+            }));
+
+            rules.len().try_into().unwrap()
+        };
+
+        let skip_bound = add_filter(&mut rules, |rule| {
+            return rule.kind == RuleKind::Tokens && rule.body.attributes.skip;
+        });
+
+        let token_bound = add_filter(&mut rules, |rule| {
+            return rule.kind == RuleKind::Tokens && !rule.body.attributes.skip;
+        });
+
+        let total_bound = add_filter(&mut rules, |rule| {
+            return rule.kind == RuleKind::Rules;
+        });
+
+        let mut collected_rules = SecondaryVec::with_capacity(cx.converted.rules.len());
+        for (index, handle) in rules.iter().copied().enumerate() {
+            let name = handle.name(cx.converted);
+            // NodeKind must be nonzero so we add 1
+            let value: u16 = (index + 1).try_into().unwrap();
+
+            let constant = module.register_constant(
+                name,
+                items.node_kind,
+                Expression::Call {
+                    handle: items.node_kind_new,
+                    arguments: vec![Value::U16(value).into()],
+                },
+            );
+
+            collected_rules.insert(handle, constant);
+        }
+
+        let rule_to_constant = collected_rules.try_into().unwrap();
+
+        // the Language constant with function pointers to lexer and parser entrypoints
+        let language = {
+            let root_rule = cx
+                .converted
+                .rules
+                .iter_kv()
+                .find(|(_, rule)| rule.body.attributes.root);
+
+            let parser_function = root_rule
+                .map(|(handle, _)| Expression::FunctionPointer(rule_to_function[handle]))
+                .unwrap_or_else(|| {
+                    cx.err.error(StrSpan::empty(), "No @root rule");
+                    Expression::Error
+                });
+
+            let lexer_function = cx
+                .converted
+                .lexer
+                .map(|handle| Expression::FunctionPointer(rule_to_function[handle]))
+                .unwrap_or_else(|| {
+                    cx.err.error(StrSpan::empty(), "No tokens");
+                    Expression::Error
+                });
+
+            // the actual kinds start at 1 because they are using NonZeroU16
+            let mut names = vec![Value::Str("NONE".into()).into()];
+            names.extend(
+                rules
+                    .iter()
+                    .map(|handle| Value::Str(handle.name(cx.converted).into()).into()),
+            );
+
+            let language_nodes = Expression::RecordLiteral {
+                type_: items.language_nodes.into(),
+                fields: vec![
+                    Value::U16(skip_bound).into(),
+                    Value::U16(token_bound).into(),
+                    Value::U16(total_bound).into(),
+                    Expression::Unary {
+                        op: UnaryOp::Ref,
+                        expr: Box::new(Expression::ArrayLiteral(names)),
+                    },
+                ],
+            };
+
+            module.register_constant(
+                "LANGUAGE",
+                items.language,
+                Expression::RecordLiteral {
+                    type_: items.language.into(),
+                    fields: vec![lexer_function, parser_function, language_nodes],
+                },
+            )
+        };
+
+        (language, rule_to_constant)
     }
     fn declare_functions(
         is_pratt_rule: &HandleBitset<RuleHandle>,
-        cx: &CodeFileCx,
-        items: &InitialItems,
+        items: &ForeignItems,
         module: &mut CodeFile,
+        cx: &CodeFileCx,
     ) -> HandleVec<RuleHandle, FunctionHandle> {
         cx.converted.rules.map_ref_with_key(|handle, rule| {
             let name = match rule.kind {
@@ -998,7 +1271,7 @@ impl RuleToFunctionBuilder {
                 RuleKind::Rules => "p",
             };
             let object = items.rule_class_type(rule.kind);
-            let args = [(name, object), ("min_bp", &Type::U32)];
+            let args = [(name, &object), ("min_bp", &Type::U32)];
             let args = match is_pratt_rule.contains(handle) {
                 true => &args[..],
                 false => &args[..1],
@@ -1017,6 +1290,17 @@ impl RuleToFunctionBuilder {
 
         is_pratt_rule
     }
+}
+
+#[derive(Default)]
+struct RuleBuilder {
+    variables: HandleVec<VariableHandle, (String, Type)>,
+    sparse_variables: HashMap<expr::VariableHandle, VariableHandle>,
+    compact_scopes: RemapHandles,
+    scope_statements: Vec<Expression>,
+}
+
+impl RuleBuilder {
     fn add_variable(
         &mut self,
         sparse_handle: expr::VariableHandle,
@@ -1042,13 +1326,11 @@ impl RuleToFunctionBuilder {
     fn convert_rule(
         &mut self,
         handle: RuleHandle,
-        items: &InitialItems,
+        items: &ForeignItems,
+        generated: &GeneratedItems,
         cx: &CodeFileCx,
     ) -> FunctionBody {
-        self.variables.clear();
-        self.sparse_variables.clear();
-        self.compact_scopes.clear();
-        self.scope_statements.clear();
+        self.clear();
 
         let converted_rule = &cx.converted.rules[handle];
         let kind = converted_rule.kind;
@@ -1078,27 +1360,26 @@ impl RuleToFunctionBuilder {
 
                     let (current_scope, ..) = scope_stack.last().unwrap();
 
-                    let convert_action = |builder: &RuleToFunctionBuilder,
-                                          action: FlowAction|
-                     -> Option<Expression> {
-                        match action {
-                            FlowAction::None => None,
-                            FlowAction::Break(_) | FlowAction::Continue(_) => {
-                                let scope = action
-                                    .flow_target_scope_if_needed(current_scope)
-                                    .map(|a| builder.get_scope_label(a));
+                    let convert_action =
+                        |builder: &RuleBuilder, action: FlowAction| -> Option<Expression> {
+                            match action {
+                                FlowAction::None => None,
+                                FlowAction::Break(_) | FlowAction::Continue(_) => {
+                                    let scope = action
+                                        .flow_target_scope_if_needed(current_scope)
+                                        .map(|a| builder.get_scope_label(a));
 
-                                if let FlowAction::Break(_) = action {
-                                    Some(Expression::Break(scope))
-                                } else {
-                                    Some(Expression::Continue(scope))
+                                    if let FlowAction::Break(_) = action {
+                                        Some(Expression::Break(scope))
+                                    } else {
+                                        Some(Expression::Continue(scope))
+                                    }
+                                }
+                                FlowAction::Panic => {
+                                    Some(Expression::Panic("Dangling control flow".into()))
                                 }
                             }
-                            FlowAction::Panic => {
-                                Some(Expression::Panic("Dangling control flow".into()))
-                            }
-                        }
-                    };
+                        };
 
                     if let Transition::Dummy(should_succeed) = transition {
                         let action = match should_succeed {
@@ -1110,7 +1391,7 @@ impl RuleToFunctionBuilder {
                     }
 
                     let converted_transition: Expression =
-                        self.convert_transition(kind, transition, items, cx);
+                        self.convert_transition(kind, transition, items, generated);
 
                     match effects {
                         TransitionEffects::Fallible => {}
@@ -1160,7 +1441,7 @@ impl RuleToFunctionBuilder {
                     let condition = scope.condition.map(|condition| {
                         let transition = &nodes[condition.condition].transition;
                         let converted_transition: Expression =
-                            self.convert_transition(kind, transition, items, cx);
+                            self.convert_transition(kind, transition, items, generated);
 
                         let mut expr = Box::new(converted_transition);
                         if condition.negate {
@@ -1213,8 +1494,8 @@ impl RuleToFunctionBuilder {
         &mut self,
         kind: RuleKind,
         transition: &Transition,
-        items: &InitialItems,
-        cx: &CodeFileCx,
+        items: &ForeignItems,
+        generated: &GeneratedItems,
     ) -> Expression {
         match transition {
             Transition::Error => Expression::Error,
@@ -1241,19 +1522,19 @@ impl RuleToFunctionBuilder {
             },
             &Transition::Rule(handle) => {
                 let args = [Expression::AccessArgument(0), Value::U32(0).into()];
-                let args = match self.is_pratt_rule.contains(handle) {
+                let args = match generated.is_pratt_rule.contains(handle) {
                     true => &args[..],
                     false => &args[..1],
                 };
                 Expression::Call {
-                    handle: self.function_handles[handle],
+                    handle: generated.rule_to_function[handle],
                     arguments: args.to_owned(),
                 }
             }
             &Transition::PrattRule(pratt_rule, min_bp) => {
-                assert!(self.is_pratt_rule.contains(pratt_rule));
+                assert!(generated.is_pratt_rule.contains(pratt_rule));
                 Expression::Call {
-                    handle: self.function_handles[pratt_rule],
+                    handle: generated.rule_to_function[pratt_rule],
                     arguments: vec![Expression::AccessArgument(0), Value::U32(min_bp).into()],
                 }
             }
@@ -1270,14 +1551,11 @@ impl RuleToFunctionBuilder {
                 handle: items.lexer_any,
                 arguments: vec![Expression::AccessArgument(0)],
             },
-            &Transition::Not(a) => Expression::Call {
+            &Transition::Not(rule) => Expression::Call {
                 handle: items.lexer_not,
                 arguments: vec![
                     Expression::AccessArgument(0),
-                    Expression::Value(Value::EnumVariant(
-                        items.tree_kind,
-                        cx.rule_to_tree_kind_value[a],
-                    )),
+                    Expression::Constant(generated.rule_to_tree_kind_value[rule]),
                 ],
             },
             &Transition::SaveState(variable) => {
@@ -1316,7 +1594,7 @@ impl RuleToFunctionBuilder {
             }
             &Transition::CloseSpan(rule) => {
                 let function = match kind {
-                    RuleKind::Tokens => items.lexer_close_span,
+                    RuleKind::Tokens => items.lexer_finish_token,
                     RuleKind::Rules => items.parser_close_span,
                 };
 
@@ -1324,8 +1602,7 @@ impl RuleToFunctionBuilder {
                     handle: function,
                     arguments: vec![
                         Expression::AccessArgument(0),
-                        Value::EnumVariant(items.tree_kind, cx.rule_to_tree_kind_value[rule])
-                            .into(),
+                        Expression::Constant(generated.rule_to_tree_kind_value[rule]),
                     ],
                 }
             }

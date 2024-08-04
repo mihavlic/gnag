@@ -465,6 +465,12 @@ impl<H: TypedHandle, T> FromIterator<(H, T)> for SecondaryVec<H, T> {
     }
 }
 
+impl<H, T> From<HandleVec<H, Option<T>>> for SecondaryVec<H, T> {
+    fn from(value: HandleVec<H, Option<T>>) -> Self {
+        SecondaryVec(value.0, PhantomData)
+    }
+}
+
 pub struct HandleBitset<H> {
     set: Bitset,
     spooky: PhantomData<H>,

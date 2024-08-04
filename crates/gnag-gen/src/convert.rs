@@ -230,7 +230,10 @@ impl ConvertedFile {
             ast::Expression::Literal(a) => {
                 let value = ast::extract_str_literal(a.resolve(cx)).map(|(s, _)| s);
                 if let Some(value) = value {
-                    RuleExpr::bytes(value.as_bytes())
+                    RuleExpr::UnresolvedLiteral {
+                        bytes: value.as_bytes().into(),
+                        span: *a,
+                    }
                 } else {
                     cx.error(*a, "Invalid string");
                     RuleExpr::error()
@@ -332,7 +335,9 @@ impl ConvertedFile {
             if is_keyword {
                 let body = &self.rules[handle].body.expr;
                 let bytes = match body {
-                    RuleExpr::Transition(Transition::Bytes(b)) => Some(b.clone()),
+                    // TODO move pratt transformation into lowering
+                    // so that we don't have to handle UnresolvedLiteral here
+                    RuleExpr::UnresolvedLiteral { bytes, .. } => Some(bytes.clone()),
                     _ => None,
                 };
 
@@ -361,6 +366,7 @@ impl ConvertedFile {
                 if is_keyword && has_word_token {
                     // keyword token gets parsed as a subset of the word token
                 }
+
                 if is_word {
                     let mut close_spans = Vec::with_capacity(keyword_tokens.len() + 1);
                     for (handle, bytes) in &keyword_tokens {
@@ -374,12 +380,13 @@ impl ConvertedFile {
                     close_spans.push(RuleExpr::close_span(handle));
 
                     token_exprs.push(RuleExpr::Sequence(vec![
-                        RuleExpr::rule(handle),
+                        rule.body.expr.clone(),
                         RuleExpr::Choice(close_spans),
                     ]));
                 } else {
                     token_exprs.push(RuleExpr::Sequence(vec![
-                        RuleExpr::rule(handle),
+                        // TODO ensure than rule body does not call any other rules
+                        rule.body.expr.clone(),
                         RuleExpr::close_span(handle),
                     ]));
                 }

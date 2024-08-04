@@ -425,6 +425,7 @@ impl<'a> GraphBuilder<'a> {
             | RuleExpr::InlineParameter(_)
             | RuleExpr::InlineCall(_)
             | RuleExpr::UnresolvedIdentifier { .. }
+            | RuleExpr::UnresolvedLiteral { .. }
             | RuleExpr::Not(_) => {
                 unreachable!("These should have been eliminated during lowering")
             }

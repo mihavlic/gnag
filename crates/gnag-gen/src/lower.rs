@@ -1,6 +1,7 @@
 use std::{
     borrow::Borrow,
     collections::{hash_map::Entry, HashMap},
+    rc::Rc,
 };
 
 use crate::{
@@ -76,7 +77,7 @@ impl<'a, 'b, 'c> LoweringCx<'a, 'b, 'c> {
         for (handle, rule) in self.file.rules.iter_kv() {
             self.add_item(&rule.body, ItemKind::Rule(handle));
             if rule.kind == RuleKind::Tokens {
-                if let RuleExpr::Transition(Transition::Bytes(bytes)) = &rule.body.expr {
+                if let RuleExpr::UnresolvedLiteral { bytes, .. } = &rule.body.expr {
                     self.add_literal(bytes, handle);
                 }
             }
@@ -120,9 +121,6 @@ impl<'a, 'b, 'c> LoweringCx<'a, 'b, 'c> {
         expr.visit_nodes_bottom_up_mut(|node| match node {
             RuleExpr::InlineCall(call) => {
                 *node = lower_call(call, self);
-            }
-            RuleExpr::UnresolvedIdentifier { name, name_span } => {
-                *node = lower_reference(&**name, *name_span, self);
             }
             _ => (),
         });
@@ -255,6 +253,7 @@ pub fn visit_affix_leaves(
         | RuleExpr::InlineParameter(_)
         | RuleExpr::InlineCall(_)
         | RuleExpr::UnresolvedIdentifier { .. }
+        | RuleExpr::UnresolvedLiteral { .. }
         | RuleExpr::Not(_) => {
             unreachable!("These should have been eliminated during lowering")
         }
@@ -263,12 +262,12 @@ pub fn visit_affix_leaves(
 }
 
 fn lower_pratt(
-    parent: Option<RuleHandle>,
+    parent: RuleHandle,
     children: &[RuleHandle],
     lowered_rules: &HandleVec<RuleHandle, RuleExpr>,
     cx: &mut LoweringCx,
 ) -> RuleExpr {
-    let parent = parent.filter(|handle| {
+    let parent = Some(parent).filter(|handle| {
         let converted = &cx.file.rules[*handle];
         converted.kind == RuleKind::Rules
     });
@@ -385,33 +384,26 @@ fn lower_reference(name: &str, name_span: StrSpan, cx: &mut LoweringCx) -> RuleE
 }
 
 fn lower_expr(
-    parent: Option<RuleHandle>,
+    parent: RuleHandle,
     expr: &mut RuleExpr,
     lowered_rules: &HandleVec<RuleHandle, RuleExpr>,
     cx: &mut LoweringCx,
 ) {
     expr.visit_nodes_bottom_up_mut(|node| match node {
         RuleExpr::Pratt(vec) => *node = lower_pratt(parent, vec, lowered_rules, cx),
-        RuleExpr::InlineCall(call) => *node = lower_call(call, cx),
-        // it is currently corrent to resolve references in the same traversal as other lowering
-        // because we're going bottom-up
-        // the only lowering which touches other rules is pratt where children are inserted before their parents before conversion
-        RuleExpr::UnresolvedIdentifier { name, name_span } => {
-            *node = lower_reference(&**name, *name_span, cx);
+        RuleExpr::InlineCall(call) => {
+            *node = lower_call(call, cx);
+            // we need to recurse like this, because lowering UnresolvedLiteral
+            // depends on where the call is inlined
+            lower_expr(parent, node, lowered_rules, cx);
         }
-        RuleExpr::Transition(Transition::Bytes(bytes)) => {
-            if let Some(handle) = parent {
-                let converted = &cx.file.rules[handle];
-                if converted.kind == RuleKind::Rules {
-                    *node = match cx.literal_to_token.get(&**bytes) {
-                        Some(a) => RuleExpr::rule(*a),
-                        None => {
-                            cx.error(StrSpan::empty(), "(TODO span) No matching token");
-                            RuleExpr::error()
-                        }
-                    }
-                }
-            }
+        // it is currently correct to resolve references in the same traversal as other lowering because we're going bottom-up
+        // the only lowering which touches other rules is pratt, where children are inserted before their parents before conversion
+        RuleExpr::UnresolvedIdentifier { name, name_span } => {
+            *node = lower_reference(name, *name_span, cx);
+        }
+        RuleExpr::UnresolvedLiteral { bytes, span } => {
+            *node = lower_literal(parent, bytes, *span, cx);
         }
         RuleExpr::Not(expr) => {
             if let RuleExpr::Transition(Transition::Rule(handle)) = **expr {
@@ -428,8 +420,54 @@ fn lower_expr(
             let expr = expr.take();
             *node = RuleExpr::Sequence(vec![expr.clone(), RuleExpr::Loop(Box::new(expr))]);
         }
+        // RuleExpr::Sequence(vec) => {
+        //     if vec.len() == 1 {
+        //         *node = vec.pop().unwrap();
+        //     }
+        // }
+        // RuleExpr::Choice(vec) => {
+        //     let mut needs_cleanup = false;
+        //     for expr in vec.iter() {
+        //         if let RuleExpr::Choice(_) = expr {
+        //             needs_cleanup = true;
+        //             break;
+        //         }
+        //     }
+
+        //     if needs_cleanup {
+        //         let mut new_vec = Vec::with_capacity(vec.len());
+        //         for expr in vec.iter_mut() {
+        //             if let RuleExpr::Choice(child_vec) = expr {
+        //                 new_vec.append(child_vec);
+        //             } else {
+        //                 new_vec.push(expr.take());
+        //             }
+        //         }
+        //         *vec = new_vec;
+        //     }
+        // }
         _ => (),
     });
+}
+
+fn lower_literal(
+    parent: RuleHandle,
+    bytes: &Rc<[u8]>,
+    span: StrSpan,
+    cx: &mut LoweringCx,
+) -> RuleExpr {
+    let converted = &cx.file.rules[parent];
+    if converted.kind == RuleKind::Rules {
+        match cx.literal_to_token.get(&**bytes) {
+            Some(a) => RuleExpr::rule(*a),
+            None => {
+                cx.error(span, "(TODO span) No matching token");
+                RuleExpr::error()
+            }
+        }
+    } else {
+        RuleExpr::bytes(bytes.clone())
+    }
 }
 
 pub struct LoweredFile {
@@ -448,7 +486,7 @@ impl LoweredFile {
             let mut expr = rules[handle].take();
             // borrowchecker crimes because pratt lowering needs to look at its children
             // which are thankfully ordered such that they always get lowered before their parent
-            lower_expr(Some(handle), &mut expr, &mut rules, &mut cx);
+            lower_expr(handle, &mut expr, &mut rules, &mut cx);
             _ = std::mem::replace(&mut rules[handle], expr);
         }
 

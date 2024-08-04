@@ -137,6 +137,10 @@ pub enum RuleExpr {
         name: Rc<str>,
         name_span: StrSpan,
     },
+    UnresolvedLiteral {
+        bytes: Rc<[u8]>,
+        span: StrSpan,
+    },
 
     // `Not` only supports tokens, but at this point it may also contain an InlineParameter, we will check this later
     Not(Box<RuleExpr>),
@@ -227,6 +231,7 @@ impl RuleExpr {
             | RuleExpr::Transition(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::UnresolvedIdentifier { .. }
+            | RuleExpr::UnresolvedLiteral { .. }
             | RuleExpr::Commit => {}
         }
         if !top_down {
@@ -259,6 +264,7 @@ impl RuleExpr {
             | RuleExpr::Transition(_)
             | RuleExpr::InlineParameter(_)
             | RuleExpr::UnresolvedIdentifier { .. }
+            | RuleExpr::UnresolvedLiteral { .. }
             | RuleExpr::Commit => {}
         }
         if !top_down {
@@ -282,7 +288,9 @@ impl RuleExpr {
         };
 
         let display_slice = |buf: &mut dyn std::fmt::Write, name: &str, exprs: &[RuleExpr]| {
-            writeln!(buf, "{name}");
+            if !name.is_empty() {
+                writeln!(buf, "{name}");
+            }
             for expr in exprs {
                 expr.display_with_indent(buf, indent + 1, file);
             }
@@ -306,13 +314,16 @@ impl RuleExpr {
             RuleExpr::Loop(a) => display_nested(buf, "Loop", a),
             RuleExpr::OneOrMore(a) => display_nested(buf, "OneOrMore", a),
             RuleExpr::Maybe(a) => display_nested(buf, "Maybe", a),
-            RuleExpr::InlineParameter(a) => write!(buf, "InlineParameter({a})"),
+            RuleExpr::InlineParameter(a) => writeln!(buf, "InlineParameter({a})"),
             RuleExpr::InlineCall(a) => {
-                write!(buf, "InlineCall(\"{}\")", a.name);
+                writeln!(buf, "InlineCall(\"{}\")", a.name);
                 display_slice(buf, "", &a.parameters)
             }
             RuleExpr::UnresolvedIdentifier { name, name_span: _ } => {
-                write!(buf, "UnresolvedIdentifier(\"{name}\")")
+                writeln!(buf, "UnresolvedIdentifier(\"{name}\")")
+            }
+            RuleExpr::UnresolvedLiteral { bytes, span: _ } => {
+                writeln!(buf, "UnresolvedLiteral({:?})", &**bytes)
             }
             RuleExpr::Not(a) => display_nested(buf, "Not", a),
             RuleExpr::SeparatedList { element, separator } => {
@@ -326,7 +337,7 @@ impl RuleExpr {
 
                 for rule in &**rules {
                     print_indent(buf);
-                    write!(buf, "  {}", rule.name(file));
+                    writeln!(buf, "  {}", rule.name(file));
                 }
 
                 Ok(())

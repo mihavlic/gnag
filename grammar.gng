@@ -2,14 +2,14 @@ tokens {
     Newline = '\n'
     
     @skip
-    Whitespace = r'[ \t]+'
+    Whitespace = 'TODO' # <ascii_whitespace>+
     @skip
-    Comment = r'//.*$'
+    Comment = 'TODO' # '//' <any_until '\n'>
 
-    String = r'TODO' # 'r'? <string_like '\''> # TODO
+    String = r'TODO' # <string_like '\''>
 
     @word
-    Ident = r'\w+' # <class_word>
+    Ident = r'TODO' # <ascii_identifier_start> <ascii_identifier_continue>*
     
     @keyword InlineKeyword = 'inline'
     @keyword TokensKeywords = 'tokens'
@@ -17,7 +17,6 @@ tokens {
     @keyword PrattKeyword = 'pratt'
     @keyword GroupKeyword = 'group'
 
-    Number = r'[0-9]+' # <charset '0-9'>+
     LCurly = '{'
     RCurly = '}'
     LParen = '('
@@ -36,7 +35,7 @@ tokens {
     Dot = '.'
     Equals = '='
 
-    Error = r'\S+' | <any>
+    Error = 'TODO' # <not <ascii_whitespace>>+ | <any> 
 }
 
 rules {
@@ -49,9 +48,6 @@ rules {
     Parameters = '(' <comma_list Ident> ')'
     Rule = Attribute* Ident Parameters? '=' Expr Newline?
 
-    # Group = 'group' Ident '{' GroupItem* '}'
-    # GroupItem = Ident Ident
-
     Expr = pratt {
         Atom = Ident | String
         CallExpr = '<' Ident Expr? '>'
@@ -62,11 +58,6 @@ rules {
         SeqExpr = Expr Expr+
         BinExpr = Expr '|' Expr
     }
-
-    # delimited(bra, ket) = bra (ParenDelimited | BraceDelimited | BracketDelimited | <not ket>)* ket
-    # ParenDelimited = <delimited '(' ')'>
-    # BraceDelimited = <delimited '{' '}'>
-    # BracketDelimited = <delimited '[' ']'>
 
     rules_block() = Newline* '{' (Newline | Rule)* '}'
     comma_list(element) = <separated_list element ','>

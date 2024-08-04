@@ -879,6 +879,18 @@ impl Expression {
                 l.display(buf, module);
             }
             Expression::Call { handle, arguments } => {
+                let mut arguments = arguments.as_slice();
+
+                let definition_arguments = module.functions[*handle].arguments.as_slice();
+                if definition_arguments
+                    .first()
+                    .map_or(false, |(name, _)| name == "self")
+                {
+                    display_in_parens(&arguments[0], buf, module, function);
+                    write!(buf, ".");
+                    arguments = &arguments[1..];
+                }
+
                 let name = handle.name(module);
                 write!(buf, "{name}(");
                 let mut first = true;
@@ -1130,7 +1142,7 @@ struct GeneratedItems {
     #[allow(unused)]
     language_entrypoint: ConstantHandle,
     is_pratt_rule: HandleBitset<RuleHandle>,
-    rule_to_function: HandleVec<RuleHandle, FunctionHandle>,
+    rule_to_function: SecondaryVec<RuleHandle, FunctionHandle>,
     rule_to_tree_kind_value: HandleVec<RuleHandle, ConstantHandle>,
 }
 
@@ -1148,9 +1160,8 @@ impl GeneratedItems {
         let this = GeneratedItems::new(items, module, cx);
         let mut builder = RuleBuilder::default();
 
-        for handle in cx.compiled.rules.iter_keys() {
+        for (handle, &reserved) in this.rule_to_function.iter_kv() {
             let body = builder.convert_rule(handle, items, &this, cx);
-            let reserved = this.rule_to_function[handle];
             module.function_add_body(reserved, body);
         }
     }
@@ -1170,7 +1181,7 @@ impl GeneratedItems {
         }
     }
     fn make_node_kind_constants(
-        rule_to_function: &HandleVec<RuleHandle, FunctionHandle>,
+        rule_to_function: &SecondaryVec<RuleHandle, FunctionHandle>,
         items: &ForeignItems,
         module: &mut CodeFile,
         cx: &CodeFileCx,
@@ -1282,25 +1293,36 @@ impl GeneratedItems {
         items: &ForeignItems,
         module: &mut CodeFile,
         cx: &CodeFileCx,
-    ) -> HandleVec<RuleHandle, FunctionHandle> {
+    ) -> SecondaryVec<RuleHandle, FunctionHandle> {
         let lexer = items.lexer.as_type().to_ref_mut();
         let parser = items.parser.as_type().to_ref_mut();
 
         let lexer_arg = ("l", &lexer);
         let parser_arg = ("p", &parser);
 
-        cx.converted.rules.map_ref_with_key(|handle, rule| {
-            let object = match rule.kind {
-                RuleKind::Tokens => lexer_arg,
-                RuleKind::Rules => parser_arg,
-            };
-            let args = [object, ("min_bp", &Type::U32)];
-            let args = match is_pratt_rule.contains(handle) {
-                true => &args[..],
-                false => &args[..1],
-            };
-            module.declare_function(rule.body.name.clone(), args, Type::Bool)
-        })
+        cx.converted
+            .rules
+            .map_ref_with_key(|handle, rule| {
+                if rule.kind == RuleKind::Tokens && cx.converted.lexer != Some(handle) {
+                    return None;
+                }
+
+                let object = match rule.kind {
+                    RuleKind::Tokens => lexer_arg,
+                    RuleKind::Rules => parser_arg,
+                };
+
+                let args = [object, ("min_bp", &Type::U32)];
+                let args = match is_pratt_rule.contains(handle) {
+                    true => &args[..],
+                    false => &args[..1],
+                };
+
+                let function_handle =
+                    module.declare_function(rule.body.name.clone(), args, Type::Bool);
+                Some(function_handle)
+            })
+            .into()
     }
     fn make_is_pratt(converted: &ConvertedFile) -> HandleBitset<RuleHandle> {
         let mut is_pratt_rule = HandleBitset::with_capacity_filled(converted.rules.len(), false);
@@ -1414,7 +1436,7 @@ impl RuleBuilder {
                     }
 
                     let converted_transition: Expression =
-                        self.convert_transition(kind, transition, items, generated);
+                        self.convert_transition(kind, transition, items, generated, cx);
 
                     match effects {
                         TransitionEffects::Fallible => {}
@@ -1464,7 +1486,7 @@ impl RuleBuilder {
                     let condition = scope.condition.map(|condition| {
                         let transition = &nodes[condition.condition].transition;
                         let converted_transition: Expression =
-                            self.convert_transition(kind, transition, items, generated);
+                            self.convert_transition(kind, transition, items, generated, cx);
 
                         let mut expr = Box::new(converted_transition);
                         if condition.negate {
@@ -1515,10 +1537,11 @@ impl RuleBuilder {
     }
     fn convert_transition(
         &mut self,
-        kind: RuleKind,
+        parent_kind: RuleKind,
         transition: &Transition,
         items: &ForeignItems,
         generated: &GeneratedItems,
+        cx: &CodeFileCx,
     ) -> Expression {
         match transition {
             Transition::Error => Expression::Error,
@@ -1544,14 +1567,25 @@ impl RuleBuilder {
                 ],
             },
             &Transition::Rule(handle) => {
-                let args = [Expression::AccessArgument(0), Value::U32(0).into()];
-                let args = match generated.is_pratt_rule.contains(handle) {
-                    true => &args[..],
-                    false => &args[..1],
-                };
-                Expression::Call {
-                    handle: generated.rule_to_function[handle],
-                    arguments: args.to_owned(),
+                let kind = cx.converted.rules[handle].kind;
+                if parent_kind == RuleKind::Rules && kind == RuleKind::Tokens {
+                    Expression::Call {
+                        handle: items.parser_token,
+                        arguments: vec![
+                            Expression::AccessArgument(0),
+                            Expression::Constant(generated.rule_to_tree_kind_value[handle]),
+                        ],
+                    }
+                } else {
+                    let args = [Expression::AccessArgument(0), Value::U32(0).into()];
+                    let args = match generated.is_pratt_rule.contains(handle) {
+                        true => &args[..],
+                        false => &args[..1],
+                    };
+                    Expression::Call {
+                        handle: generated.rule_to_function[handle],
+                        arguments: args.to_owned(),
+                    }
                 }
             }
             &Transition::PrattRule(pratt_rule, min_bp) => {
@@ -1582,11 +1616,11 @@ impl RuleBuilder {
                 ],
             },
             &Transition::SaveState(variable) => {
-                let function = match kind {
+                let function = match parent_kind {
                     RuleKind::Tokens => items.lexer_save_position,
                     RuleKind::Rules => items.parser_save_position,
                 };
-                let position = match kind {
+                let position = match parent_kind {
                     RuleKind::Tokens => items.lexer_position,
                     RuleKind::Rules => items.parser_position,
                 };
@@ -1602,7 +1636,7 @@ impl RuleBuilder {
             }
             &Transition::RestoreState(variable) => {
                 let compact = self.get_variable(variable);
-                let function = match kind {
+                let function = match parent_kind {
                     RuleKind::Tokens => items.lexer_restore_position,
                     RuleKind::Rules => items.parser_restore_position,
                 };
@@ -1616,7 +1650,7 @@ impl RuleBuilder {
                 }
             }
             &Transition::CloseSpan(rule) => {
-                let function = match kind {
+                let function = match parent_kind {
                     RuleKind::Tokens => items.lexer_finish_token,
                     RuleKind::Rules => items.parser_close_span,
                 };

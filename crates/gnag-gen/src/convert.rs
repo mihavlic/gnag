@@ -55,7 +55,19 @@ pub struct RuleBody {
 #[derive(Debug)]
 pub struct RuleDef {
     pub kind: RuleKind,
+    // normal token/rule: true
+    // pratt children or synthetic lexer rule: false
+    pub is_toplevel: bool,
     pub body: RuleBody,
+}
+
+impl RuleDef {
+    pub fn is_lexer(&self) -> bool {
+        self.kind == RuleKind::Tokens && !self.is_toplevel
+    }
+    pub fn is_pratt_child(&self) -> bool {
+        self.kind == RuleKind::Rules && self.is_toplevel
+    }
 }
 
 #[derive(Debug)]
@@ -108,6 +120,7 @@ impl ConvertedFile {
         if let Some(lexer) = this.create_lexer_expr(&cx) {
             let def = RuleDef {
                 kind: RuleKind::Tokens,
+                is_toplevel: false,
                 body: RuleBody {
                     span: StrSpan::empty(),
                     attributes: RuleAttributes::default(),
@@ -128,7 +141,7 @@ impl ConvertedFile {
             match block.kind {
                 ast::RuleKind::Tokens => {
                     for rule in &block.rules {
-                        self.add_rule(cx, rule, RuleKind::Tokens);
+                        self.add_rule(cx, rule, RuleKind::Tokens, true);
                     }
                 }
                 ast::RuleKind::Rules => {
@@ -136,7 +149,7 @@ impl ConvertedFile {
                         if rule.inline {
                             self.add_inline(cx, rule);
                         } else {
-                            self.add_rule(cx, rule, RuleKind::Rules);
+                            self.add_rule(cx, rule, RuleKind::Rules, true);
                         }
                     }
                 }
@@ -150,10 +163,20 @@ impl ConvertedFile {
         }
     }
 
-    fn add_rule(&mut self, cx: &ConvertCx, rule: &SynRule, kind: RuleKind) -> RuleHandle {
+    fn add_rule(
+        &mut self,
+        cx: &ConvertCx,
+        rule: &SynRule,
+        kind: RuleKind,
+        is_toplevel: bool,
+    ) -> RuleHandle {
         self.check_no_parameters(cx, rule);
         let body = self.convert_rule(cx, rule, &[]);
-        self.rules.push(RuleDef { kind, body })
+        self.rules.push(RuleDef {
+            kind,
+            is_toplevel,
+            body,
+        })
     }
 
     fn add_inline(&mut self, cx: &ConvertCx, rule: &SynRule) -> InlineHandle {
@@ -243,7 +266,7 @@ impl ConvertedFile {
                 let handles = vec
                     .exprs
                     .iter()
-                    .map(|rule| self.add_rule(cx, rule, RuleKind::Rules))
+                    .map(|rule| self.add_rule(cx, rule, RuleKind::Rules, false))
                     .collect();
                 RuleExpr::Pratt(handles)
             }

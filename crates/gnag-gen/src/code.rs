@@ -1303,7 +1303,9 @@ impl GeneratedItems {
         cx.converted
             .rules
             .map_ref_with_key(|handle, rule| {
-                if rule.kind == RuleKind::Tokens && cx.converted.lexer != Some(handle) {
+                if (rule.kind == RuleKind::Tokens && rule.is_toplevel)
+                    || (rule.kind == RuleKind::Rules && !rule.is_toplevel)
+                {
                     return None;
                 }
 

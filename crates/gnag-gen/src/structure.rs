@@ -296,6 +296,7 @@ impl GraphStructuring {
 
                 if let Some(negate) = eligible {
                     block.condition = Some(BlockCondition { condition, negate });
+                    // TODO make this not quadratic
                     statements.remove(i);
                 }
             }

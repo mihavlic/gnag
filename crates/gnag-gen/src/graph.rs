@@ -267,6 +267,12 @@ impl<'a> GraphBuilder<'a> {
                 self.single_transition(&incoming, transition.clone())
             }
             RuleExpr::Sequence(vec) => {
+                let mut vec = Cow::Borrowed(vec);
+                if vec.len() > 1 {
+                    vec.to_mut()
+                        .push(RuleExpr::Transition(Transition::Dummy(true)));
+                };
+
                 let save_variable = self.new_variable();
                 let save = self.single_transition(&incoming, Transition::SaveState(save_variable));
 
@@ -327,8 +333,16 @@ impl<'a> GraphBuilder<'a> {
                 let mut fail = incoming;
                 let mut success = Vec::new();
 
+                let mut vec = Cow::Borrowed(vec);
+                // makes more readable code
+                // TODO improve this heuristic
+                if vec.len() > 2 {
+                    vec.to_mut()
+                        .push(RuleExpr::Transition(Transition::Dummy(false)));
+                }
+
                 let peek = self.peek_next_node();
-                for rule in vec {
+                for rule in vec.iter() {
                     let incoming = std::mem::take(&mut fail);
                     let mut result = self.convert_expr(rule, incoming);
 
@@ -350,17 +364,6 @@ impl<'a> GraphBuilder<'a> {
                 //       │ fail
                 //       ▼
                 //       * done
-
-                let mut expr = Cow::Borrowed(&**expr);
-                if let RuleExpr::Choice(vec) = &*expr {
-                    if vec.len() > 1 {
-                        if let RuleExpr::Choice(vec) = expr.to_mut() {
-                            vec.push(RuleExpr::Transition(Transition::Dummy(false)));
-                        } else {
-                            unreachable!()
-                        }
-                    }
-                }
 
                 let result = self.convert_expr_nonempty(
                     expr.as_ref(),

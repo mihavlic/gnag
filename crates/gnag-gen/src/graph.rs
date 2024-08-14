@@ -13,7 +13,7 @@ use gnag::{
 
 use crate::{
     convert::{ConvertedFile, RuleHandle},
-    expr::{RuleExpr, Transition, TransitionEffects, VariableHandle},
+    expr::{ReturnResult, RuleExpr, Transition, TransitionEffects, VariableHandle},
 };
 
 simple_handle! {
@@ -153,6 +153,7 @@ impl<'a> GraphBuilder<'a> {
         let mut result = self.convert_expr(expr, vec![]);
         self.current_rule = None;
 
+        // TODO clean this up
         if let Some(_) = result.entry {
             if kind == RuleKind::Rules {
                 if !matches!(expr, RuleExpr::Pratt(_)) {
@@ -160,15 +161,18 @@ impl<'a> GraphBuilder<'a> {
                         self.single_transition(&result.success, Transition::CloseSpan(handle));
                     result.success = span.success;
                 }
-            }
 
-            self.single_transition(&result.success, Transition::Return(true));
-            self.single_transition(&result.fail, Transition::Return(false));
-        } else {
-            result = self.single_transition(&result.fail, Transition::Return(false));
+                self.single_transition(&result.success, Transition::Return(ReturnResult::RuleOk));
+            }
         }
 
-        let mut entry = result.entry.unwrap();
+        let ret = match kind {
+            RuleKind::Tokens => ReturnResult::TokenFail,
+            RuleKind::Rules => ReturnResult::RuleFail,
+        };
+        let result2 = self.single_transition(&result.fail, Transition::Return(ret));
+
+        let mut entry = result.entry.or(result2.entry).unwrap();
 
         if optimize {
             entry = self.optimize(entry).unwrap();
@@ -288,7 +292,15 @@ impl<'a> GraphBuilder<'a> {
                     let incoming = std::mem::take(&mut success);
                     let mut result = self.convert_expr(rule, incoming);
 
-                    if result.entry.is_some() {
+                    let can_commit = match rule {
+                        RuleExpr::Transition(transition) => match transition {
+                            Transition::CompareBindingPower(_) => false,
+                            _ => true,
+                        },
+                        _ => true,
+                    };
+
+                    if result.entry.is_some() && can_commit {
                         consumed_any = true;
                     }
 
@@ -428,8 +440,7 @@ impl<'a> GraphBuilder<'a> {
             | RuleExpr::InlineParameter(_)
             | RuleExpr::InlineCall(_)
             | RuleExpr::UnresolvedIdentifier { .. }
-            | RuleExpr::UnresolvedLiteral { .. }
-            | RuleExpr::Not(_) => {
+            | RuleExpr::UnresolvedLiteral { .. } => {
                 unreachable!("These should have been eliminated during lowering")
             }
         }

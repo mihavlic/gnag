@@ -7,7 +7,7 @@ use gnag::{
     StrSpan,
 };
 
-use crate::expr::{CallExpr, RuleExpr, Transition};
+use crate::expr::{CallExpr, ReturnResult, RuleExpr, Transition};
 
 gnag::simple_handle! {
     pub RuleHandle,
@@ -280,38 +280,18 @@ impl ConvertedFile {
                     .as_ref()
                     .map(|e| self.convert_expression(cx, e, parameters));
 
-                let name = a.name.resolve(cx);
-
-                let mut arguments = match expression {
+                let arguments = match expression {
                     Some(RuleExpr::Sequence(seq)) => seq,
                     Some(a) => vec![a],
                     _ => vec![],
                 };
 
-                let mut expect_count = |c: usize, ok: &dyn Fn(&mut Vec<RuleExpr>) -> RuleExpr| {
-                    if arguments.len() != c {
-                        cx.error(a.span, format_args!("expected {c} arguments"));
-                        RuleExpr::error()
-                    } else {
-                        ok(&mut arguments)
-                    }
-                };
-
-                match name {
-                    "any" => expect_count(0, &|_| RuleExpr::Transition(Transition::Any)),
-                    "commit" => expect_count(0, &|_| RuleExpr::Commit),
-                    "not" => expect_count(1, &|args| RuleExpr::Not(Box::new(args.pop().unwrap()))),
-                    "separated_list" => expect_count(2, &|args| RuleExpr::SeparatedList {
-                        separator: Box::new(args.pop().unwrap()),
-                        element: Box::new(args.pop().unwrap()),
-                    }),
-                    _ => RuleExpr::InlineCall(Box::new(CallExpr {
-                        name: name.to_owned(),
-                        name_span: a.name,
-                        parameters: arguments,
-                        span: a.span,
-                    })),
-                }
+                RuleExpr::InlineCall(Box::new(CallExpr {
+                    name: a.name.resolve_owned(cx),
+                    name_span: a.name,
+                    parameters: arguments,
+                    span: a.span,
+                }))
             }
             ast::Expression::PostExpr(a) => {
                 let inner = Box::new(self.convert_expression(cx, &a.expr, parameters));
@@ -396,11 +376,15 @@ impl ConvertedFile {
                         if let Some(bytes) = bytes {
                             close_spans.push(RuleExpr::Sequence(vec![
                                 RuleExpr::keyword(bytes.clone()),
-                                RuleExpr::close_span(*handle),
+                                RuleExpr::Transition(Transition::Return(ReturnResult::TokenOk(
+                                    *handle,
+                                ))),
                             ]));
                         }
                     }
-                    close_spans.push(RuleExpr::close_span(handle));
+                    close_spans.push(RuleExpr::Transition(Transition::Return(
+                        ReturnResult::TokenOk(handle),
+                    )));
 
                     token_exprs.push(RuleExpr::Sequence(vec![
                         rule.body.expr.clone(),
@@ -410,7 +394,7 @@ impl ConvertedFile {
                     token_exprs.push(RuleExpr::Sequence(vec![
                         // TODO ensure than rule body does not call any other rules
                         rule.body.expr.clone(),
-                        RuleExpr::close_span(handle),
+                        RuleExpr::Transition(Transition::Return(ReturnResult::TokenOk(handle))),
                     ]));
                 }
             } else {

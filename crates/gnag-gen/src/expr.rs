@@ -1,4 +1,7 @@
-use std::{fmt::Write, rc::Rc};
+use std::{
+    fmt::{Debug, Display, Write},
+    rc::Rc,
+};
 
 use gnag::{handle::TypedHandle, simple_handle, StrSpan};
 
@@ -17,25 +20,130 @@ simple_handle! {
     pub VariableHandle
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharacterClass {
+    IdentifierStart,
+    IdentifierContinue,
+    Alphabetic,
+    Lowercase,
+    Uppercase,
+    Digit,
+    Hexdigit,
+    Alphanumeric,
+    Punctuation,
+    Whitespace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ByteBitset([u64; 4]);
+
+impl ByteBitset {
+    pub fn set(&mut self, index: u8) {
+        let word = &mut self.0[(index >> 6) as usize];
+        *word |= 1 << (index & 0b00111111);
+    }
+    pub fn get(&self, index: u8) -> bool {
+        let word = self.0[(index >> 6) as usize];
+        let bit = (word >> (index & 0b00111111)) & 1;
+        bit != 0
+    }
+    pub fn raw(&self) -> &[u64; 4] {
+        &self.0
+    }
+}
+
+impl Display for ByteBitset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "\"")?;
+        for i in 0..=255 {
+            if self.get(i) {
+                write!(f, "{}", std::ascii::escape_default(i))?;
+            }
+        }
+        write!(f, "\"")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotPattern {
+    Byte(u8),
+    Unicode(char),
+    ByteSet(Rc<ByteBitset>),
+    CharacterClass {
+        class: CharacterClass,
+        unicode: bool,
+    },
+    Token(RuleHandle),
+}
+
+impl NotPattern {
+    pub fn display(
+        &self,
+        f: &mut dyn Write,
+        file: &crate::convert::ConvertedFile,
+    ) -> std::fmt::Result {
+        match self {
+            NotPattern::Byte(a) => write!(f, "Byte({})", std::ascii::escape_default(*a)),
+            NotPattern::Unicode(a) => write!(f, "Unicode({a})"),
+            NotPattern::ByteSet(a) => write!(f, "ByteSet({a})"),
+            NotPattern::CharacterClass { class, unicode } => {
+                write!(f, "CharacterClass({class:?} unicode: {unicode})")
+            }
+            NotPattern::Token(a) => write!(f, "Token({})", a.name(file)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReturnResult {
+    RuleOk,
+    RuleFail,
+    TokenOk(RuleHandle),
+    TokenFail,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transition {
     Error,
     // lexer
-    ByteSet(Rc<[u8]>),
+    ByteSet(Rc<ByteBitset>),
     Bytes(Rc<[u8]>),
     Keyword(Rc<[u8]>),
+    CharacterClass {
+        class: CharacterClass,
+        unicode: bool,
+    },
     // parser
     Rule(RuleHandle),
     PrattRule(RuleHandle, u32),
     CompareBindingPower(u32),
     // builtins
-    Any,
-    Not(RuleHandle), // currently must be a token rule
-    // function start/end
+    AnyByte,
+    AnyUtf8,
+    AnyToken,
+    // any of:
+    //   ByteSet
+    //   Bytes
+    //   Keyword
+    //   CharacterClass
+    //   Rule
+    Not(NotPattern),
+    StringLike {
+        delimiter: u8,
+    },
+    ConsumeUntilByte {
+        byte: u8,
+        inclusive: bool,
+    },
+    ConsumeUntilSequence {
+        sequence: Rc<[u8]>,
+        inclusive: bool,
+    },
+    // parse state control
     SaveState(VariableHandle),
     RestoreState(VariableHandle),
     CloseSpan(RuleHandle),
-    Return(bool),
+    Return(ReturnResult),
     // does nothing, used to massage statement order for generated code
     // for true always succeeds, for false always fails
     Dummy(bool),
@@ -58,9 +166,15 @@ impl Transition {
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
             | Transition::CompareBindingPower(_)
-            | Transition::Any
+            | Transition::AnyByte
+            | Transition::AnyUtf8
+            | Transition::AnyToken
             | Transition::Not(_)
-            | Transition::Dummy(_) => TransitionEffects::Fallible,
+            | Transition::Dummy(_)
+            | Transition::CharacterClass { .. }
+            | Transition::StringLike { .. }
+            | Transition::ConsumeUntilByte { .. }
+            | Transition::ConsumeUntilSequence { .. } => TransitionEffects::Fallible,
             Transition::SaveState(_) | Transition::RestoreState(_) | Transition::CloseSpan(_) => {
                 TransitionEffects::Infallible
             }
@@ -74,8 +188,14 @@ impl Transition {
             | Transition::Bytes(_)
             | Transition::Rule(_)
             | Transition::PrattRule(_, _)
-            | Transition::Any
-            | Transition::Not(_) => true,
+            | Transition::AnyByte
+            | Transition::AnyUtf8
+            | Transition::AnyToken
+            | Transition::Not(_)
+            | Transition::CharacterClass { .. }
+            | Transition::StringLike { .. }
+            | Transition::ConsumeUntilByte { .. }
+            | Transition::ConsumeUntilSequence { .. } => true,
             Transition::Keyword(_)
             | Transition::CompareBindingPower(_)
             | Transition::SaveState(_)
@@ -92,19 +212,48 @@ impl Transition {
     ) -> std::fmt::Result {
         match *self {
             Transition::Error => write!(f, "Error"),
-            Transition::ByteSet(ref a) => write!(f, "ByteSet({:?})", String::from_utf8_lossy(a)),
+            Transition::ByteSet(ref a) => write!(f, "ByteSet({a})"),
             Transition::Bytes(ref a) => write!(f, "Bytes({:?})", String::from_utf8_lossy(a)),
             Transition::Keyword(ref a) => write!(f, "Keyword({:?})", String::from_utf8_lossy(a)),
             Transition::Rule(a) => write!(f, "Rule({})", a.name(file)),
             Transition::PrattRule(a, bp) => write!(f, "Pratt({}, {bp})", a.name(file)),
             Transition::CompareBindingPower(power) => write!(f, "CompareBindingPower({power})"),
-            Transition::Any => write!(f, "Any"),
-            Transition::Not(a) => write!(f, "Not({})", a.name(file)),
+            Transition::AnyByte => write!(f, "AnyByte"),
+            Transition::AnyUtf8 => write!(f, "AnyUnicode"),
+            Transition::AnyToken => write!(f, "AnyToken"),
+            Transition::Not(ref inner) => {
+                write!(f, "Not(")?;
+                inner.display(f, file)?;
+                write!(f, ")")
+            }
             Transition::SaveState(a) => write!(f, "SaveState({})", a.index()),
             Transition::RestoreState(a) => write!(f, "RestoreState({})", a.index()),
             Transition::CloseSpan(a) => write!(f, "CloseSpan({})", a.name(file)),
-            Transition::Return(value) => write!(f, "Return({value})"),
+            Transition::Return(ref value) => write!(f, "Return({value:?})"),
             Transition::Dummy(value) => write!(f, "Dummy({value})"),
+            Transition::CharacterClass { class, unicode } => {
+                write!(f, "CharacterClass({class:?} unicode: {unicode})")
+            }
+            Transition::StringLike { delimiter } => {
+                write!(f, "StringLike({})", std::ascii::escape_default(delimiter))
+            }
+            Transition::ConsumeUntilByte { byte, inclusive } => {
+                write!(
+                    f,
+                    "ConsumeUntilByte({} inclusive: {inclusive})",
+                    std::ascii::escape_default(byte)
+                )
+            }
+            Transition::ConsumeUntilSequence {
+                ref sequence,
+                inclusive,
+            } => {
+                write!(
+                    f,
+                    "ConsumeUntilSequence({} inclusive: {inclusive})",
+                    String::from_utf8_lossy(sequence)
+                )
+            }
         }
     }
     pub fn display_as_string(
@@ -142,8 +291,7 @@ pub enum RuleExpr {
         span: StrSpan,
     },
 
-    // `Not` only supports tokens, but at this point it may also contain an InlineParameter, we will check this later
-    Not(Box<RuleExpr>),
+    // builtin lowered to control flow
     SeparatedList {
         element: Box<RuleExpr>,
         separator: Box<RuleExpr>,
@@ -219,7 +367,7 @@ impl RuleExpr {
                 element.visit_nodes_(top_down, fun);
                 separator.visit_nodes_(top_down, fun);
             }
-            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_(top_down, fun);
             }
             RuleExpr::InlineCall(call) => {
@@ -252,7 +400,7 @@ impl RuleExpr {
                 element.visit_nodes_mut_(top_down, fun);
                 separator.visit_nodes_mut_(top_down, fun);
             }
-            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) | RuleExpr::Not(a) => {
+            RuleExpr::Maybe(a) | RuleExpr::Loop(a) | RuleExpr::OneOrMore(a) => {
                 a.visit_nodes_mut_(top_down, fun);
             }
             RuleExpr::InlineCall(call) => {
@@ -325,7 +473,6 @@ impl RuleExpr {
             RuleExpr::UnresolvedLiteral { bytes, span: _ } => {
                 writeln!(buf, "UnresolvedLiteral({:?})", &**bytes)
             }
-            RuleExpr::Not(a) => display_nested(buf, "Not", a),
             RuleExpr::SeparatedList { element, separator } => {
                 writeln!(buf, "SeparatedList");
                 element.display_with_indent(buf, indent + 1, file);

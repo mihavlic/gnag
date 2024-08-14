@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-    convert::{ConvertedFile, HandleKind, InlineHandle, ItemKind, RuleBody, RuleHandle},
-    expr::{CallExpr, RuleExpr, Transition},
+    convert::{ConvertedFile, InlineHandle, ItemKind, RuleBody, RuleHandle},
+    expr::{CallExpr, CharacterClass, NotPattern, RuleExpr, Transition},
     pratt::{Associativity, PrattExprKind},
 };
 use gnag::{
@@ -128,29 +128,194 @@ impl<'a, 'b, 'c> LoweringCx<'a, 'b, 'c> {
 
         self.inlined_inlines.entry(handle).insert(expr)
     }
+}
 
-    fn get_handle_by_name(
-        &self,
-        name: &str,
-        name_span: StrSpan,
-        kind: Option<HandleKind>,
-    ) -> Option<ItemKind> {
-        let handle = self.name_to_item.get(name).cloned();
-        match handle {
-            Some(_) if kind.is_none() => handle,
-            Some(ItemKind::Inline(_)) if kind == Some(HandleKind::Inline) => handle,
-            Some(ItemKind::Rule(_)) if kind == Some(HandleKind::Rule) => handle,
-            Some(_) => {
-                self.error(
-                    name_span,
-                    format_args!("Expected {} rule", kind.unwrap().name()),
-                );
-                None
+fn lower_builtin(call: &CallExpr, cx: &mut LoweringCx) -> RuleExpr {
+    let CallExpr {
+        name,
+        name_span,
+        parameters,
+        ..
+    } = call;
+
+    let expect_count = |c: usize, ok: &dyn Fn(&[RuleExpr]) -> RuleExpr| -> RuleExpr {
+        if parameters.len() != c {
+            cx.error(*name_span, format_args!("expected {c} arguments"));
+            RuleExpr::error()
+        } else {
+            ok(parameters)
+        }
+    };
+
+    match name.as_str() {
+        "any_byte" => expect_count(0, &|_| RuleExpr::Transition(Transition::AnyByte)),
+        "any_utf8" => expect_count(0, &|_| RuleExpr::Transition(Transition::AnyUtf8)),
+        "any" => expect_count(0, &|_| RuleExpr::Transition(Transition::AnyToken)),
+        "commit" => expect_count(0, &|_| RuleExpr::Commit),
+        "not" => expect_count(1, &|args| {
+            'block: {
+                if let RuleExpr::Transition(transition) = args.first().unwrap() {
+                    let pattern = match transition {
+                        Transition::Bytes(bytes) => {
+                            if let Ok(str) = std::str::from_utf8(&**bytes) {
+                                let mut chars = str.chars();
+                                let first = chars.next();
+                                let second = chars.next();
+
+                                if let (Some(first), None) = (first, second) {
+                                    if first.is_ascii() {
+                                        NotPattern::Byte(first as u8)
+                                    } else {
+                                        NotPattern::Unicode(first)
+                                    }
+                                } else {
+                                    cx.error(*name_span, "Expected a single character");
+                                    return RuleExpr::error();
+                                }
+                            } else {
+                                if let &[byte] = &**bytes {
+                                    NotPattern::Byte(byte)
+                                } else {
+                                    cx.error(*name_span, "Expected a single byte");
+                                    return RuleExpr::error();
+                                }
+                            }
+                        }
+                        Transition::ByteSet(set) => NotPattern::ByteSet(set.clone()),
+                        &Transition::CharacterClass { class, unicode } => {
+                            NotPattern::CharacterClass { class, unicode }
+                        }
+                        &Transition::Rule(handle) => NotPattern::Token(handle),
+                        _ => break 'block,
+                    };
+
+                    return RuleExpr::Transition(Transition::Not(pattern));
+                }
             }
-            None => {
-                self.error(name_span, "Unknown item");
-                None
+
+            cx.error(*name_span, "Unexpected argument for <not>");
+            RuleExpr::error()
+        }),
+        "separated_list" => expect_count(2, &|args| RuleExpr::SeparatedList {
+            separator: Box::new(args[0].clone()),
+            element: Box::new(args[1].clone()),
+        }),
+        "consume_until" => expect_count(1, &|args| {
+            if let RuleExpr::Transition(Transition::Bytes(bytes)) = &args[0] {
+                match bytes.len() {
+                    1 => RuleExpr::Transition(Transition::ConsumeUntilByte {
+                        byte: bytes[0],
+                        inclusive: false,
+                    }),
+                    _ => RuleExpr::Transition(Transition::ConsumeUntilSequence {
+                        sequence: bytes.clone(),
+                        inclusive: false,
+                    }),
+                }
+            } else {
+                cx.error(*name_span, "Unexpected argument for <consume_until>");
+                RuleExpr::error()
             }
+        }),
+        "string_like" => expect_count(1, &|args| {
+            if let RuleExpr::Transition(Transition::Bytes(bytes)) = &args[0] {
+                match bytes.len() {
+                    1 => RuleExpr::Transition(Transition::StringLike {
+                        delimiter: bytes[0],
+                    }),
+                    _ => {
+                        cx.error(*name_span, "<string_like> argument must be a single byte");
+                        RuleExpr::error()
+                    }
+                }
+            } else {
+                cx.error(*name_span, "Unexpected argument for <string_like>");
+                RuleExpr::error()
+            }
+        }),
+        "ascii_identifier_start" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::IdentifierStart,
+            unicode: false,
+        }),
+        "ascii_identifier_continue" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::IdentifierContinue,
+            unicode: false,
+        }),
+        "ascii_alphabetic" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Alphabetic,
+            unicode: false,
+        }),
+        "ascii_lowercase" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Lowercase,
+            unicode: false,
+        }),
+        "ascii_uppercase" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Uppercase,
+            unicode: false,
+        }),
+        "ascii_digit" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Digit,
+            unicode: false,
+        }),
+        "ascii_hexdigit" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Hexdigit,
+            unicode: false,
+        }),
+        "ascii_alphanumeric" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Alphanumeric,
+            unicode: false,
+        }),
+        "ascii_punctuation" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Punctuation,
+            unicode: false,
+        }),
+        "ascii_whitespace" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Whitespace,
+            unicode: false,
+        }),
+        "unicode_identifier_start" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::IdentifierStart,
+            unicode: true,
+        }),
+        "unicode_identifier_continue" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::IdentifierContinue,
+            unicode: true,
+        }),
+        "unicode_alphabetic" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Alphabetic,
+            unicode: true,
+        }),
+        "unicode_lowercase" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Lowercase,
+            unicode: true,
+        }),
+        "unicode_uppercase" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Uppercase,
+            unicode: true,
+        }),
+        "unicode_digit" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Digit,
+            unicode: true,
+        }),
+        "unicode_hexdigit" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Hexdigit,
+            unicode: true,
+        }),
+        "unicode_alphanumeric" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Alphanumeric,
+            unicode: true,
+        }),
+        "unicode_punctuation" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Punctuation,
+            unicode: true,
+        }),
+        "unicode_whitespace" => RuleExpr::Transition(Transition::CharacterClass {
+            class: CharacterClass::Whitespace,
+            unicode: true,
+        }),
+        _ => {
+            cx.error(*name_span, format_args!("Expected inline or builtin"));
+            RuleExpr::error()
         }
     }
 }
@@ -163,9 +328,13 @@ fn lower_call(call: &CallExpr, cx: &mut LoweringCx) -> RuleExpr {
         span,
     } = *call;
 
-    let handle = match cx.get_handle_by_name(name, name_span, Some(HandleKind::Inline)) {
-        Some(ItemKind::Inline(handle)) => handle,
-        _ => return RuleExpr::error(),
+    let handle = match cx.name_to_item.get(&**name).cloned() {
+        Some(ItemKind::Inline(a)) => a,
+        Some(ItemKind::Rule(_)) => {
+            cx.error(name_span, "Expected inline");
+            return RuleExpr::error();
+        }
+        None => return lower_builtin(call, cx),
     };
 
     // try to get the expanded body first because doing so can generate errors
@@ -253,8 +422,7 @@ pub fn visit_affix_leaves(
         | RuleExpr::InlineParameter(_)
         | RuleExpr::InlineCall(_)
         | RuleExpr::UnresolvedIdentifier { .. }
-        | RuleExpr::UnresolvedLiteral { .. }
-        | RuleExpr::Not(_) => {
+        | RuleExpr::UnresolvedLiteral { .. } => {
             unreachable!("These should have been eliminated during lowering")
         }
         RuleExpr::Commit | RuleExpr::Pratt(_) => None,
@@ -373,13 +541,17 @@ fn lower_pratt(
 }
 
 fn lower_reference(name: &str, name_span: StrSpan, cx: &mut LoweringCx) -> RuleExpr {
-    match cx.get_handle_by_name(name, name_span, None) {
-        Some(ItemKind::Rule(a)) => RuleExpr::rule(a),
+    let handle = cx.name_to_item.get(name).cloned();
+    match handle {
         Some(ItemKind::Inline(_)) => {
             cx.error(name_span, "Use <> syntax for inlines");
             RuleExpr::error()
         }
-        None => RuleExpr::error(),
+        Some(ItemKind::Rule(a)) => RuleExpr::rule(a),
+        None => {
+            cx.error(name_span, "Unknown item");
+            RuleExpr::error()
+        }
     }
 }
 
@@ -404,17 +576,6 @@ fn lower_expr(
         }
         RuleExpr::UnresolvedLiteral { bytes, span } => {
             *node = lower_literal(parent, bytes, *span, cx);
-        }
-        RuleExpr::Not(expr) => {
-            if let RuleExpr::Transition(Transition::Rule(handle)) = **expr {
-                *node = RuleExpr::Transition(Transition::Not(handle));
-            } else {
-                cx.error(
-                    StrSpan::empty(),
-                    "(TODO span) RuleExpr::Not only works with tokens",
-                );
-                *node = RuleExpr::error();
-            }
         }
         RuleExpr::OneOrMore(expr) => {
             let expr = expr.take();

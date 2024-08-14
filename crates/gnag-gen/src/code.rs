@@ -13,7 +13,7 @@ use std::{
 use crate::{
     compile::CompiledFile,
     convert::{ConvertedFile, RuleDef, RuleHandle},
-    expr::{self, RuleExpr, Transition, TransitionEffects},
+    expr::{self, CharacterClass, RuleExpr, Transition, TransitionEffects},
     scope_tree::{ScopeKind, ScopeNodeHandle},
     structure::{mark_used_labels, FlowAction, GraphStructuring, Statement},
 };
@@ -68,6 +68,7 @@ impl ConstantHandle {
     }
 }
 
+#[allow(non_snake_case)]
 pub struct ForeignItems {
     pub lexer: ForeignTypeHandle,
     pub parser: ForeignTypeHandle,
@@ -79,6 +80,22 @@ pub struct ForeignItems {
     pub lexer_position: ForeignTypeHandle,
     pub parser_position: ForeignTypeHandle,
 
+    pub character_class: EnumHandle,
+    pub class_IdentifierStart: u32,
+    pub class_IdentifierContinue: u32,
+    pub class_Alphabetic: u32,
+    pub class_Lowercase: u32,
+    pub class_Uppercase: u32,
+    pub class_Digit: u32,
+    pub class_Hexdigit: u32,
+    pub class_Alphanumeric: u32,
+    pub class_Punctuation: u32,
+    pub class_Whitespace: u32,
+
+    pub unicode_set: ForeignTypeHandle,
+    pub byte_set: ForeignTypeHandle,
+    pub byte_set_new: FunctionHandle,
+
     pub node_event: ForeignTypeHandle,
     pub node_kind: ForeignTypeHandle,
     pub node_kind_new: FunctionHandle,
@@ -87,11 +104,27 @@ pub struct ForeignItems {
     pub lexer_restore_position: FunctionHandle,
     pub lexer_finish_token: FunctionHandle,
 
-    pub lexer_bytes: FunctionHandle,
-    pub lexer_set: FunctionHandle,
+    pub lexer_any_byte: FunctionHandle,
+    pub lexer_byte: FunctionHandle,
+    pub lexer_not_byte: FunctionHandle,
+    pub lexer_byte_sequence: FunctionHandle,
+    pub lexer_byte_set: FunctionHandle,
+    pub lexer_not_byte_set: FunctionHandle,
+    pub lexer_ascii_class: FunctionHandle,
+    pub lexer_not_ascii_class: FunctionHandle,
+    pub lexer_any_utf8: FunctionHandle,
+
+    pub lexer_utf8: FunctionHandle,
+    pub lexer_not_utf8: FunctionHandle,
+    pub lexer_utf8_set: FunctionHandle,
+    pub lexer_not_utf8_set: FunctionHandle,
+    pub lexer_utf8_class: FunctionHandle,
+    pub lexer_not_utf8_class: FunctionHandle,
+
     pub lexer_keyword: FunctionHandle,
-    pub lexer_any: FunctionHandle,
-    pub lexer_not: FunctionHandle,
+    pub lexer_string_like: FunctionHandle,
+    pub lexer_consume_until_byte: FunctionHandle,
+    pub lexer_consume_until_sequence: FunctionHandle,
 
     pub parser_save_position: FunctionHandle,
     pub parser_restore_position: FunctionHandle,
@@ -144,6 +177,26 @@ impl ForeignItems {
         let lexer_position = module.register_foreign_type("LexerPosition");
         let parser_position = module.register_foreign_type("ParserPosition");
 
+        let character_class = module.register_enum(
+            "CharacterClass",
+            &[
+                ("IdentifierStart", 0),
+                ("IdentifierContinue", 1),
+                ("Alphabetic", 2),
+                ("Lowercase", 3),
+                ("Uppercase", 4),
+                ("Digit", 5),
+                ("Hexdigit", 6),
+                ("Alphanumeric", 7),
+                ("Punctuation", 8),
+                ("Whitespace", 9),
+            ],
+        );
+        module.supress_item(character_class.into());
+
+        let unicode_set = module.register_foreign_type("UnicodeSet");
+        let byte_set = module.register_foreign_type("ByteBitset");
+
         let node_event = module.register_foreign_type("NodeEvent");
         let node_kind = module.register_foreign_type("NodeKind");
         let node_kind_new =
@@ -157,15 +210,26 @@ impl ForeignItems {
         let lexer_position_arg = ("position", &lexer_position.as_type());
         let parser_position_arg = ("position", &parser_position.as_type());
         let token_arg = ("kind", &node_kind.as_type());
-
         let bytes_arg = ("bytes", &Type::U8.to_slice().to_ref());
 
+        let byte_set_arg = ("set", &byte_set.as_type().to_ref());
+        let unicode_set_arg = ("set", &unicode_set.as_type().to_ref());
+        let character_class_arg = ("class", &character_class.as_type());
+
         ForeignItems {
+            byte_set,
+            unicode_set,
             node_event,
             node_kind,
             node_kind_new,
             language,
             language_nodes,
+
+            byte_set_new: module.declare_function(
+                "ByteBitset",
+                &[("0", &Type::U64.to_array(4))],
+                byte_set,
+            ),
 
             lexer_save_position: module.declare_function(
                 "save_position",
@@ -183,15 +247,97 @@ impl ForeignItems {
                 span_start.as_type(),
             ),
 
-            lexer_bytes: module.declare_function("bytes", &[lexer_mut_arg, bytes_arg], Type::Bool),
-            lexer_set: module.declare_function("set", &[lexer_mut_arg, bytes_arg], Type::Bool),
+            lexer_any_byte: module.declare_function("any_byte", &[lexer_mut_arg], Type::Bool),
+            lexer_byte: module.declare_function(
+                "byte",
+                &[lexer_mut_arg, ("byte", &Type::U8)],
+                Type::Bool,
+            ),
+            lexer_not_byte: module.declare_function(
+                "not_byte",
+                &[lexer_mut_arg, ("byte", &Type::U8)],
+                Type::Bool,
+            ),
+            lexer_byte_sequence: module.declare_function(
+                "byte_sequence",
+                &[lexer_mut_arg, bytes_arg],
+                Type::Bool,
+            ),
+            lexer_byte_set: module.declare_function(
+                "byte_set",
+                &[lexer_mut_arg, byte_set_arg],
+                Type::Bool,
+            ),
+            lexer_not_byte_set: module.declare_function(
+                "not_byte_set",
+                &[lexer_mut_arg, byte_set_arg],
+                Type::Bool,
+            ),
+            lexer_ascii_class: module.declare_function(
+                "ascii_class",
+                &[lexer_mut_arg, character_class_arg],
+                Type::Bool,
+            ),
+            lexer_not_ascii_class: module.declare_function(
+                "not_ascii_class",
+                &[lexer_mut_arg, character_class_arg],
+                Type::Bool,
+            ),
+            lexer_any_utf8: module.declare_function("any_utf8", &[lexer_mut_arg], Type::Bool),
+            lexer_utf8: module.declare_function(
+                "utf8",
+                &[lexer_mut_arg, ("char", &Type::Char)],
+                Type::Bool,
+            ),
+            lexer_not_utf8: module.declare_function(
+                "not_utf8",
+                &[lexer_mut_arg, ("char", &Type::Char)],
+                Type::Bool,
+            ),
+            lexer_utf8_set: module.declare_function(
+                "utf8_set",
+                &[lexer_mut_arg, unicode_set_arg],
+                Type::Bool,
+            ),
+            lexer_not_utf8_set: module.declare_function(
+                "not_utf8_set",
+                &[lexer_mut_arg, unicode_set_arg],
+                Type::Bool,
+            ),
+            lexer_utf8_class: module.declare_function(
+                "utf8_class",
+                &[lexer_mut_arg, character_class_arg],
+                Type::Bool,
+            ),
+            lexer_not_utf8_class: module.declare_function(
+                "not_utf8_class",
+                &[lexer_mut_arg, character_class_arg],
+                Type::Bool,
+            ),
             lexer_keyword: module.declare_function(
                 "keyword",
                 &[lexer_mut_arg, bytes_arg],
                 Type::Bool,
             ),
-            lexer_any: module.declare_function("any", &[lexer_mut_arg], Type::Bool),
-            lexer_not: module.declare_function("not", &[lexer_mut_arg], Type::Bool),
+            lexer_string_like: module.declare_function(
+                "string_like",
+                &[lexer_mut_arg, ("delimiter", &Type::U8)],
+                Type::Bool,
+            ),
+            lexer_consume_until_byte: module.declare_function(
+                "consume_until_byte",
+                &[
+                    lexer_mut_arg,
+                    ("byte", &Type::U8),
+                    ("inclusive", &Type::Bool),
+                ],
+                Type::Bool,
+            ),
+            lexer_consume_until_sequence: module.declare_function(
+                "consume_until_sequence",
+                &[lexer_mut_arg, bytes_arg, ("inclusive", &Type::Bool)],
+                Type::Bool,
+            ),
 
             parser_save_position: module.declare_function(
                 "save_position",
@@ -226,6 +372,18 @@ impl ForeignItems {
             span_start,
             lexer_position,
             parser_position,
+
+            character_class,
+            class_IdentifierStart: 0,
+            class_IdentifierContinue: 1,
+            class_Alphabetic: 2,
+            class_Lowercase: 3,
+            class_Uppercase: 4,
+            class_Digit: 5,
+            class_Hexdigit: 6,
+            class_Alphanumeric: 7,
+            class_Punctuation: 8,
+            class_Whitespace: 9,
         }
     }
 
@@ -539,14 +697,17 @@ pub enum Type {
     I16,
     I32,
     I64,
+    Char,
     Str,
     Unit,
+    Option(Box<Type>),
     Item(ItemHandle),
     StaticRef(Box<Type>),
     Ref(Box<Type>),
     RefMut(Box<Type>),
     FunctionPointer(Box<[Type]>),
     Slice(Box<Type>),
+    Array(Box<Type>, usize),
 }
 
 impl Type {
@@ -562,8 +723,15 @@ impl Type {
             Type::I16 => "i16",
             Type::I32 => "i32",
             Type::I64 => "i64",
+            Type::Char => "char",
             Type::Str => "str",
             Type::Unit => "()",
+            Type::Option(inner) => {
+                write!(buf, "Option<");
+                inner.display(buf, module);
+                write!(buf, ">");
+                return;
+            }
             Type::Item(item) => item.name(module),
             Type::Ref(inner) => {
                 write!(buf, "&");
@@ -599,6 +767,12 @@ impl Type {
                 write!(buf, "]");
                 return;
             }
+            Type::Array(inner, size) => {
+                write!(buf, "[");
+                inner.display(buf, module);
+                write!(buf, "; {size}]");
+                return;
+            }
         };
         write!(buf, "{name}");
     }
@@ -613,6 +787,9 @@ impl Type {
     }
     pub fn to_slice(self) -> Type {
         Type::Slice(Box::new(self))
+    }
+    pub fn to_array(self, count: usize) -> Type {
+        Type::Array(Box::new(self), count)
     }
 }
 
@@ -653,10 +830,28 @@ pub enum Value {
     I16(i16),
     I32(i32),
     I64(i64),
+    Char(char),
+    Option(Option<Rc<Value>>),
     EnumVariant(EnumHandle, u32),
     Bytes(Rc<[u8]>),
     Str(Rc<str>),
     Unit,
+}
+
+/// Stolen from [u8]::utf8_chunks documentation example
+#[allow(unused_must_use)]
+pub fn str_literal(buf: &mut dyn std::fmt::Write, bytes: &[u8]) {
+    write!(buf, "\"");
+    for chunk in bytes.utf8_chunks() {
+        for ch in chunk.valid().chars() {
+            // Escapes \0, \t, \r, \n, \\, \', \", and uses \u{...} for non-printable characters.
+            write!(buf, "{}", ch.escape_debug()).unwrap();
+        }
+        for byte in chunk.invalid() {
+            write!(buf, "\\x{:02X}", byte).unwrap();
+        }
+    }
+    write!(buf, "\"");
 }
 
 impl Value {
@@ -672,6 +867,7 @@ impl Value {
             Value::I16(a) => write!(buf, "{a}"),
             Value::I32(a) => write!(buf, "{a}"),
             Value::I64(a) => write!(buf, "{a}"),
+            Value::Char(a) => write!(buf, "{a}"),
             Value::EnumVariant(a, index) => {
                 let name = a.name(module);
                 let (variant, _) = &module.enums[*a].variants[*index as usize];
@@ -682,14 +878,19 @@ impl Value {
                 write!(buf, "{:?}", deref)
             }
             Value::Unit => write!(buf, "()"),
-            Value::Bytes(a) => {
-                write!(buf, "\"");
-                for c in a.iter().copied() {
-                    write!(buf, "{}", std::ascii::escape_default(c));
-                }
-                write!(buf, "\"");
+            Value::Bytes(bytes) => {
+                write!(buf, "b");
+                str_literal(buf, bytes);
                 Ok(())
             }
+            Value::Option(a) => match a {
+                Some(a) => {
+                    write!(buf, "Some(");
+                    a.display(buf, module);
+                    write!(buf, ")")
+                }
+                None => write!(buf, "None"),
+            },
         };
     }
 }
@@ -741,6 +942,7 @@ pub enum UnaryOp {
 pub enum Expression {
     Error,
     Value(Value),
+    ByteCharLiteral(u8),
     Call {
         handle: FunctionHandle,
         arguments: Vec<Expression>,
@@ -772,6 +974,7 @@ pub enum Expression {
         op: UnaryOp,
         expr: Box<Expression>,
     },
+    Some(Box<Expression>),
     Break(Option<BlockLabel>),
     Continue(Option<BlockLabel>),
     Return(Option<Box<Expression>>),
@@ -877,6 +1080,9 @@ impl Expression {
             }
             Expression::Value(l) => {
                 l.display(buf, module);
+            }
+            Expression::ByteCharLiteral(byte) => {
+                write!(buf, "b'{}'", std::ascii::escape_default(*byte));
             }
             Expression::Call { handle, arguments } => {
                 let mut arguments = arguments.as_slice();
@@ -1060,6 +1266,11 @@ impl Expression {
                     write!(buf, ",\n");
                 }
                 write!(buf, "]");
+            }
+            Expression::Some(expr) => {
+                write!(buf, "Some(");
+                expr.display(buf, module, function);
+                write!(buf, ")");
             }
         }
     }
@@ -1545,30 +1756,98 @@ impl RuleBuilder {
         generated: &GeneratedItems,
         cx: &CodeFileCx,
     ) -> Expression {
-        match transition {
+        fn byte_set_new(items: &ForeignItems, set: &expr::ByteBitset) -> Expression {
+            Expression::Call {
+                handle: items.byte_set_new,
+                arguments: [Expression::ArrayLiteral(
+                    set.raw()
+                        .iter()
+                        .map(|value| Value::U64(*value).into())
+                        .collect(),
+                )]
+                .into(),
+            }
+        }
+
+        fn character_class(items: &ForeignItems, class: CharacterClass) -> Expression {
+            let index = match class {
+                CharacterClass::IdentifierStart => items.class_IdentifierStart,
+                CharacterClass::IdentifierContinue => items.class_IdentifierContinue,
+                CharacterClass::Alphabetic => items.class_Alphabetic,
+                CharacterClass::Lowercase => items.class_Lowercase,
+                CharacterClass::Uppercase => items.class_Uppercase,
+                CharacterClass::Digit => items.class_Digit,
+                CharacterClass::Hexdigit => items.class_Hexdigit,
+                CharacterClass::Alphanumeric => items.class_Alphanumeric,
+                CharacterClass::Punctuation => items.class_Punctuation,
+                CharacterClass::Whitespace => items.class_Whitespace,
+            };
+            Value::EnumVariant(items.character_class, index).into()
+        }
+
+        match *transition {
             Transition::Error => Expression::Error,
-            Transition::ByteSet(bytes) => Expression::Call {
-                handle: items.lexer_set,
+            Transition::ByteSet(ref bytes) => Expression::Call {
+                handle: items.lexer_byte_set,
+                arguments: [Expression::AccessArgument(0), byte_set_new(items, bytes)].into(),
+            },
+            Transition::Bytes(ref bytes) => Expression::Call {
+                handle: items.lexer_byte_sequence,
                 arguments: vec![
                     Expression::AccessArgument(0),
                     Value::Bytes(bytes.clone()).into(),
                 ],
             },
-            Transition::Bytes(bytes) => Expression::Call {
-                handle: items.lexer_bytes,
+            Transition::Dummy(a) => Value::Bool(a).into(),
+            Transition::CharacterClass { class, unicode } => {
+                let function = match unicode {
+                    true => items.lexer_ascii_class,
+                    false => items.lexer_utf8_class,
+                };
+
+                Expression::Call {
+                    handle: function,
+                    arguments: vec![Expression::AccessArgument(0), character_class(items, class)],
+                }
+            }
+            Transition::AnyToken => Expression::Call {
+                handle: items.parser_any,
+                arguments: vec![Expression::AccessArgument(0)],
+            },
+            Transition::StringLike { delimiter } => Expression::Call {
+                handle: items.lexer_string_like,
                 arguments: vec![
                     Expression::AccessArgument(0),
-                    Value::Bytes(bytes.clone()).into(),
+                    Expression::ByteCharLiteral(delimiter),
                 ],
             },
-            Transition::Keyword(bytes) => Expression::Call {
+            Transition::ConsumeUntilByte { byte, inclusive } => Expression::Call {
+                handle: items.lexer_string_like,
+                arguments: vec![
+                    Expression::AccessArgument(0),
+                    Expression::ByteCharLiteral(byte),
+                    Value::Bool(inclusive).into(),
+                ],
+            },
+            Transition::ConsumeUntilSequence {
+                ref sequence,
+                inclusive,
+            } => Expression::Call {
+                handle: items.lexer_string_like,
+                arguments: vec![
+                    Expression::AccessArgument(0),
+                    Value::Bytes(sequence.clone()).into(),
+                    Value::Bool(inclusive).into(),
+                ],
+            },
+            Transition::Keyword(ref bytes) => Expression::Call {
                 handle: items.lexer_keyword,
                 arguments: vec![
                     Expression::AccessArgument(0),
                     Value::Bytes(bytes.clone()).into(),
                 ],
             },
-            &Transition::Rule(handle) => {
+            Transition::Rule(handle) => {
                 let kind = cx.converted.rules[handle].kind;
                 if parent_kind == RuleKind::Rules && kind == RuleKind::Tokens {
                     Expression::Call {
@@ -1590,14 +1869,14 @@ impl RuleBuilder {
                     }
                 }
             }
-            &Transition::PrattRule(pratt_rule, min_bp) => {
+            Transition::PrattRule(pratt_rule, min_bp) => {
                 assert!(generated.is_pratt_rule.contains(pratt_rule));
                 Expression::Call {
                     handle: generated.rule_to_function[pratt_rule],
                     arguments: vec![Expression::AccessArgument(0), Value::U32(min_bp).into()],
                 }
             }
-            &Transition::CompareBindingPower(bp) => {
+            Transition::CompareBindingPower(bp) => {
                 let own_bp = Value::U32(bp).into();
                 let min_bp = Expression::AccessArgument(1);
                 Expression::Binary {
@@ -1606,18 +1885,42 @@ impl RuleBuilder {
                     right: Box::new(own_bp),
                 }
             }
-            Transition::Any => Expression::Call {
-                handle: items.lexer_any,
+            Transition::AnyByte => Expression::Call {
+                handle: items.lexer_any_byte,
                 arguments: vec![Expression::AccessArgument(0)],
             },
-            &Transition::Not(rule) => Expression::Call {
-                handle: items.lexer_not,
-                arguments: vec![
-                    Expression::AccessArgument(0),
-                    Expression::Constant(generated.rule_to_tree_kind_value[rule]),
-                ],
+            Transition::AnyUtf8 => Expression::Call {
+                handle: items.lexer_any_utf8,
+                arguments: vec![Expression::AccessArgument(0)],
             },
-            &Transition::SaveState(variable) => {
+            Transition::Not(ref inner) => {
+                let (handle, second_arg) = match *inner {
+                    expr::NotPattern::Byte(b) => {
+                        (items.lexer_not_byte, Expression::ByteCharLiteral(b))
+                    }
+                    expr::NotPattern::Unicode(c) => (items.lexer_not_utf8, Value::Char(c).into()),
+                    expr::NotPattern::ByteSet(ref set) => {
+                        (items.lexer_not_byte_set, byte_set_new(items, set))
+                    }
+                    expr::NotPattern::CharacterClass { class, unicode } => {
+                        let function = match unicode {
+                            true => items.lexer_not_utf8_class,
+                            false => items.lexer_not_ascii_class,
+                        };
+                        (function, character_class(items, class))
+                    }
+                    expr::NotPattern::Token(handle) => (
+                        items.parser_not,
+                        Expression::Constant(generated.rule_to_tree_kind_value[handle]),
+                    ),
+                };
+
+                Expression::Call {
+                    handle,
+                    arguments: vec![Expression::AccessArgument(0), second_arg],
+                }
+            }
+            Transition::SaveState(variable) => {
                 let function = match parent_kind {
                     RuleKind::Tokens => items.lexer_save_position,
                     RuleKind::Rules => items.parser_save_position,
@@ -1636,7 +1939,7 @@ impl RuleBuilder {
                     })),
                 }
             }
-            &Transition::RestoreState(variable) => {
+            Transition::RestoreState(variable) => {
                 let compact = self.get_variable(variable);
                 let function = match parent_kind {
                     RuleKind::Tokens => items.lexer_restore_position,
@@ -1651,22 +1954,29 @@ impl RuleBuilder {
                     ],
                 }
             }
-            &Transition::CloseSpan(rule) => {
-                let function = match parent_kind {
-                    RuleKind::Tokens => items.lexer_finish_token,
-                    RuleKind::Rules => items.parser_close_span,
-                };
-
-                Expression::Call {
-                    handle: function,
+            Transition::CloseSpan(rule) => match parent_kind {
+                RuleKind::Tokens => Expression::Return(Some(Box::new(Expression::Constant(
+                    generated.rule_to_tree_kind_value[rule],
+                )))),
+                RuleKind::Rules => Expression::Call {
+                    handle: items.lexer_finish_token,
                     arguments: vec![
                         Expression::AccessArgument(0),
                         Expression::Constant(generated.rule_to_tree_kind_value[rule]),
                     ],
-                }
+                },
+            },
+            Transition::Return(ref a) => {
+                let result = match *a {
+                    expr::ReturnResult::RuleOk => Value::Bool(true).into(),
+                    expr::ReturnResult::RuleFail => Value::Bool(false).into(),
+                    expr::ReturnResult::TokenOk(handle) => Expression::Some(Box::new(
+                        Expression::Constant(generated.rule_to_tree_kind_value[handle]),
+                    )),
+                    expr::ReturnResult::TokenFail => Value::Option(None).into(),
+                };
+                Expression::Return(Some(Box::new(result.into())))
             }
-            &Transition::Return(a) => Expression::Return(Some(Box::new(Value::Bool(a).into()))),
-            &Transition::Dummy(a) => Value::Bool(a).into(),
         }
     }
 }

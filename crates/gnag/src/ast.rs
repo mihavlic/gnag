@@ -418,6 +418,7 @@ pub fn extract_str_literal_impl<'a, U: ExtractedStringAccumulator<'a>>(
                     Some(b'n') => Some('\n'),
                     Some(b't') => Some('\t'),
                     Some(b'0') => Some('\0'),
+                    Some(b'\'') => Some('\''),
                     _ => None,
                 };
 

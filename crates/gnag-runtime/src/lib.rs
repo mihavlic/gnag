@@ -1,16 +1,15 @@
 pub mod lexer;
 pub mod parser;
+mod resetable_slice;
 
 use std::u16;
 
 use lexer::Lexer;
 use parser::Parser;
 
-#[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SpanStart(pub u32);
 
-#[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeKind(pub std::num::NonZeroU16);
 
@@ -39,7 +38,6 @@ impl From<u16> for NodeKind {
     }
 }
 
-#[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeEvent {
     pub kind: NodeKind,

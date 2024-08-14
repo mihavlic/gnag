@@ -1,6 +1,5 @@
-use crate::{LanguageNodes, NodeEvent, NodeKind, SpanStart};
+use crate::{resetable_slice::ResetableSlice, LanguageNodes, NodeEvent, NodeKind, SpanStart};
 
-#[repr(C)]
 #[derive(Clone, PartialEq, Eq)]
 pub struct ParserPosition {
     token_position: u32,
@@ -8,9 +7,7 @@ pub struct ParserPosition {
 }
 
 pub struct Parser<'a> {
-    tokens: &'a [NodeEvent],
-    position: u32,
-
+    tokens: ResetableSlice<'a, NodeEvent>,
     tree_trace: Vec<NodeEvent>,
     language_nodes: LanguageNodes,
 }
@@ -22,8 +19,7 @@ impl<'a> Parser<'a> {
         language_nodes: LanguageNodes,
     ) -> Parser<'a> {
         Parser {
-            position: 0,
-            tokens,
+            tokens: ResetableSlice::new(tokens),
             tree_trace: tree_trace_buffer,
             language_nodes,
         }
@@ -31,7 +27,7 @@ impl<'a> Parser<'a> {
 
     pub fn save_position(&self) -> ParserPosition {
         ParserPosition {
-            token_position: self.position,
+            token_position: self.tokens.get_position() as u32,
             trace_position: self.tree_trace.len().try_into().unwrap(),
         }
     }
@@ -42,54 +38,51 @@ impl<'a> Parser<'a> {
             "Missing trace events to restore to. Mismatched save_position - load_position pair?"
         );
 
-        self.position = state.token_position;
+        self.tokens.set_position(state.token_position as usize);
         self.tree_trace.truncate(state.trace_position as usize);
     }
 
     pub fn consume_skip_tokens(&mut self) -> bool {
-        let mut i = self.position;
-
-        while let Some(token) = self.tokens.get(i as usize).copied() {
+        let mut consumed_any = false;
+        while let Some(&token) = self.tokens.next() {
+            consumed_any = true;
             if !self.language_nodes.is_skip(token.kind) {
                 break;
             }
-
-            i += 1;
             self.tree_trace.push(token);
         }
 
-        // check for eof
-        if self.position == i {
-            return false;
-        }
-
-        self.position = i;
-        return true;
+        return consumed_any;
     }
 
     pub fn peek(&mut self) -> Option<NodeKind> {
-        let mut i = self.position;
+        if let Some((slice, _)) = self.tokens.remaining().split_at_checked(4) {
+            for token in slice {
+                if !self.language_nodes.is_skip(token.kind) {
+                    return Some(token.kind);
+                }
+            }
+        }
 
-        while let Some(&token) = self.tokens.get(i as usize) {
-            i += 1;
+        self.peek_slow()
+    }
+
+    #[cold]
+    fn peek_slow(&mut self) -> Option<NodeKind> {
+        while let Some(&token) = self.tokens.next() {
             if !self.language_nodes.is_skip(token.kind) {
                 return Some(token.kind);
             }
         }
-
         return None;
     }
 
     pub fn next(&mut self) -> Option<NodeKind> {
         let checkpoint = self.tree_trace.len();
-        let mut i = self.position;
 
-        while let Some(&token) = self.tokens.get(i as usize) {
-            i += 1;
+        while let Some(&token) = self.tokens.next() {
             self.tree_trace.push(token);
-
             if !self.language_nodes.is_skip(token.kind) {
-                self.position = i;
                 return Some(token.kind);
             }
         }
@@ -102,12 +95,11 @@ impl<'a> Parser<'a> {
     }
 
     pub fn is_eof(&self) -> bool {
-        debug_assert!(self.position as usize <= self.tokens.len());
-        self.position as usize == self.tokens.len()
+        self.tokens.is_empty()
     }
 
     pub fn open_span(&self) -> SpanStart {
-        SpanStart(self.position)
+        SpanStart(self.tree_trace.len() as u32)
     }
 
     pub fn close_span(&mut self, start: SpanStart, kind: NodeKind) {

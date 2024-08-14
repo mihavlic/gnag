@@ -2,14 +2,14 @@ tokens {
     Newline = '\n'
     
     @skip
-    Whitespace = 'TODO' # <ascii_whitespace>+
+    Whitespace = <ascii_whitespace>+
     @skip
-    Comment = 'TODO' # '//' <any_until '\n'>
+    Comment = '//' <consume_until '\n'>
 
-    String = r'TODO' # <string_like '\''>
+    String = <string_like '\''>
 
     @word
-    Ident = r'TODO' # <ascii_identifier_start> <ascii_identifier_continue>*
+    Ident = <ascii_identifier_start> <ascii_identifier_continue>*
     
     @keyword InlineKeyword = 'inline'
     @keyword TokensKeywords = 'tokens'
@@ -35,7 +35,7 @@ tokens {
     Dot = '.'
     Equals = '='
 
-    Error = 'TODO' # <not <ascii_whitespace>>+ | <any> 
+    Error = <not <ascii_whitespace>>+ | <any_utf8>
 }
 
 rules {

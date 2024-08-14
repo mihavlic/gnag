@@ -80,9 +80,13 @@ fn find_prefix_rules(graph: &CompiledGraph, set: &mut HashSet<RuleHandle>) -> Ve
                 if let Some(Transition::Rule(handle)) = transition {
                     set.insert(*handle);
                 }
-                let advances_parser = transition.map_or(false, |t| t.advances_parser());
+                let should_continue = transition.map_or(false, |t| {
+                    // Dummy(false) will never succeed so we never visit its destination
+                    let unreachable = matches!(t, Transition::Dummy(false));
+                    !t.advances_parser() && !unreachable
+                });
 
-                !advances_parser
+                should_continue
             } else {
                 false
             }

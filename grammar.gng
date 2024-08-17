@@ -51,7 +51,7 @@ rules {
     Expr = pratt {
         Atom = Ident | String
         CallExpr = '<' Ident Expr? '>'
-        ParenExpr = '(' Expr ')'
+        ParenExpr = '(' Expr? ')'
         PrattExpr = 'pratt' <rules_block>
 
         PostExpr = Expr ('?' | '*' | '+')

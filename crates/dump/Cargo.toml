@@ -9,5 +9,3 @@ edition = "2021"
 gnag = { path = "../gnag" }
 gnag-gen = { path = "../gnag-gen" }
 linemap = { path = "../linemap" }
-prettyplease = "0.2"
-syn = "2.0"

@@ -371,7 +371,7 @@ fn run() -> Result<(), ()> {
         let mut buffer = String::new();
         code.display(&mut buffer);
 
-        let result = please_format(&buffer);
+        let result = rustfmt_format(&buffer);
         if let Err(err) = &result {
             eprintln!("{err}");
         }
@@ -386,7 +386,33 @@ fn run() -> Result<(), ()> {
     Ok(())
 }
 
-fn please_format(input: &str) -> syn::Result<String> {
-    let syntax_tree = syn::parse_file(input)?;
-    Ok(prettyplease::unparse(&syntax_tree))
+// fn please_format(input: &str) -> syn::Result<String> {
+//     let syntax_tree = syn::parse_file(input)?;
+//     Ok(prettyplease::unparse(&syntax_tree))
+// }
+
+fn rustfmt_format(input: &str) -> std::io::Result<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("rustfmt")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn child process");
+
+    let mut stdin = child.stdin.take().expect("Failed to open stdin");
+
+    std::thread::scope(move |s| {
+        s.spawn(move || {
+            stdin
+                .write_all(input.as_bytes())
+                .expect("Failed to write to stdin");
+        });
+    });
+
+    let output = child.wait_with_output().expect("Failed to read stdout");
+
+    let output = String::from_utf8(output.stdout).expect("Rustfmt returned non-utf8 data");
+    Ok(output)
 }

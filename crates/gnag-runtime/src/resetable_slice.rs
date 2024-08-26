@@ -53,9 +53,3 @@ impl<'a, T> IntoIterator for ResetableSlice<'a, T> {
         self.iter
     }
 }
-
-#[no_mangle]
-pub fn aaaaaaaaaa(mut a: ResetableSlice<'_, u8>, b: usize) {
-    a.skip(b);
-    std::hint::black_box(a);
-}

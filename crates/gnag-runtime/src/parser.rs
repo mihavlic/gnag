@@ -1,4 +1,7 @@
-use crate::{resetable_slice::ResetableSlice, LanguageNodes, NodeEvent, NodeKind, SpanStart};
+use crate::{resetable_slice::ResetableSlice, trace::PostorderTrace, NodeEvent, NodeKind};
+
+#[derive(Clone, Copy)]
+pub struct SpanStart(pub u32);
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ParserPosition {
@@ -9,19 +12,15 @@ pub struct ParserPosition {
 pub struct Parser<'a> {
     tokens: ResetableSlice<'a, NodeEvent>,
     tree_trace: Vec<NodeEvent>,
-    language_nodes: LanguageNodes,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(
-        tokens: &'a [NodeEvent],
-        tree_trace_buffer: Vec<NodeEvent>,
-        language_nodes: LanguageNodes,
-    ) -> Parser<'a> {
+    pub fn new(tokens: &'a [NodeEvent], tree_trace_buffer: Vec<NodeEvent>) -> Parser<'a> {
+        let mut tree_trace_buffer = tree_trace_buffer;
+        tree_trace_buffer.clear();
         Parser {
             tokens: ResetableSlice::new(tokens),
             tree_trace: tree_trace_buffer,
-            language_nodes,
         }
     }
 
@@ -46,7 +45,7 @@ impl<'a> Parser<'a> {
         let mut consumed_any = false;
         while let Some(&token) = self.tokens.next() {
             consumed_any = true;
-            if !self.language_nodes.is_skip(token.kind) {
+            if !token.kind.is_skip() {
                 break;
             }
             self.tree_trace.push(token);
@@ -58,7 +57,7 @@ impl<'a> Parser<'a> {
     pub fn peek(&mut self) -> Option<NodeKind> {
         if let Some((slice, _)) = self.tokens.remaining().split_at_checked(4) {
             for token in slice {
-                if !self.language_nodes.is_skip(token.kind) {
+                if !token.kind.is_skip() {
                     return Some(token.kind);
                 }
             }
@@ -69,8 +68,8 @@ impl<'a> Parser<'a> {
 
     #[cold]
     fn peek_slow(&mut self) -> Option<NodeKind> {
-        while let Some(&token) = self.tokens.next() {
-            if !self.language_nodes.is_skip(token.kind) {
+        for token in self.tokens.remaining() {
+            if !token.kind.is_skip() {
                 return Some(token.kind);
             }
         }
@@ -82,7 +81,7 @@ impl<'a> Parser<'a> {
 
         while let Some(&token) = self.tokens.next() {
             self.tree_trace.push(token);
-            if !self.language_nodes.is_skip(token.kind) {
+            if !token.kind.is_skip() {
                 return Some(token.kind);
             }
         }
@@ -92,6 +91,17 @@ impl<'a> Parser<'a> {
         self.tree_trace.truncate(checkpoint);
 
         return None;
+    }
+
+    pub fn next_if(&mut self, fun: impl FnOnce(NodeKind) -> bool) -> bool {
+        let peek = self.peek();
+        if let Some(peek) = peek {
+            if fun(peek) {
+                self.next();
+                return true;
+            }
+        }
+        return false;
     }
 
     pub fn is_eof(&self) -> bool {
@@ -110,136 +120,16 @@ impl<'a> Parser<'a> {
         });
     }
 
-    pub fn finish(self) -> Vec<NodeEvent> {
-        self.tree_trace
+    pub fn finish(self) -> PostorderTrace {
+        PostorderTrace::from_raw(self.tree_trace)
     }
 }
 
-pub struct TraceReorderScope {
-    event: NodeEvent,
-    child_count: u32,
-}
-
-struct TraceReorderWriter<'a> {
-    len: u32,
-    dst: u32,
-    slice: &'a mut [NodeEvent],
-}
-
-impl<'a> TraceReorderWriter<'a> {
-    fn new(trace: &'a mut [NodeEvent]) -> TraceReorderWriter<'a> {
-        let len_u32: u32 = trace.len().try_into().unwrap();
-
-        Self {
-            len: len_u32,
-            dst: len_u32,
-            slice: trace,
-        }
+impl<'a> Parser<'a> {
+    pub fn token(&mut self, kind: NodeKind) -> bool {
+        self.next_if(|t| t == kind)
     }
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<(u32, NodeEvent)> {
-        if self.len == 0 {
-            return None;
-        }
-        self.len -= 1;
-        return Some((self.len, self.slice[self.len as usize]));
-    }
-
-    #[inline(always)]
-    fn push(&mut self, event: NodeEvent) {
-        debug_assert!(self.dst != u32::MAX, "Write overflows slice!");
-        self.dst -= 1;
-        self.slice[self.dst as usize] = event;
-    }
-}
-
-pub fn trace_postorder_to_preorder(
-    trace: &mut [NodeEvent],
-    stack: &mut Vec<TraceReorderScope>,
-    language: &LanguageNodes,
-) {
-    stack.clear();
-
-    // we can do the postorder -> preorder step in place
-    // TraceReorderWriter is just a wrapper which hold two cursors into the slice
-    // one for taking elements out and another for inserting them back in a different order
-    let mut writer = TraceReorderWriter::new(trace);
-
-    while let Some((index, event)) = writer.next() {
-        if let Some(current) = stack.last_mut() {
-            current.child_count += 1;
-        }
-
-        if language.is_token(event.kind) {
-            writer.push(event);
-        } else {
-            // push the event to the scope stack
-            // we will write it back to the trace later when we pop this scope
-            stack.push(TraceReorderScope {
-                event,
-                child_count: 0,
-            });
-        }
-
-        while let Some(current) = stack.last_mut() {
-            if current.event.size_or_start_or_children == index {
-                writer.push(NodeEvent {
-                    size_or_start_or_children: current.child_count,
-                    kind: current.event.kind,
-                    max_lookahead: current.event.max_lookahead,
-                });
-
-                stack.pop();
-            } else {
-                break;
-            }
-        }
-    }
-}
-
-#[test]
-fn test_reorder() {
-    let lang = LanguageNodes {
-        skip_bound: 0,
-        token_bound: 2,
-        total_bound: 3,
-        names: &[],
-    };
-
-    let tokens = &[NodeEvent {
-        kind: NodeKind::new(1),
-        max_lookahead: 0,
-        size_or_start_or_children: 0,
-    }; 10];
-
-    let mut p = Parser::new(tokens, Vec::new(), lang.clone());
-
-    {
-        let c = p.open_span();
-        p.next();
-        p.next();
-        {
-            let c = p.open_span();
-            {
-                let c = p.open_span();
-                p.close_span(c, NodeKind::new(2))
-            }
-            p.next();
-            p.close_span(c, NodeKind::new(2))
-        }
-        p.next();
-        p.close_span(c, NodeKind::new(2))
-    }
-
-    let mut trace = p.finish();
-    trace_postorder_to_preorder(&mut trace, &mut Vec::new(), &lang);
-
-    for event in trace {
-        if lang.is_token(event.kind) {
-            println!(".");
-        } else {
-            println!("span {}", event.size_or_start_or_children)
-        }
+    pub fn not(&mut self, kind: NodeKind) -> bool {
+        self.next_if(|t| t != kind)
     }
 }

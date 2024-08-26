@@ -1,4 +1,6 @@
-use crate::{resetable_slice::ResetableSlice, NodeEvent, NodeKind};
+use std::fmt::{Debug, Display};
+
+use crate::{resetable_slice::ResetableSlice, Language, NodeEvent, NodeKind};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct LexerPosition {
@@ -41,6 +43,12 @@ impl<'a> Lexer<'a> {
             bytes: ResetableSlice::new(bytes),
             max_position: 0,
         }
+    }
+
+    pub fn lex_next(&mut self, language: &Language) -> Option<NodeEvent> {
+        let next = (language.lexer_entry)(self)?;
+        let event = self.finish_token(next);
+        Some(event)
     }
 
     pub fn save_position(&self) -> LexerPosition {
@@ -117,9 +125,56 @@ impl<'a> Lexer<'a> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct ByteBitset(pub [u64; 4]);
+pub struct ByteSet(pub [u64; 4]);
 
-#[derive(Clone, Copy)]
+impl ByteSet {
+    pub fn insert(&mut self, index: u8) {
+        let word = &mut self.0[(index >> 6) as usize];
+        *word |= 1 << (index & 0b00111111);
+    }
+    pub fn contains(&self, index: u8) -> bool {
+        let word = self.0[(index >> 6) as usize];
+        let bit = (word >> (index & 0b00111111)) & 1;
+        bit != 0
+    }
+    pub fn raw(&self) -> &[u64; 4] {
+        &self.0
+    }
+}
+
+impl Display for ByteSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "\"")?;
+        for i in 0..=255 {
+            if self.contains(i) {
+                write!(f, "{}", std::ascii::escape_default(i))?;
+            }
+        }
+        write!(f, "\"")
+    }
+}
+
+impl Debug for ByteSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ByteSet({self})")
+    }
+}
+
+pub struct UnicodeSet([std::ops::Range<char>]);
+
+impl UnicodeSet {
+    #[inline]
+    pub fn matches(&self, c: char) -> bool {
+        if let Ok(index) = self.0.binary_search_by_key(&c, |range| range.start) {
+            let range = self.0[index].clone();
+            range.contains(&c)
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CharacterClass {
     IdentifierStart,
     IdentifierContinue,
@@ -166,29 +221,6 @@ impl CharacterClass {
     }
 }
 
-impl ByteBitset {
-    #[inline]
-    pub fn matches(self, b: u8) -> bool {
-        let word = self.0[(b >> 6) as usize];
-        let bit = (word >> (b & 0b00111111)) & 1;
-        bit != 0
-    }
-}
-
-pub struct UnicodeSet([std::ops::Range<char>]);
-
-impl UnicodeSet {
-    #[inline]
-    pub fn matches(&self, c: char) -> bool {
-        if let Ok(index) = self.0.binary_search_by_key(&c, |range| range.start) {
-            let range = self.0[index].clone();
-            range.contains(&c)
-        } else {
-            false
-        }
-    }
-}
-
 impl<'a> Lexer<'a> {
     pub fn any_byte(&mut self) -> bool {
         self.consume_if(|_| true)
@@ -207,11 +239,11 @@ impl<'a> Lexer<'a> {
             return false;
         }
     }
-    pub fn byte_set(&mut self, set: ByteBitset) -> bool {
-        self.consume_if(|b| set.matches(b))
+    pub fn byte_set(&mut self, set: ByteSet) -> bool {
+        self.consume_if(|b| set.contains(b))
     }
-    pub fn not_byte_set(&mut self, set: ByteBitset) -> bool {
-        self.consume_if(|b| !set.matches(b))
+    pub fn not_byte_set(&mut self, set: ByteSet) -> bool {
+        self.consume_if(|b| !set.contains(b))
     }
     pub fn ascii_class(&mut self, class: CharacterClass) -> bool {
         self.consume_if(|b| class.matches_ascii(b))

@@ -23,12 +23,17 @@ args = sys.argv[1:]
 dot = '--dot' in args
 watch = '--watch' in args
 release = '--release' in args
+generate = '--generate' in args
 
 if watch:
     args.remove('--watch')
 
 if release:
     args.remove('--release')
+
+if generate:
+    args.remove('--generate')
+    args += ['--file']
 
 if "--repeats" in args:
     print("--repeats is used, suppressing errors", file=sys.stderr)
@@ -47,17 +52,25 @@ try:
     while True:
         if should_run:
             should_run = False
-            command = ["cargo", "run", "--quiet", "--bin", "dump"]
+            command = ["cargo", "run", "--quiet", "--bin", "gnag-cli"]
             
             if release:
                 command += ['--release']
 
-            process = subprocess.run(command + ["--"] + args, capture_output=dot)
+            capture_output = dot or generate
+            process = subprocess.run(command + ["--"] + args, capture_output=capture_output)
             
-            if dot:
+            if capture_output:
                 sys.stderr.buffer.write(process.stderr)
                 sys.stderr.flush()
-                dotp = subprocess.run(["dot", "-T", "pdf", "-o", "target/dot.pdf"], input=process.stdout)
+                if dot:
+                    dotp = subprocess.run(["dot", "-T", "pdf", "-o", "target/dot.pdf"], input=process.stdout)
+                if generate:
+                    output_path = "crates/gnag-parser/src/lib.rs"
+                    with open(output_path, "wb") as output:
+                        output.write(process.stdout)
+                    print(f"Generated file written to {output_path}", file=sys.stderr)
+
 
         if not watch:
             break

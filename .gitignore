@@ -3,3 +3,4 @@
 /addons/vscode/out/
 node_modules/
 /test.gng
+/crates/gnag-parser

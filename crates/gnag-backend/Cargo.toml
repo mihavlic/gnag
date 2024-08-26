@@ -1,0 +1,8 @@
+[package]
+name = "gnag-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gnag-runtime = { path = "../gnag-runtime" }
+gnag-parser = { path = "../gnag-parser" }

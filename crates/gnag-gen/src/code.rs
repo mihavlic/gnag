@@ -1801,8 +1801,8 @@ impl RuleBuilder {
             Transition::Dummy(a) => Value::Bool(a).into(),
             Transition::CharacterClass { class, unicode } => {
                 let function = match unicode {
-                    true => items.lexer_ascii_class,
-                    false => items.lexer_utf8_class,
+                    true => items.lexer_utf8_class,
+                    false => items.lexer_ascii_class,
                 };
 
                 Expression::Call {

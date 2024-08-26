@@ -26,14 +26,34 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'dump'",
+            "name": "Debug executable 'gnag-cli'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=dump"
+                    "--bin=gnag-cli"
                 ],
                 "filter": {
-                    "name": "dump",
+                    "name": "gnag-cli",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "test.gng"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug generated parser",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--package=gnag-parser",
+                    "--bin=debug"
+                ],
+                "filter": {
+                    "name": "debug",
                     "kind": "bin"
                 }
             },

@@ -1,40 +1,80 @@
 pub mod lexer;
 pub mod parser;
+pub mod trace;
+
 mod resetable_slice;
 
-use std::u16;
+use std::{borrow::Borrow, u16};
 
 use lexer::Lexer;
 use parser::Parser;
+use trace::{PostorderTrace, Tokens};
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SpanStart(pub u32);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NodeKindTag {
+    Skip = 0,
+    Token = 1,
+    Rule = 2,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeKind(pub std::num::NonZeroU16);
 
 impl NodeKind {
-    pub const fn new(raw: u16) -> NodeKind {
+    pub const fn new(index: u16, tag: NodeKindTag) -> NodeKind {
+        assert!(index < (1 << 6), "Index too high");
+
+        // invert the index to turn 0 to MAX
+        let index = !index;
+        let tag = tag as u16;
+        let raw = (index << 2) | tag;
+
         match std::num::NonZeroU16::new(raw) {
             Some(a) => NodeKind(a),
-            None => panic!("TreeKind cannot have value 0"),
+            None => unreachable!(),
         }
     }
 
-    pub const fn raw(self) -> u16 {
-        self.0.get()
+    pub const fn get_index(self) -> u16 {
+        !self.0.get() >> 2
+    }
+
+    #[inline]
+    pub const fn is_tag(self, tag: NodeKindTag) -> bool {
+        (self.0.get() & 0b11) == (tag as u16)
+    }
+
+    #[inline]
+    pub const fn is_skip(self) -> bool {
+        self.is_tag(NodeKindTag::Skip)
+    }
+
+    #[inline]
+    pub const fn is_token(self) -> bool {
+        !self.is_tag(NodeKindTag::Rule)
+    }
+
+    #[inline]
+    pub const fn is_rule(self) -> bool {
+        self.is_tag(NodeKindTag::Rule)
+    }
+
+    pub fn name<T>(self, language: T) -> &'static str
+    where
+        T: Borrow<Language>,
+    {
+        language.borrow().name(self)
     }
 }
 
-impl From<NodeKind> for u16 {
-    fn from(value: NodeKind) -> Self {
-        value.0.get()
-    }
-}
-
-impl From<u16> for NodeKind {
-    fn from(value: u16) -> Self {
-        NodeKind::new(value)
+#[test]
+fn test_node_kind() {
+    for &index in &[0, 1, 2, (1 << 6) - 1] {
+        for &tag in &[NodeKindTag::Skip, NodeKindTag::Token, NodeKindTag::Rule] {
+            let kind = NodeKind::new(index, tag);
+            assert!(kind.is_tag(tag));
+            assert_eq!(kind.get_index(), index);
+        }
     }
 }
 
@@ -47,46 +87,35 @@ pub struct NodeEvent {
 
 #[derive(Clone)]
 pub struct Language {
-    pub lexer_entry: fn(&mut Lexer) -> Option<NodeEvent>,
+    pub lexer_entry: fn(&mut Lexer) -> Option<NodeKind>,
     pub parser_entry: fn(&mut Parser) -> bool,
-    pub nodes: LanguageNodes,
+    pub names: &'static [&'static str],
 }
 
-/// The TreeKind values ocurring in a grammar are laid out in a specific order.
-/// This struct describes the ends (exclusive) of their respective TreeKind values.
-///
-///```ignore
-/// 0             - reserved None value
-/// skip tokens   - 0..skip_tokens_end
-/// normal tokens - skip_tokens_end..tokens_end
-/// tree kinds    - tokens_end..rules_end
-///```
-#[derive(Clone)]
-pub struct LanguageNodes {
-    skip_bound: u16,
-    token_bound: u16,
-    total_bound: u16,
-    names: &'static [&'static str],
-}
-
-impl LanguageNodes {
-    pub fn is_skip(&self, kind: NodeKind) -> bool {
-        kind.raw() < self.skip_bound
+impl Language {
+    pub fn lex_all(&self, bytes: &[u8]) -> Tokens {
+        self.lex_all_into(bytes, Vec::new())
     }
-
-    pub fn is_token(&self, kind: NodeKind) -> bool {
-        kind.raw() < self.token_bound
+    pub fn parse_all(&self, tokens: &Tokens) -> PostorderTrace {
+        self.parse_all_into(tokens, Vec::new())
     }
+    pub fn lex_all_into(&self, bytes: &[u8], vec: Vec<NodeEvent>) -> Tokens {
+        let mut vec = vec;
+        vec.clear();
 
-    pub fn is_rule(&self, kind: NodeKind) -> bool {
-        kind.raw() >= self.token_bound
+        let mut l = Lexer::new(bytes);
+        while let Some(next) = l.lex_next(self) {
+            vec.push(next);
+        }
+
+        Tokens::from_raw(vec)
     }
-
-    pub fn is_valid(&self, kind: NodeKind) -> bool {
-        kind.raw() < self.total_bound
+    pub fn parse_all_into(&self, tokens: &Tokens, vec: Vec<NodeEvent>) -> PostorderTrace {
+        let mut p = Parser::new(tokens.get_raw(), vec);
+        (self.parser_entry)(&mut p);
+        p.finish()
     }
-
-    pub fn name(&self, kind: NodeKind) -> Option<&'static str> {
-        self.names.get(kind.raw() as usize).copied()
+    pub fn name(&self, kind: NodeKind) -> &'static str {
+        self.names[kind.get_index() as usize]
     }
 }

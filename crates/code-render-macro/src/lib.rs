@@ -56,6 +56,10 @@ impl TemplateBuilder {
                 break 'add_space;
             }
 
+            if a.is_alphanumeric() && b == ':' {
+                break 'add_space;
+            }
+
             if (a.is_alphanumeric() && matches!(b, '(' | '[' | '<'))
                 || (b.is_alphanumeric() && matches!(a, ')' | ']' | '>'))
             {
@@ -78,6 +82,7 @@ impl TemplateBuilder {
         self.actions.push(TemplateAst::Iteration { span, children });
     }
     fn scope(&mut self, fun: impl FnOnce(&mut Self)) -> Vec<TemplateAst> {
+        self.flush_string();
         let len = self.actions.len();
         fun(self);
         self.flush_string();
@@ -380,6 +385,14 @@ pub fn template(stream: TokenStream) -> TokenStream {
 
     let body = {
         [
+            ident("use"),
+            punct_joint(':'),
+            punct(':'),
+            ident("code_render"),
+            punct_joint(':'),
+            punct(':'),
+            ident("Renderable"),
+            punct(';'),
             punct_joint(':'),
             punct(':'),
             ident("code_render"),
@@ -397,6 +410,15 @@ pub fn template(stream: TokenStream) -> TokenStream {
 
 #[proc_macro]
 pub fn render(stream: TokenStream) -> TokenStream {
+    render_impl(stream, true)
+}
+
+#[proc_macro]
+pub fn render_into(stream: TokenStream) -> TokenStream {
+    render_impl(stream, false)
+}
+
+fn render_impl(stream: TokenStream, finish_fragment: bool) -> TokenStream {
     let tokens = collect_token_stream(stream);
     let mut iter = tokens.iter();
 
@@ -406,8 +428,20 @@ pub fn render(stream: TokenStream) -> TokenStream {
 
     let template = convert_body_to_code(&render_cx, &mut iter);
 
-    let body = [
-        // evaluate cx
+    let mut body = Vec::new();
+    body.extend([
+        ident("use"),
+        punct_joint(':'),
+        punct(':'),
+        ident("code_render"),
+        punct_joint(':'),
+        punct(':'),
+        ident("Renderable"),
+        punct(';'),
+    ]);
+
+    // evaluate cx
+    body.extend([
         ident("let"),
         render_cx.clone(),
         punct(':'),
@@ -422,25 +456,36 @@ pub fn render(stream: TokenStream) -> TokenStream {
         punct('&'),
         group(Delimiter::None, render_cx_value),
         punct(';'),
+    ]);
+
+    if finish_fragment {
         // let start = cx.start_render();
-        ident("let"),
-        ident("start"),
-        punct('='),
-        render_cx.clone(),
-        punct('.'),
-        ident("start_render"),
-        group(Delimiter::Parenthesis, TokenStream::new()),
-        punct(';'),
+        body.extend([
+            ident("let"),
+            ident("start"),
+            punct('='),
+            render_cx.clone(),
+            punct('.'),
+            ident("start_render"),
+            group(Delimiter::Parenthesis, TokenStream::new()),
+            punct(';'),
+        ]);
+    }
+
+    body.extend([
         // self.render_into(cx);
         group(Delimiter::Brace, template),
+    ]);
+
+    if finish_fragment {
         // cx.finish_render(start)
-        render_cx.clone(),
-        punct('.'),
-        ident("finish_render"),
-        group(Delimiter::Parenthesis, ident("start")),
-    ]
-    .into_iter()
-    .collect::<Vec<_>>();
+        body.extend([
+            render_cx.clone(),
+            punct('.'),
+            ident("finish_render"),
+            group(Delimiter::Parenthesis, ident("start")),
+        ]);
+    }
 
     std::iter::once(group(Delimiter::Brace, TokenStream::from_iter(body))).collect()
 }

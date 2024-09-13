@@ -1,48 +1,56 @@
 use std::fmt::Display;
 
-use crate::{fragment::RenderedFragment, RenderCx};
+use crate::{interner::InternedFragments, Fragment, RenderCx};
 
-pub trait Renderable<'a> {
-    fn render_into(&self, rcx: &RenderCx<'a>);
-    fn render(&self, rcx: &RenderCx<'a>) -> &'a RenderedFragment<'a> {
+pub trait Renderable {
+    fn render_into(&self, rcx: &RenderCx);
+    fn render(&self, rcx: &RenderCx) -> Fragment {
         let start = rcx.start_render();
         self.render_into(rcx);
         rcx.finish_render(start)
     }
 }
 
-impl<'a, 'b, T: Display + 'a> Renderable<'b> for T
-where
-    'b: 'a,
-{
-    fn render_into(&self, rcx: &RenderCx<'b>) {
+impl<T: Display> Renderable for T {
+    fn render_into(&self, rcx: &RenderCx) {
         rcx.append_display(self)
     }
 }
 
-impl<'b> Renderable<'b> for &'b RenderedFragment<'b> {
-    fn render_into(&self, rcx: &RenderCx<'b>) {
-        rcx.append_fragment(self)
+impl Renderable for Fragment {
+    fn render_into(&self, rcx: &RenderCx) {
+        rcx.append_fragment(*self)
     }
 }
 
 #[doc(hidden)]
+#[derive(Clone)]
 pub struct Template<T: Fn(&RenderCx)>(pub T);
 
-impl<T> Clone for Template<T>
+impl<F> Renderable for Template<F>
 where
-    T: Clone + Fn(&RenderCx),
+    F: Fn(&RenderCx),
 {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+    fn render_into(&self, rcx: &RenderCx) {
+        (self.0)(rcx)
     }
 }
 
-impl<'a, F> Renderable<'a> for Template<F>
+pub trait CollectFragments {
+    fn collect_fragments(self, rcx: &RenderCx) -> InternedFragments;
+}
+
+impl<I> CollectFragments for I
 where
-    F: Fn(&RenderCx<'_>),
+    I: IntoIterator,
+    I::Item: Renderable,
 {
-    fn render_into(&self, rcx: &RenderCx<'a>) {
-        (self.0)(rcx)
+    fn collect_fragments(self, rcx: &RenderCx) -> InternedFragments {
+        let start = rcx.start_render();
+        for element in self {
+            let fragment = element.render(rcx);
+            rcx.append_fragment(fragment);
+        }
+        rcx.finish_render_slice(start)
     }
 }

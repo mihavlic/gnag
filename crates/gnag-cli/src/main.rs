@@ -1,18 +1,17 @@
+#![allow(dead_code)]
+
 use std::{
     env::args,
-    fmt::Display,
+    fmt::{Display, Write},
+    ops::Deref,
     path::{Path, PathBuf},
 };
 
-use gnag::{ast::ParsedFile, ctx::ErrorAccumulator};
-use gnag_gen::{
-    code::CodeFile,
-    compile::CompiledFile,
-    convert::ConvertedFile,
-    graph::{debug_graphviz, debug_statements},
-    lower::LoweredFile,
-    structure::{display_code, GraphStructuring},
+use code_render::RenderCx;
+use gnag_backend::{
+    ast::Ast, backend::grammar::Grammar, codegen::display_file, error::ErrorAccumulator,
 };
+use gnag_parser::LANGUAGE;
 use linemap::{LineMap, Utf16Pos};
 
 trait IoError<T> {
@@ -179,8 +178,9 @@ impl<'a, 'b, 'c> PhaseRunner<'a, 'b, 'c> {
 
         let file = self.file.display();
         for e in self.err.get().iter() {
-            let Utf16Pos { line, character } = self.linemap.offset_to_utf16(self.src, e.span.start);
-            eprintln!("{file}:{}:{} {}", line + 1, character + 1, e.err);
+            let Utf16Pos { line, character } =
+                self.linemap.offset_to_utf16(self.src, e.span.start());
+            eprintln!("{file}:{}:{} {}", line + 1, character + 1, e.deref());
         }
         self.err.clear();
     }
@@ -190,16 +190,10 @@ impl<'a, 'b, 'c> PhaseRunner<'a, 'b, 'c> {
 fn run() -> Result<(), ()> {
     let args = args().skip(1).collect::<Vec<_>>();
 
+    let mut do_parse = false;
     let mut do_ast = false;
-    let mut do_converted = false;
-    let mut do_lowered = false;
-    let mut do_dot = false;
-    let mut do_statements = false;
-    let mut do_scopes = false;
+    let mut do_grammar = false;
     let mut do_code = false;
-    let mut do_file = false;
-
-    let mut no_optimize = false;
 
     let mut do_bench = false;
     let mut bench_iters = 1;
@@ -212,15 +206,10 @@ fn run() -> Result<(), ()> {
 
     while let Some(arg) = iter.next() {
         match arg {
+            "--parse" => do_parse = true,
             "--ast" => do_ast = true,
-            "--converted" => do_converted = true,
-            "--lowered" => do_lowered = true,
-            "--dot" => do_dot = true,
-            "--statements" => do_statements = true,
-            "--scopes" => do_scopes = true,
+            "--grammar" => do_grammar = true,
             "--code" => do_code = true,
-            "--file" => do_file = true,
-            "--no-optimize" => no_optimize = true,
             "--errors" => {
                 let next = iter.next().expect("Expected argument");
                 match next {
@@ -275,132 +264,63 @@ fn run() -> Result<(), ()> {
     }
 
     let err = ErrorAccumulator::new();
-
     let runner = PhaseRunner::new(&src, file, &err, errors, do_bench, bench_iters);
 
-    let parsed = runner.run("parse", || ParsedFile::new(&src, &err));
-    let converted = runner.run("convert", || ConvertedFile::new(&src, &err, &parsed));
-    let lowered = runner.run("lower", || LoweredFile::new(&src, &err, &converted));
-    let compiled = runner.run("compile", || {
-        CompiledFile::new(&err, &converted, &lowered, !no_optimize)
-    });
-    let code = runner.run("format", || CodeFile::new(&err, &converted, &compiled));
+    let tokens = LANGUAGE.lex_all(src.as_bytes());
+    let trace = LANGUAGE.parse_all(&tokens);
+    let trace = trace.to_preorder(&mut Vec::new());
 
-    runner.report_errors();
+    let ast = Ast::new(&src, &trace, &err);
 
-    if do_ast {
-        let string = parsed.root.pretty_print_with_file(&src, &parsed);
-        println!("{string}");
+    let mut grammar = Grammar::new(&ast, &err);
+
+    if grammar.rules.iter().count() == 0 {
+        println!("Parsing produced no rules");
     }
 
-    if do_converted {
-        for (handle, rule) in converted.rules.iter_kv() {
-            println!("\nrule {}:", handle.name(&converted),);
-            rule.body
-                .expr
-                .display_with_indent(&mut StdoutSink, 1, &converted);
-        }
+    if do_parse {
         println!();
-        for (handle, rule) in converted.inlines.iter_kv() {
-            println!("\ninline {}:", handle.name(&converted),);
-            rule.body
-                .expr
-                .display_with_indent(&mut StdoutSink, 1, &converted);
-        }
+        print!("{}", trace.display(&LANGUAGE, false));
     }
 
-    if do_lowered {
-        for (handle, rule) in lowered.rules.iter_kv() {
-            println!("\nrule {}:", handle.name(&converted));
-            rule.display_with_indent(&mut StdoutSink, 1, &converted);
-        }
-        println!();
+    if !do_ast {
+        grammar.resolve(&err);
+        grammar.lower(&err);
+        grammar.create_lexer(&err);
+        grammar.create_pratt_rules(&err);
     }
 
-    if do_dot {
-        let mut offset = 0;
-        println!("digraph G {{");
-        for (handle, graph) in compiled.rules.iter_kv() {
-            debug_graphviz(
-                &graph.nodes,
-                &mut StdoutSink,
-                handle.name(&converted),
-                offset,
-                &converted,
-            );
-            offset += graph.nodes.len();
+    let mut buf = String::new();
 
-            println!();
-        }
-        println!("}}\n");
-    }
-
-    if do_statements {
-        for (handle, graph) in compiled.rules.iter_kv() {
-            println!("rule {}", handle.name(&converted));
-            debug_statements(&graph.nodes, &mut StdoutSink, &converted);
-            println!();
-        }
-    }
-
-    let structures = compiled
-        .rules
-        .map_ref(|graph| GraphStructuring::new(&graph.nodes));
-
-    if do_scopes {
-        for ((_, structuring), graph) in structures.iter_kv().zip(compiled.rules.iter()) {
-            structuring.debug_scopes(&mut StdoutSink, &graph.nodes, &converted);
-
-            println!();
+    if do_ast || do_grammar || (!do_parse && !do_code) {
+        for (_, rule) in grammar.rules.iter() {
+            _ = write!(buf, "\n{} =\n", rule.name);
+            rule.pattern.display_into_indent(&mut buf, &grammar, 1);
         }
     }
 
     if do_code {
-        for ((handle, structuring), graph) in structures.iter_kv().zip(compiled.rules.iter()) {
-            print!("rule {} ", handle.name(&converted));
+        let rcx = RenderCx::new();
+        let fragment = display_file(&grammar, &rcx);
+        let mut buf = String::new();
+        write!(buf, "{}", fragment.display(&rcx));
+        let output = rustfmt_format(&buf).unwrap();
 
-            let statements = structuring.emit_code(true, true, &graph.nodes);
-            display_code(&mut StdoutSink, &statements, &graph.nodes, &converted);
-
-            println!();
-        }
+        print!("\n{output}");
     }
 
-    if do_file {
-        let source = file.display();
-        let header = format!(
-            "\
-//! This file is generated by gnag-cli from '{source}'.
-//! Edit the grammar file instead.
-
-use gnag_runtime::lexer::*;
-use gnag_runtime::parser::*;
-use gnag_runtime::*;
-"
-        );
-
-        let result = generate_code(&code);
-        match result {
-            Ok(ok) => {
-                println!("{header}");
-                println!("{ok}");
-            }
-            Err(e) => {
-                eprintln!("Formatting failed, printing unformatted:");
-                eprintln!("{e}");
-            }
-        }
-    }
+    print!("{buf}");
+    runner.report_errors();
 
     Ok(())
 }
 
-fn generate_code(code: &CodeFile) -> Result<String, String> {
-    let mut buffer = String::new();
-    code.display(&mut buffer);
-    let result = rustfmt_format(&buffer);
-    result.map_err(|_| buffer)
-}
+// fn generate_code(code: &CodeFile) -> Result<String, String> {
+//     let mut buffer = String::new();
+//     code.display(&mut buffer);
+//     let result = rustfmt_format(&buffer);
+//     result.map_err(|_| buffer)
+// }
 
 // fn please_format(input: &str) -> syn::Result<String> {
 //     let syntax_tree = syn::parse_file(input)?;

@@ -135,7 +135,7 @@ impl Connection {
         match self.receive()? {
             Ok(Message::Notification(n)) if n.is_initialized() => Ok(()),
             Ok(msg) => Err(ProtocolError(format!(
-                r#"expected initialized notification, got: {msg:?}"#
+                "expected initialized notification, got: {msg:?}"
             ))),
             Err(e) => Err(ProtocolError(format!(
                 "expected initialized notification, got error: {e}",

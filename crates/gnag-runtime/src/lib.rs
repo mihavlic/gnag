@@ -11,17 +11,17 @@ use parser::Parser;
 use trace::{PostorderTrace, Tokens};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum NodeKindTag {
+pub enum NodeType {
     Skip = 0,
     Token = 1,
-    Rule = 2,
+    Nonterminal = 2,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeKind(pub std::num::NonZeroU16);
 
 impl NodeKind {
-    pub const fn new(index: u16, tag: NodeKindTag) -> NodeKind {
+    pub const fn new(index: u16, tag: NodeType) -> NodeKind {
         assert!(index < (1 << 6), "Index too high");
 
         // invert the index to turn 0 to MAX
@@ -35,28 +35,29 @@ impl NodeKind {
         }
     }
 
+    #[inline]
     pub const fn get_index(self) -> u16 {
         !self.0.get() >> 2
     }
 
     #[inline]
-    pub const fn is_tag(self, tag: NodeKindTag) -> bool {
+    pub const fn is_tag(self, tag: NodeType) -> bool {
         (self.0.get() & 0b11) == (tag as u16)
     }
 
     #[inline]
     pub const fn is_skip(self) -> bool {
-        self.is_tag(NodeKindTag::Skip)
+        self.is_tag(NodeType::Skip)
     }
 
     #[inline]
     pub const fn is_token(self) -> bool {
-        !self.is_tag(NodeKindTag::Rule)
+        !self.is_tag(NodeType::Nonterminal)
     }
 
     #[inline]
-    pub const fn is_rule(self) -> bool {
-        self.is_tag(NodeKindTag::Rule)
+    pub const fn is_nonterminal(self) -> bool {
+        self.is_tag(NodeType::Nonterminal)
     }
 
     pub fn name<T>(self, language: T) -> &'static str
@@ -70,7 +71,7 @@ impl NodeKind {
 #[test]
 fn test_node_kind() {
     for &index in &[0, 1, 2, (1 << 6) - 1] {
-        for &tag in &[NodeKindTag::Skip, NodeKindTag::Token, NodeKindTag::Rule] {
+        for &tag in &[NodeType::Skip, NodeType::Token, NodeType::Nonterminal] {
             let kind = NodeKind::new(index, tag);
             assert!(kind.is_tag(tag));
             assert_eq!(kind.get_index(), index);
@@ -82,7 +83,14 @@ fn test_node_kind() {
 pub struct NodeEvent {
     pub kind: NodeKind,
     pub max_lookahead: u16,
-    pub size_or_start_or_children: u32,
+    /// 32 bit integer with context-specific meaning:
+    /// * postorder trace:
+    ///     * token - size in bytes of token
+    ///     * nonterminal - index in trace of the start of this nonterminal
+    /// * preorder trace:
+    ///     * token - size in bytes of token
+    ///     * nonterminal - number of direct children of this nonterminal
+    pub data: u32,
 }
 
 #[derive(Clone)]

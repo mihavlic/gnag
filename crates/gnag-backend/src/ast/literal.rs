@@ -36,21 +36,19 @@ impl<'a> Lexer<'a> {
     }
 }
 
-type Iter<'a> = std::iter::Copied<std::slice::Iter<'a, u8>>;
-
 pub fn extract_literal(src: &[u8], literal_span: Span, out: &mut Vec<u8>, err: &ErrorAccumulator) {
     assert!(
-        !src.is_empty(),
+        !literal_span.is_empty(),
         "Lexer could not have produced zero-sized token"
     );
 
     let error = |l: &Lexer, message: &'static str| {
-        let span = Span::at(literal_span.start + l.offset(src));
+        let span = Span::at(literal_span.start() + l.offset(src));
         err.error_static(span, message);
     };
 
     let error_owned = |l: &Lexer, message: String| {
-        let span = Span::at(literal_span.start + l.offset(src));
+        let span = Span::at(literal_span.start() + l.offset(src));
         err.error(span, message);
     };
 

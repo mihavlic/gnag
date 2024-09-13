@@ -2,8 +2,8 @@ use std::{fmt::Display, ops::Deref};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Span {
-    pub(crate) start: u32,
-    pub(crate) end: u32,
+    start: u32,
+    end: u32,
 }
 
 impl Span {
@@ -16,8 +16,18 @@ impl Span {
             end: pos,
         }
     }
+    pub fn empty() -> Span {
+        Self { start: 0, end: 0 }
+    }
+    pub fn is_empty(self) -> bool {
+        self.start >= self.end
+    }
     #[track_caller]
     pub fn as_str(self, src: &str) -> &str {
+        &src[self.start as usize..self.end as usize]
+    }
+    #[track_caller]
+    pub fn as_bytes(self, src: &[u8]) -> &[u8] {
         &src[self.start as usize..self.end as usize]
     }
     pub fn contains(self, pos: u32) -> bool {

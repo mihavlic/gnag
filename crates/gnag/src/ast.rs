@@ -1,11 +1,6 @@
-#![allow(unused)]
-
 use std::borrow::Cow;
 
-use crate::{
-    ctx::ErrorAccumulator, handle::HandleVec, simple_handle, Lexer, Node, SpannedError, StrSpan,
-    TreeKind,
-};
+use crate::{ctx::ErrorAccumulator, Lexer, Node, StrSpan, TreeKind};
 
 pub struct ParsedFile {
     pub root: Node,
@@ -13,7 +8,7 @@ pub struct ParsedFile {
 }
 
 impl ParsedFile {
-    pub fn new(src: &str, err: &ErrorAccumulator) -> ParsedFile {
+    pub fn new(src: &str, _err: &ErrorAccumulator) -> ParsedFile {
         let mut lexer = Lexer::new(src.as_bytes());
 
         let (tokens, trivia) = crate::lex(&mut lexer);
@@ -356,7 +351,7 @@ fn expression(tree: &Node, arena: &[Node]) -> Option<Expression> {
 }
 
 pub trait ExtractedStringAccumulator<'a> {
-    fn begin_content(&mut self, offset: usize) {}
+    fn begin_content(&mut self, offset: usize);
     fn push_str(&mut self, str: &str);
     fn push_escaped_char(&mut self, char: char);
     type Result: 'a;
@@ -364,6 +359,7 @@ pub trait ExtractedStringAccumulator<'a> {
 }
 
 impl<'a> ExtractedStringAccumulator<'a> for String {
+    fn begin_content(&mut self, _offset: usize) {}
     fn push_str(&mut self, str: &str) {
         self.push_str(str);
     }
@@ -371,6 +367,7 @@ impl<'a> ExtractedStringAccumulator<'a> for String {
         self.push(char);
     }
     type Result = Cow<'a, str>;
+
     fn finish(mut self, verbatim: &'a str) -> Self::Result {
         if self.is_empty() {
             Cow::Borrowed(verbatim)
@@ -402,7 +399,7 @@ pub fn extract_str_literal_impl<'a, U: ExtractedStringAccumulator<'a>>(
     }
 
     let mut start = l.pos();
-    let mut end = start;
+    let end;
 
     string.begin_content(start as usize);
     loop {
@@ -480,7 +477,7 @@ impl<'a> ExtractedStringAccumulator<'a> for DescribedString {
             self.parts.push(StringPart::Original(str.len()));
         }
     }
-    fn push_escaped_char(&mut self, char: char) {
+    fn push_escaped_char(&mut self, _: char) {
         self.parts.push(StringPart::Escaped);
     }
     type Result = Self;
@@ -586,11 +583,6 @@ fn test_describe_escapes() {
 fn test_extract_string() {
     let src = r"'hi\nthis\tis your mother👍'";
     let out =   "hi\nthis\tis your mother👍";
-
-    let span = StrSpan {
-        start: 0,
-        end: src.len() as u32,
-    };
 
     let res = extract_str_literal(src).unwrap();
     assert!(matches!(res.0, Cow::Owned(_)));

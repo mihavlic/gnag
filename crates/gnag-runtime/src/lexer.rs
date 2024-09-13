@@ -119,7 +119,7 @@ impl<'a> Lexer<'a> {
         NodeEvent {
             kind,
             max_lookahead,
-            size_or_start_or_children: token_size.try_into().unwrap(),
+            data: token_size.try_into().unwrap(),
         }
     }
 }

@@ -116,7 +116,7 @@ impl<'a> Parser<'a> {
         self.tree_trace.push(NodeEvent {
             kind,
             max_lookahead: 0, // TODO
-            size_or_start_or_children: start.0,
+            data: start.0,
         });
     }
 

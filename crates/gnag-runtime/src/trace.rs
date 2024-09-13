@@ -173,12 +173,12 @@ impl Iterator for TraceIterator<'_, '_> {
     type Item = (TraceVisitEvent, NodeEvent);
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(event) = self.stack.last_mut() {
-            if event.size_or_start_or_children == 0 {
+            if event.data == 0 {
                 let event = *event;
                 self.stack.pop();
                 return Some((TraceVisitEvent::Close, event));
             } else {
-                event.size_or_start_or_children -= 1;
+                event.data -= 1;
             }
         }
 
@@ -211,13 +211,13 @@ impl Iterator for TraceOffsetIterator<'_, '_> {
     type Item = (u32, TraceVisitEvent, NodeEvent);
     fn next(&mut self) -> Option<Self::Item> {
         if let Some((event, start_offset)) = self.stack.last_mut() {
-            if event.size_or_start_or_children == 0 {
+            if event.data == 0 {
                 let event = *event;
                 let start_offset = *start_offset;
                 self.stack.pop();
                 return Some((start_offset, TraceVisitEvent::Close, event));
             } else {
-                event.size_or_start_or_children -= 1;
+                event.data -= 1;
             }
         }
 
@@ -225,7 +225,7 @@ impl Iterator for TraceOffsetIterator<'_, '_> {
         let offset = self.current_offset;
 
         let event = if next.kind.is_token() {
-            self.current_offset += next.size_or_start_or_children;
+            self.current_offset += next.data;
             TraceVisitEvent::Token
         } else {
             self.stack.push((*next, self.current_offset));
@@ -315,9 +315,9 @@ pub fn trace_postorder_to_preorder_inplace(
         }
 
         while let Some(current) = stack.last_mut() {
-            if current.event.size_or_start_or_children == index {
+            if current.event.data == index {
                 writer.push(NodeEvent {
-                    size_or_start_or_children: current.child_count,
+                    data: current.child_count,
                     kind: current.event.kind,
                     max_lookahead: current.event.max_lookahead,
                 });
@@ -343,13 +343,13 @@ fn test_reorder() {
         names: &["1", "2"],
     };
 
-    let token = NodeKind::new(0, crate::NodeKindTag::Token);
-    let rule = NodeKind::new(1, crate::NodeKindTag::Rule);
+    let token = NodeKind::new(0, crate::NodeType::Token);
+    let rule = NodeKind::new(1, crate::NodeType::Nonterminal);
 
     let tokens = &[NodeEvent {
         kind: token,
         max_lookahead: 0,
-        size_or_start_or_children: 0,
+        data: 0,
     }; 10];
 
     let mut p = Parser::new(tokens, Vec::new());

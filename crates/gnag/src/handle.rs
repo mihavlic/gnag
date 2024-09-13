@@ -503,13 +503,13 @@ impl<H> HandleBitset<H> {
     }
     pub fn with_capacity(capacity: usize) -> HandleBitset<H> {
         Self {
-            set: Bitset::with_capacity(capacity),
+            set: Bitset::with_capacity(capacity.try_into().unwrap()),
             spooky: PhantomData,
         }
     }
     pub fn with_capacity_filled(capacity: usize, fill: bool) -> HandleBitset<H> {
         Self {
-            set: Bitset::with_capacity_filled(capacity, fill),
+            set: Bitset::with_capacity_filled(capacity.try_into().unwrap(), fill),
             spooky: PhantomData,
         }
     }
@@ -520,19 +520,19 @@ impl<H> HandleBitset<H> {
 
 impl<H: TypedHandle> HandleBitset<H> {
     pub fn replace(&mut self, handle: H, value: bool) -> bool {
-        self.set.replace(handle.index(), value)
+        self.set.replace(handle.index_u32(), value)
     }
     pub fn set(&mut self, handle: H, value: bool) {
-        self.set.set(handle.index(), value)
+        self.set.set(handle.index_u32(), value)
     }
     pub fn insert(&mut self, handle: H) -> bool {
-        self.set.insert(handle.index())
+        self.set.insert(handle.index_u32())
     }
     pub fn remove(&mut self, handle: H) -> bool {
-        self.set.remove(handle.index())
+        self.set.remove(handle.index_u32())
     }
     pub fn contains(&self, handle: H) -> bool {
-        self.set.contains(handle.index())
+        self.set.contains(handle.index_u32())
     }
 }
 
@@ -541,18 +541,19 @@ pub struct Bitset {
     set: Vec<usize>,
 }
 
+const BITS: u32 = usize::BITS;
+
 impl Bitset {
     pub fn new() -> Bitset {
         Self { set: Vec::new() }
     }
-    pub fn with_capacity(capacity: usize) -> Bitset {
-        let bytes = std::mem::size_of::<usize>();
-        let words = (capacity + bytes - 1) / bytes;
+    pub fn with_capacity(capacity: u32) -> Bitset {
+        let words = (capacity + usize::BITS - 1) / usize::BITS;
         Self {
-            set: Vec::with_capacity(words),
+            set: Vec::with_capacity(words as usize),
         }
     }
-    pub fn with_capacity_filled(capacity: usize, fill: bool) -> Bitset {
+    pub fn with_capacity_filled(capacity: u32, fill: bool) -> Bitset {
         let mut this = Self::with_capacity(capacity);
         let pattern = match fill {
             true => usize::MAX,
@@ -564,29 +565,29 @@ impl Bitset {
     pub fn clear(&mut self) {
         self.set.clear();
     }
-    pub fn replace(&mut self, index: usize, value: bool) -> bool {
+    pub fn replace(&mut self, index: u32, value: bool) -> bool {
         replace_impl(&mut self.set, index, value)
     }
-    pub fn set(&mut self, index: usize, value: bool) {
+    pub fn set(&mut self, index: u32, value: bool) {
         replace_impl(&mut self.set, index, value);
     }
-    pub fn insert(&mut self, index: usize) -> bool {
+    pub fn insert(&mut self, index: u32) -> bool {
         replace_impl(&mut self.set, index, true)
     }
-    pub fn remove(&mut self, index: usize) -> bool {
-        let word = index / std::mem::size_of::<usize>();
+    pub fn remove(&mut self, index: u32) -> bool {
+        let word = index / BITS;
 
-        if word >= self.set.len() {
+        if word as usize >= self.set.len() {
             return false;
         }
 
         replace_impl(&mut self.set, index, false)
     }
-    pub fn contains(&self, index: usize) -> bool {
-        let word = index / std::mem::size_of::<usize>();
-        let bit = index % std::mem::size_of::<usize>();
+    pub fn contains(&self, index: u32) -> bool {
+        let word = (index / BITS) as usize;
+        let bit = index % BITS;
 
-        if word >= self.set.len() {
+        if word as usize >= self.set.len() {
             return false;
         }
 
@@ -595,9 +596,9 @@ impl Bitset {
     }
 }
 
-fn replace_impl(storage: &mut Vec<usize>, index: usize, value: bool) -> bool {
-    let word = index / std::mem::size_of::<usize>();
-    let bit = index % std::mem::size_of::<usize>();
+fn replace_impl(storage: &mut Vec<usize>, index: u32, value: bool) -> bool {
+    let word = (index / BITS) as usize;
+    let bit = index % BITS;
 
     if word >= storage.len() {
         storage.resize(word + 1, 0);
@@ -610,4 +611,64 @@ fn replace_impl(storage: &mut Vec<usize>, index: usize, value: bool) -> bool {
     let prev = (storage[word] & one) == one;
     storage[word] = new | (storage[word] & mask);
     prev
+}
+
+#[test]
+fn test_bitset() {
+    let mut set = Bitset::new();
+    assert_eq!(set.set.len(), 0);
+
+    assert_eq!(set.contains(0), false);
+    assert_eq!(set.contains(1), false);
+    assert_eq!(set.contains(2), false);
+
+    set.set(1, false);
+    assert_eq!(set.contains(0), false);
+    assert_eq!(set.contains(1), false);
+    assert_eq!(set.contains(2), false);
+
+    set.set(1, true);
+    assert_eq!(set.contains(0), false);
+    assert_eq!(set.contains(1), true);
+    assert_eq!(set.contains(2), false);
+
+    set.set(1, false);
+    assert_eq!(set.contains(0), false);
+    assert_eq!(set.contains(1), false);
+    assert_eq!(set.contains(2), false);
+
+    assert_eq!(set.set.len(), 1);
+
+    let a = BITS - 1;
+    let b = BITS;
+    let c = BITS + 1;
+
+    set.set(a, false);
+    set.set(b, false);
+    set.set(c, false);
+    assert_eq!(set.contains(a), false);
+    assert_eq!(set.contains(b), false);
+    assert_eq!(set.contains(c), false);
+
+    set.set(a, true);
+    set.set(b, true);
+    set.set(c, true);
+    assert_eq!(set.contains(a), true);
+    assert_eq!(set.contains(b), true);
+    assert_eq!(set.contains(c), true);
+}
+
+#[test]
+fn test_bitset_capacity() {
+    let set = Bitset::with_capacity(0);
+    assert_eq!(set.set.capacity(), 0);
+
+    let set = Bitset::with_capacity(1);
+    assert_eq!(set.set.capacity(), 1);
+
+    let set = Bitset::with_capacity(BITS);
+    assert_eq!(set.set.capacity(), 1);
+
+    let set = Bitset::with_capacity(BITS + 1);
+    assert_eq!(set.set.capacity(), 2);
 }

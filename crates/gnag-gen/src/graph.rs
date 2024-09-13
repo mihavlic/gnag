@@ -851,24 +851,25 @@ impl FlowTargets {
         FlowTargets { set: Bitset::new() }
     }
     pub fn with_capacity(capacity: usize) -> FlowTargets {
+        let capacity: u32 = capacity.try_into().unwrap();
         FlowTargets {
             set: Bitset::with_capacity(capacity * 2),
         }
     }
     pub fn set_is_reachable(&mut self, node: NodeHandle) {
-        let index = node.index() * 2;
+        let index = node.index_u32() * 2;
         self.set.insert(index);
     }
     pub fn set_is_target(&mut self, node: NodeHandle) {
-        let index = node.index() * 2 + 1;
+        let index = node.index_u32() * 2 + 1;
         self.set.insert(index);
     }
     pub fn is_reachable(&self, node: NodeHandle) -> bool {
-        let index = node.index() * 2;
+        let index = node.index_u32() * 2;
         self.set.contains(index)
     }
     pub fn is_target(&self, node: NodeHandle) -> bool {
-        let index = node.index() * 2 + 1;
+        let index = node.index_u32() * 2 + 1;
         self.set.contains(index)
     }
 }

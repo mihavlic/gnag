@@ -20,7 +20,6 @@ class EventHandler(FileSystemEventHandler):
 
 args = sys.argv[1:]
 
-dot = '--dot' in args
 watch = '--watch' in args
 release = '--release' in args
 generate = '--generate' in args
@@ -57,14 +56,12 @@ try:
             if release:
                 command += ['--release']
 
-            capture_output = dot or generate
+            capture_output = generate
             process = subprocess.run(command + ["--"] + args, capture_output=capture_output)
             
             if capture_output:
                 sys.stderr.buffer.write(process.stderr)
                 sys.stderr.flush()
-                if dot:
-                    dotp = subprocess.run(["dot", "-T", "pdf", "-o", "target/dot.pdf"], input=process.stdout)
                 if generate:
                     output_path = "crates/gnag-parser/src/lib.rs"
                     with open(output_path, "wb") as output:

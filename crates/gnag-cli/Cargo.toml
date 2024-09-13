@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gnag = { path = "../gnag" }
-gnag-gen = { path = "../gnag-gen" }
+gnag-parser = { path = "../gnag-parser" }
+gnag-backend = { path = "../gnag-backend" }
+code-render = { path = "../code-render" }
 linemap = { path = "../linemap" }

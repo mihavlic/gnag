@@ -1,0 +1,11 @@
+[package]
+name = "gnag-parser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gnag-runtime = { path = "../gnag-runtime" }
+
+[[bin]]
+name = "debug"
+path = "bin/debug.rs"

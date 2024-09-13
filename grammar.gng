@@ -1,4 +1,4 @@
-tokens {
+lexer {
     Newline = '\n'
     
     @skip
@@ -12,8 +12,8 @@ tokens {
     Ident = <ascii_identifier_start> <ascii_identifier_continue>*
     
     @keyword InlineKeyword = 'inline'
-    @keyword TokensKeywords = 'tokens'
-    @keyword RulesKeyword = 'rules'
+    @keyword LexerKeyword = 'lexer'
+    @keyword ParserKeyword = 'parser'
     @keyword PrattKeyword = 'pratt'
     @keyword GroupKeyword = 'group'
 
@@ -38,11 +38,11 @@ tokens {
     Error = <not <ascii_whitespace>>+ | <any_utf8>
 }
 
-rules {
+parser {
     @root
-    File = (Newline | TokensOrRules)*
+    File = (Newline | RuleGroup)*
 
-    TokensOrRules = ('tokens' | 'rules') <rules_block>
+    RuleGroup = ('lexer' | 'parser') <rules_block>
 
     Attribute = '@' Ident Newline?
     Parameters = '(' <comma_list Ident> ')'
@@ -55,8 +55,8 @@ rules {
         PrattExpr = 'pratt' <rules_block>
 
         PostExpr = Expr ('?' | '*' | '+')
-        SeqExpr = Expr Expr+
-        BinExpr = Expr '|' Expr
+        Sequence = Expr Expr+
+        Choice = Expr ('|' Expr)+
     }
 
     rules_block() = Newline* '{' (Newline | Rule)* '}'

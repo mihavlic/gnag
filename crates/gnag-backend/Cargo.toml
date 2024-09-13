@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+code-render = { path = "../code-render" }
 gnag-runtime = { path = "../gnag-runtime" }
 gnag-parser = { path = "../gnag-parser" }
+# We are not using cranelift for any code generation, just their data structure libs
+cranelift-bitset = "0.111.0"
+cranelift-entity = "0.111.0"

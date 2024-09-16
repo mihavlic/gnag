@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use cranelift_entity::{entity_impl, PrimaryMap};
 
 use crate::{
@@ -22,15 +20,16 @@ pub enum FlowAction {
     Continue(ScopeHandle),
     Break(ScopeHandle),
     Unreachable,
+    None,
 }
 
-pub enum ScopeKind {
+pub enum BlockKind {
     Block,
     Loop,
 }
 
-pub struct Scope {
-    kind: ScopeKind,
+pub struct Block {
+    kind: BlockKind,
 }
 
 pub struct Step {
@@ -49,7 +48,7 @@ pub enum TreeEvent {
 pub struct StructureBuilder {
     events: Vec<TreeEvent>,
     steps: PrimaryMap<StepHandle, Step>,
-    scopes: PrimaryMap<ScopeHandle, Scope>,
+    blocks: PrimaryMap<ScopeHandle, Block>,
 }
 
 impl StructureBuilder {
@@ -58,30 +57,33 @@ impl StructureBuilder {
         self.events.push(TreeEvent::Step(handle));
         handle
     }
-    pub fn scope(
-        &mut self,
-        scope: Scope,
-        mut fun: impl FnMut(&mut StructureBuilder),
-    ) -> ScopeHandle {
-        let handle = self.scopes.push(scope);
+    pub fn open_block(&mut self, block: Block) -> ScopeHandle {
+        let handle = self.blocks.push(block);
         self.events.push(TreeEvent::Open(handle));
-        fun(self);
-        self.events.push(TreeEvent::Close(handle));
         handle
     }
+    pub fn close_block(&mut self, handle: ScopeHandle) {
+        self.events.push(TreeEvent::Close(handle));
+    }
     pub fn jump(&mut self, action: FlowAction) {
-        self.events.push(TreeEvent::Jump(action));
+        if action != FlowAction::None {
+            self.events.push(TreeEvent::Jump(action));
+        }
     }
 }
 
-fn pattern(
+pub struct PatternProperties {
+    commit_after: bool,
+}
+
+fn lower_pattern(
     pattern: &Pattern,
     success: FlowAction,
-    fail: Option<FlowAction>,
+    fail: FlowAction,
 
     grammar: &Grammar,
     builder: &mut StructureBuilder,
-) {
+) -> PatternProperties {
     let children = pattern.children();
 
     match pattern.kind() {
@@ -91,40 +93,86 @@ fn pattern(
                 success,
                 fail,
             });
+            PatternProperties {
+                commit_after: transition.advances_parser(),
+            }
         }
         PatternKind::Group(group) => {
-            let (next_success, next_fail) = match group {
-                Group::Choice => (FlowAction::Break(block), None),
-                Group::Sequence { .. } => (FlowAction::FallThrough, Some(fail)),
-                Group::Loop => (FlowAction::Continue(block), Some(FlowAction::Break(block))),
-                Group::Maybe => (FlowAction::Break(block), Some(FlowAction::Break(block))),
+            let kind = match group {
+                Group::Sequence { .. } | Group::Choice | Group::Maybe => BlockKind::Block,
+                Group::Loop => BlockKind::Loop,
                 Group::OneOrMore | Group::InlineCall { .. } => {
                     unreachable!("Should have been lowered")
                 }
             };
+            let block = builder.open_block(Block { kind });
 
-            builder.scope(Scope { handle: , kind:  }, |builder| {
-                for child in pattern.children() {
-                    pattern(child, next_success, next_fail, rcx, grammar, builder);
+            let is_choice = matches!(group, Group::Choice);
+
+            let (next_success, mut next_fail) = match group {
+                Group::Choice => (FlowAction::Break(block), FlowAction::None),
+                Group::Sequence { .. } => (FlowAction::None, fail),
+                Group::Loop => (FlowAction::Continue(block), FlowAction::Break(block)),
+                Group::Maybe => (FlowAction::Break(block), FlowAction::Break(block)),
+                Group::OneOrMore | Group::InlineCall { .. } => {
+                    unreachable!()
+                }
+            };
+
+            // choices start out committed until a child doesn't have a commit_after
+            // sequences need any of their children to be commit_after
+            let mut commit_after = is_choice;
+
+            // is sequence commited?
+            let mut commit = false;
+            let commit_index = children
+                .iter()
+                .position(|child| matches!(child.kind(), PatternKind::Commit));
+
+            for (index, child) in pattern.children().iter().enumerate() {
+                let child = lower_pattern(child, next_success, next_fail, grammar, builder);
+
+                if is_choice {
+                    commit_after &= child.commit_after;
+                } else {
+                    commit_after |= child.commit_after;
                 }
 
-                match group {
-                    Group::Choice => {
-                        builder.jump(fail);
+                // handle sequence committing behaviour
+                if !is_choice && !commit {
+                    if let Some(commit_index) = commit_index {
+                        if commit_index == index {
+                            commit = true;
+                        }
+                    } else {
+                        // automatically commit sequence only if commit_index is none (no forced commit)
+                        commit |= child.commit_after;
                     }
-                    Group::Sequence { .. } | Group::Loop | Group::Maybe => {
-                        builder.jump(success);
-                    }
-                    Group::OneOrMore | Group::InlineCall { .. } => {
-                        unreachable!("Should have been lowered")
+
+                    if commit {
+                        // committing means that failures act as successes
+                        next_fail = next_success;
                     }
                 }
+            }
+
+            // if control flow reaches the end of this block
+            // a choice has exhausted all options and fails,
+            // a sequence has matched all its subpatterns and succeeds
+            builder.jump(match is_choice {
+                true => fail,
+                false => success,
             });
+
+            builder.close_block(block);
+
+            PatternProperties { commit_after }
         }
         PatternKind::Commit => {
-            render!(rcx,
-                unreachable!("TODO remove commit");
-            )
+            // do nothing
+            PatternProperties {
+                commit_after: false,
+            }
         }
         PatternKind::UnresolvedIdent(_)
         | PatternKind::UnresolvedLiteral(_)

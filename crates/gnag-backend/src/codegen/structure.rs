@@ -1,8 +1,9 @@
 use cranelift_entity::{entity_impl, PrimaryMap};
+use gnag_runtime::NodeKind;
 
 use crate::{
     ast::pattern::{Group, Pattern, PatternKind, Transition},
-    backend::grammar::Grammar,
+    backend::grammar::{Grammar, RuleHandle},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -16,61 +17,81 @@ pub struct StepHandle(u32);
 entity_impl!(StepHandle);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum FlowAction {
+pub enum Flow {
     Continue(ScopeHandle),
     Break(ScopeHandle),
     Unreachable,
-    None,
 }
 
-pub enum BlockKind {
+pub enum ScopeKind {
     Block,
     Loop,
 }
 
-pub struct Block {
-    kind: BlockKind,
+pub struct Scope {
+    /// index of the first step in this block
+    start: StepHandle,
+    /// number of steps in this block and its child blocks
+    len: u32,
 }
 
 pub struct Step {
     transition: Transition,
-    success: FlowAction,
-    fail: FlowAction,
+    success: Option<Flow>,
+    fail: Option<Flow>,
+}
+
+pub enum Statement {
+    Step(Step),
+    Jump(Flow),
 }
 
 pub enum TreeEvent {
     Open(ScopeHandle),
     Close(ScopeHandle),
-    Step(StepHandle),
-    Jump(FlowAction),
+    Statement(StepHandle),
 }
 
 pub struct StructureBuilder {
     events: Vec<TreeEvent>,
-    steps: PrimaryMap<StepHandle, Step>,
-    blocks: PrimaryMap<ScopeHandle, Block>,
+    statements: PrimaryMap<StepHandle, Statement>,
+    blocks: PrimaryMap<ScopeHandle, Scope>,
 }
 
 impl StructureBuilder {
     pub fn step(&mut self, step: Step) -> StepHandle {
-        let handle = self.steps.push(step);
-        self.events.push(TreeEvent::Step(handle));
+        let handle = self.statements.push(Statement::Step(step));
+        self.events.push(TreeEvent::Statement(handle));
         handle
     }
-    pub fn open_block(&mut self, block: Block) -> ScopeHandle {
-        let handle = self.blocks.push(block);
+    pub fn open_block(&mut self) -> ScopeHandle {
+        let start = self.statements.next_key();
+        let handle = self.blocks.push(Scope { start, len: 0 });
         self.events.push(TreeEvent::Open(handle));
         handle
     }
     pub fn close_block(&mut self, handle: ScopeHandle) {
+        let end = self.statements.next_key();
+        let block = &mut self.blocks[handle];
+        block.len = end.as_u32() - block.start.as_u32();
+
         self.events.push(TreeEvent::Close(handle));
     }
-    pub fn jump(&mut self, action: FlowAction) {
-        if action != FlowAction::None {
-            self.events.push(TreeEvent::Jump(action));
-        }
+    pub fn jump(&mut self, action: Flow) -> StepHandle {
+        self.statements.push(Statement::Jump(action))
     }
 }
+
+// enum Action {
+//     LexerReturn(RuleHandle),
+//     Return(bool),
+//     None
+// }
+
+// struct ResultAction {
+//     action: Action,
+//     flow: Option<Flow>
+// }
 
 pub struct PatternProperties {
     commit_after: bool,
@@ -78,8 +99,8 @@ pub struct PatternProperties {
 
 fn lower_pattern(
     pattern: &Pattern,
-    success: FlowAction,
-    fail: FlowAction,
+    success: Option<Flow>,
+    fail: Option<Flow>,
 
     grammar: &Grammar,
     builder: &mut StructureBuilder,
@@ -98,45 +119,33 @@ fn lower_pattern(
             }
         }
         PatternKind::Group(group) => {
-            let kind = match group {
-                Group::Sequence { .. } | Group::Choice | Group::Maybe => BlockKind::Block,
-                Group::Loop => BlockKind::Loop,
-                Group::OneOrMore | Group::InlineCall { .. } => {
-                    unreachable!("Should have been lowered")
-                }
-            };
-            let block = builder.open_block(Block { kind });
+            let block = builder.open_block();
 
             let is_choice = matches!(group, Group::Choice);
 
             let (next_success, mut next_fail) = match group {
-                Group::Choice => (FlowAction::Break(block), FlowAction::None),
-                Group::Sequence { .. } => (FlowAction::None, fail),
-                Group::Loop => (FlowAction::Continue(block), FlowAction::Break(block)),
-                Group::Maybe => (FlowAction::Break(block), FlowAction::Break(block)),
+                Group::Choice => (Some(Flow::Break(block)), None),
+                Group::Sequence { .. } => (None, fail),
+                Group::Loop => (Some(Flow::Continue(block)), Some(Flow::Break(block))),
+                Group::Maybe => (Some(Flow::Break(block)), Some(Flow::Break(block))),
                 Group::OneOrMore | Group::InlineCall { .. } => {
-                    unreachable!()
+                    unreachable!("Should have been lowered")
                 }
             };
 
-            // choices start out committed until a child doesn't have a commit_after
-            // sequences need any of their children to be commit_after
-            let mut commit_after = is_choice;
-
-            // is sequence commited?
-            let mut commit = false;
             let commit_index = children
                 .iter()
                 .position(|child| matches!(child.kind(), PatternKind::Commit));
 
+            let mut commit_after = false;
+            let mut commit = false;
+
             for (index, child) in pattern.children().iter().enumerate() {
                 let child = lower_pattern(child, next_success, next_fail, grammar, builder);
 
-                if is_choice {
-                    commit_after &= child.commit_after;
-                } else {
-                    commit_after |= child.commit_after;
-                }
+                commit_after |= child.commit_after;
+
+                // TODO resets for backtracking
 
                 // handle sequence committing behaviour
                 if !is_choice && !commit {
@@ -145,13 +154,13 @@ fn lower_pattern(
                             commit = true;
                         }
                     } else {
-                        // automatically commit sequence only if commit_index is none (no forced commit)
+                        // automatically commit sequence only if commit_index is none
                         commit |= child.commit_after;
                     }
 
                     if commit {
-                        // committing means that failures act as successes
-                        next_fail = next_success;
+                        // committing means that failures are ignored
+                        next_fail = None;
                     }
                 }
             }
@@ -159,10 +168,11 @@ fn lower_pattern(
             // if control flow reaches the end of this block
             // a choice has exhausted all options and fails,
             // a sequence has matched all its subpatterns and succeeds
-            builder.jump(match is_choice {
+            let action = match is_choice {
                 true => fail,
                 false => success,
-            });
+            };
+            builder.jump(action);
 
             builder.close_block(block);
 
@@ -179,6 +189,17 @@ fn lower_pattern(
         | PatternKind::InlineParameter(_)
         | PatternKind::Pratt(_) => unreachable!("Should have been lowered"),
     }
+}
+
+pub fn optimize(structure: &mut StructureBuilder) {
+    let mut stack = Vec::new();
+
+    structure.events.retain(|event| match event {
+        TreeEvent::Open(_) => todo!(),
+        TreeEvent::Close(_) => todo!(),
+        TreeEvent::Statement(_) => todo!(),
+        TreeEvent::Jump(_) => todo!(),
+    });
 }
 
 // fn transition(transition: &Transition, rcx: &RenderCx, grammar: &Grammar) -> Fragment {

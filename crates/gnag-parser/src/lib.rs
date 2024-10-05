@@ -120,19 +120,11 @@ mod rules {
     }
     pub fn pTokensOrRules(p: &mut Parser) -> bool {
         let start = p.open_span();
-        'b0: {
-            if !p.token(LexerKeyword) && !p.token(ParserKeyword) {
-                break 'b0;
-            }
+        if p.token(LexerKeyword) || p.token(ParserKeyword) {
             let checkpoint: ParserPosition = p.save_position();
             while p.token(Newline) {}
             if p.token(LCurly) {
-                loop {
-                    if p.token(Newline) || pRule(p) {
-                        continue;
-                    }
-                    break;
-                }
+                while p.token(Newline) || pRule(p) {}
                 p.token(RCurly);
             } else {
                 p.restore_position(checkpoint);

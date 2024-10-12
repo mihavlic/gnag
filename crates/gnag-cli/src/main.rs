@@ -9,7 +9,7 @@ use std::{
 
 use code_render::RenderCx;
 use gnag_backend::{
-    ast::Ast, backend::grammar::Grammar, codegen::display_file, error::ErrorAccumulator,
+    ast::Ast, backend::grammar::Grammar, codegen::render_file, error::ErrorAccumulator,
 };
 use gnag_parser::LANGUAGE;
 use linemap::{LineMap, Utf16Pos};
@@ -301,9 +301,9 @@ fn run() -> Result<(), ()> {
 
     if do_code {
         let rcx = RenderCx::new();
-        let fragment = display_file(&grammar, &rcx);
+        let fragments = render_file(&grammar, &rcx);
         let mut buf = String::new();
-        write!(buf, "{}", fragment.display(&rcx));
+        fragments.fmt_write_to(&mut buf, &rcx);
         let output = rustfmt_format(&buf).unwrap();
 
         print!("\n{output}");

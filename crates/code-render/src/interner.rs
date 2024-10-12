@@ -1,4 +1,4 @@
-use crate::{Fragment, FragmentHeader};
+use crate::{Fragments, RenderCxInner};
 
 #[derive(Clone, Copy)]
 pub struct InternedString {
@@ -6,39 +6,35 @@ pub struct InternedString {
     pub len: usize,
 }
 
-#[derive(Clone, Copy)]
-pub struct InternedFragments {
-    pub offset: usize,
-    pub len: usize,
-}
-
 #[derive(Clone)]
-pub struct FragmentIter {
-    inner: std::ops::Range<usize>,
+pub enum FragmentData {
+    Static(&'static str),
+    String(InternedString),
+    Composite(Fragments),
+    Concatenate,
 }
 
-impl Iterator for FragmentIter {
-    type Item = Fragment;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(Fragment::new)
-    }
-}
-
-impl IntoIterator for InternedFragments {
-    type Item = Fragment;
-    type IntoIter = FragmentIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        FragmentIter {
-            inner: self.offset..(self.offset + self.len),
+impl FragmentData {
+    pub fn resolve<'a, 'b>(&'a self, rcx: &'b RenderCxInner) -> FragmentValue<'b> {
+        match *self {
+            FragmentData::Static(a) => FragmentValue::String(a),
+            FragmentData::String(a) => FragmentValue::String(rcx.get_string(a)),
+            FragmentData::Composite(a) => FragmentValue::Composite(rcx.get_fragments(a)),
+            FragmentData::Concatenate => FragmentValue::Concatenate,
         }
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum FragmentValue<'a> {
+    String(&'a str),
+    Composite(&'a [FragmentData]),
+    Concatenate,
+}
+
 pub struct Interner {
     string_arena: String,
-    fragment_arena: Vec<FragmentHeader>,
+    fragment_arena: Vec<FragmentData>,
 }
 
 impl Interner {
@@ -58,29 +54,22 @@ impl Interner {
         }
     }
 
-    pub fn intern_fragments(&mut self, slice: &[FragmentHeader]) -> InternedFragments {
-        let offset = self.fragment_arena.len();
+    pub fn intern_fragments(&mut self, slice: &[FragmentData]) -> Fragments {
+        let offset = self.fragment_arena.len().try_into().unwrap();
+        let len = slice.len().try_into().unwrap();
+
         self.fragment_arena.extend_from_slice(slice);
-        InternedFragments {
-            offset,
-            len: slice.len(),
-        }
-    }
-    pub fn intern_fragment(&mut self, header: FragmentHeader) -> Fragment {
-        let offset = self.fragment_arena.len();
-        self.fragment_arena.push(header);
-        Fragment::new(offset)
+
+        Fragments { offset, len }
     }
 
     pub fn get_string(&self, header: InternedString) -> &str {
         &self.string_arena[header.offset..(header.offset + header.len)]
     }
 
-    pub fn get_fragments(&self, header: InternedFragments) -> &[FragmentHeader] {
-        &self.fragment_arena[header.offset..(header.offset + header.len)]
-    }
-
-    pub fn get_fragment(&self, handle: Fragment) -> &FragmentHeader {
-        &self.fragment_arena[handle.index()]
+    pub fn get_fragments(&self, header: Fragments) -> &[FragmentData] {
+        let offset = header.offset as usize;
+        let len = header.len as usize;
+        &self.fragment_arena[offset..(offset + len)]
     }
 }

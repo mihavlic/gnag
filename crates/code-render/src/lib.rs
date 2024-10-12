@@ -3,9 +3,7 @@ mod interner;
 mod renderable;
 
 pub use fragment::*;
-use interner::InternedFragments;
-use interner::InternedString;
-use interner::Interner;
+pub use interner::*;
 pub use renderable::*;
 
 // re-export proc macros
@@ -20,7 +18,7 @@ use std::{cell::RefCell, fmt::Display};
 pub struct RenderCxInner {
     interner: Interner,
     string: String,
-    stack: Vec<FragmentHeader>,
+    stack: Vec<FragmentData>,
 }
 
 impl RenderCxInner {
@@ -36,31 +34,26 @@ impl RenderCxInner {
         self.interner.get_string(header)
     }
 
-    pub fn get_fragments(&self, header: InternedFragments) -> &[FragmentHeader] {
+    pub fn get_fragments(&self, header: Fragments) -> &[FragmentData] {
         self.interner.get_fragments(header)
-    }
-
-    pub fn get_fragment(&self, handle: Fragment) -> &FragmentHeader {
-        self.interner.get_fragment(handle)
     }
 
     fn flush_writes(&mut self) {
         if !self.string.is_empty() {
             let interned = self.interner.intern_string(&self.string);
-            self.stack.push(FragmentHeader::String(interned));
+            self.stack.push(FragmentData::String(interned));
             self.string.clear();
         }
     }
 
     pub fn append_str(&mut self, str: &'static str) {
         self.flush_writes();
-        self.stack.push(FragmentHeader::Static(str));
+        self.stack.push(FragmentData::Static(str));
     }
 
-    pub fn append_fragment(&mut self, fragment: Fragment) {
+    pub fn append_fragment(&mut self, fragment: Fragments) {
         self.flush_writes();
-        let header = self.interner.get_fragment(fragment);
-        self.stack.push(header.clone());
+        self.stack.push(FragmentData::Composite(fragment));
     }
 
     pub fn append_display(&mut self, value: &dyn Display) {
@@ -73,11 +66,16 @@ impl RenderCxInner {
         write!(self.string, "{value:?}").unwrap();
     }
 
+    pub fn append_concatenate(&mut self) {
+        self.flush_writes();
+        self.stack.push(FragmentData::Concatenate);
+    }
+
     fn start_render(&self) -> usize {
         self.stack.len()
     }
 
-    fn finish_render_slice(&mut self, render_start: usize) -> InternedFragments {
+    fn finish_render_slice(&mut self, render_start: usize) -> Fragments {
         self.flush_writes();
         let fragments = &self.stack[render_start..];
 
@@ -87,20 +85,14 @@ impl RenderCxInner {
         header
     }
 
-    fn finish_render(&mut self, render_start: usize) -> Fragment {
+    fn finish_render(&mut self, render_start: usize) -> Fragments {
         self.flush_writes();
         let fragments = &self.stack[render_start..];
 
-        let handle = if let [one] = fragments {
-            self.interner.intern_fragment(one.clone())
-        } else {
-            let interned = self.interner.intern_fragments(fragments);
-            self.interner
-                .intern_fragment(FragmentHeader::Composite(interned))
-        };
+        let interned = self.interner.intern_fragments(fragments);
 
         self.stack.truncate(render_start);
-        handle
+        interned
     }
 }
 
@@ -123,7 +115,7 @@ impl RenderCx {
         self.inner.borrow_mut().append_str(str);
     }
 
-    pub fn append_fragment(&self, fragment: Fragment) {
+    pub fn append_fragment(&self, fragment: Fragments) {
         self.inner.borrow_mut().append_fragment(fragment);
     }
 
@@ -135,22 +127,26 @@ impl RenderCx {
         self.inner.borrow_mut().append_debug(&value);
     }
 
+    pub fn append_concatenate(&self) {
+        self.inner.borrow_mut().append_concatenate();
+    }
+
     #[doc(hidden)]
     pub fn start_render(&self) -> usize {
         self.inner.borrow().start_render()
     }
 
     #[doc(hidden)]
-    pub fn finish_render_slice(&self, render_start: usize) -> InternedFragments {
+    pub fn finish_render_slice(&self, render_start: usize) -> Fragments {
         self.inner.borrow_mut().finish_render_slice(render_start)
     }
 
     #[doc(hidden)]
-    pub fn finish_render(&self, render_start: usize) -> Fragment {
+    pub fn finish_render(&self, render_start: usize) -> Fragments {
         self.inner.borrow_mut().finish_render(render_start)
     }
 
-    pub fn scope(&self, fun: impl FnOnce()) -> Fragment {
+    pub fn scope(&self, fun: impl FnOnce()) -> Fragments {
         let start = self.start_render();
         fun();
         self.finish_render(start)

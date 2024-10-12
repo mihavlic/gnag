@@ -1,26 +1,62 @@
-use cranelift_entity::{entity_impl, PrimaryMap};
-use gnag_runtime::NodeKind;
+use std::fmt::Display;
+
+use code_render::{render, render_into, Fragments, RenderCx};
+use cranelift_entity::{entity_impl, EntitySet, PrimaryMap};
 
 use crate::{
-    ast::pattern::{Group, Pattern, PatternKind, Transition},
-    backend::grammar::{Grammar, RuleHandle},
+    ast::{
+        display::{ByteExt, ByteSliceExt},
+        pattern::{
+            AnyPattern, ComparisonKind, ConsumeUntil, Group, NotPattern, Pattern, PatternKind,
+            Transition, TransitionEffects,
+        },
+    },
+    backend::grammar::Grammar,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ScopeHandle(u32);
-
 entity_impl!(ScopeHandle);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct StepHandle(u32);
+impl Display for ScopeHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "'b{}", self.0)
+    }
+}
 
-entity_impl!(StepHandle);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct StatementHandle(u32);
+entity_impl!(StatementHandle);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
+    None,
     Continue(ScopeHandle),
     Break(ScopeHandle),
     Unreachable,
+}
+
+impl Display for Flow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Flow::Continue(a) => write!(f, "continue {a}"),
+            Flow::Break(a) => write!(f, "break {a}"),
+            Flow::Unreachable => write!(f, "unreachable!()"),
+            Flow::None => Ok(()),
+        }
+    }
+}
+
+impl Flow {
+    fn is_some(self) -> bool {
+        !matches!(self, Flow::None)
+    }
+    fn or(self, other: Flow) -> Flow {
+        match self {
+            Flow::None => other,
+            _ => self,
+        }
+    }
 }
 
 pub enum ScopeKind {
@@ -30,15 +66,15 @@ pub enum ScopeKind {
 
 pub struct Scope {
     /// index of the first step in this block
-    start: StepHandle,
+    pub start: StatementHandle,
     /// number of steps in this block and its child blocks
-    len: u32,
+    pub len: u32,
 }
 
 pub struct Step {
-    transition: Transition,
-    success: Option<Flow>,
-    fail: Option<Flow>,
+    pub transition: Transition,
+    pub success: Flow,
+    pub fail: Flow,
 }
 
 pub enum Statement {
@@ -46,61 +82,82 @@ pub enum Statement {
     Jump(Flow),
 }
 
+#[derive(Clone, Copy)]
 pub enum TreeEvent {
     Open(ScopeHandle),
     Close(ScopeHandle),
-    Statement(StepHandle),
+    Statement(StatementHandle),
+}
+
+#[derive(Clone, Copy)]
+pub enum TreeEventValue<'a> {
+    Open(ScopeHandle, &'a Scope),
+    Close(ScopeHandle, &'a Scope),
+    Statement(StatementHandle, &'a Statement),
 }
 
 pub struct StructureBuilder {
     events: Vec<TreeEvent>,
-    statements: PrimaryMap<StepHandle, Statement>,
+    statements: PrimaryMap<StatementHandle, Statement>,
     blocks: PrimaryMap<ScopeHandle, Scope>,
 }
 
 impl StructureBuilder {
-    pub fn step(&mut self, step: Step) -> StepHandle {
+    pub fn new() -> StructureBuilder {
+        Self {
+            events: Vec::new(),
+            statements: PrimaryMap::new(),
+            blocks: PrimaryMap::new(),
+        }
+    }
+    pub fn scopes_len(&self) -> usize {
+        self.blocks.len()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = TreeEventValue> {
+        self.events.iter().map(|event| match *event {
+            TreeEvent::Open(i) => TreeEventValue::Open(i, &self.blocks[i]),
+            TreeEvent::Close(i) => TreeEventValue::Close(i, &self.blocks[i]),
+            TreeEvent::Statement(i) => TreeEventValue::Statement(i, &self.statements[i]),
+        })
+    }
+    pub fn clear(&mut self) {
+        self.events.clear();
+        self.statements.clear();
+        self.blocks.clear();
+    }
+
+    fn step(&mut self, step: Step) -> StatementHandle {
         let handle = self.statements.push(Statement::Step(step));
         self.events.push(TreeEvent::Statement(handle));
         handle
     }
-    pub fn open_block(&mut self) -> ScopeHandle {
+    fn open_block(&mut self) -> ScopeHandle {
         let start = self.statements.next_key();
         let handle = self.blocks.push(Scope { start, len: 0 });
         self.events.push(TreeEvent::Open(handle));
         handle
     }
-    pub fn close_block(&mut self, handle: ScopeHandle) {
+    fn close_block(&mut self, handle: ScopeHandle) {
         let end = self.statements.next_key();
         let block = &mut self.blocks[handle];
         block.len = end.as_u32() - block.start.as_u32();
 
         self.events.push(TreeEvent::Close(handle));
     }
-    pub fn jump(&mut self, action: Flow) -> StepHandle {
+    fn jump(&mut self, action: Flow) -> StatementHandle {
+        assert!(action.is_some());
         self.statements.push(Statement::Jump(action))
     }
 }
-
-// enum Action {
-//     LexerReturn(RuleHandle),
-//     Return(bool),
-//     None
-// }
-
-// struct ResultAction {
-//     action: Action,
-//     flow: Option<Flow>
-// }
 
 pub struct PatternProperties {
     commit_after: bool,
 }
 
-fn lower_pattern(
+pub fn lower_pattern(
     pattern: &Pattern,
-    success: Option<Flow>,
-    fail: Option<Flow>,
+    success: Flow,
+    fail: Flow,
 
     grammar: &Grammar,
     builder: &mut StructureBuilder,
@@ -118,20 +175,11 @@ fn lower_pattern(
                 commit_after: transition.advances_parser(),
             }
         }
-        PatternKind::Group(group) => {
+        PatternKind::Group(Group::Sequence { .. }) => {
             let block = builder.open_block();
 
-            let is_choice = matches!(group, Group::Choice);
-
-            let (next_success, mut next_fail) = match group {
-                Group::Choice => (Some(Flow::Break(block)), None),
-                Group::Sequence { .. } => (None, fail),
-                Group::Loop => (Some(Flow::Continue(block)), Some(Flow::Break(block))),
-                Group::Maybe => (Some(Flow::Break(block)), Some(Flow::Break(block))),
-                Group::OneOrMore | Group::InlineCall { .. } => {
-                    unreachable!("Should have been lowered")
-                }
-            };
+            let next_success = Flow::None;
+            let mut next_fail = fail;
 
             let commit_index = children
                 .iter()
@@ -145,10 +193,7 @@ fn lower_pattern(
 
                 commit_after |= child.commit_after;
 
-                // TODO resets for backtracking
-
-                // handle sequence committing behaviour
-                if !is_choice && !commit {
+                if !commit {
                     if let Some(commit_index) = commit_index {
                         if commit_index == index {
                             commit = true;
@@ -160,23 +205,64 @@ fn lower_pattern(
 
                     if commit {
                         // committing means that failures are ignored
-                        next_fail = None;
+                        next_fail = Flow::None;
                     }
                 }
             }
 
-            // if control flow reaches the end of this block
-            // a choice has exhausted all options and fails,
-            // a sequence has matched all its subpatterns and succeeds
-            let action = match is_choice {
-                true => fail,
-                false => success,
-            };
-            builder.jump(action);
-
+            // all children of sequence matched, success
+            builder.jump(success.or(Flow::Break(block)));
             builder.close_block(block);
 
             PatternProperties { commit_after }
+        }
+        PatternKind::Group(Group::Choice) => {
+            let block = builder.open_block();
+
+            let next_success = success.or(Flow::Break(block));
+            let next_fail = Flow::None;
+
+            let mut commit_after = true;
+
+            for child in pattern.children() {
+                let child = lower_pattern(child, next_success, next_fail, grammar, builder);
+                commit_after &= child.commit_after;
+            }
+
+            // no children of sequence matched, fail
+            builder.jump(fail.or(Flow::Break(block)));
+            builder.close_block(block);
+
+            PatternProperties { commit_after }
+        }
+        PatternKind::Group(Group::Loop) => {
+            let block = builder.open_block();
+
+            let next_success = Flow::None;
+            let next_fail = success.or(Flow::Break(block));
+
+            for child in pattern.children() {
+                lower_pattern(child, next_success, next_fail, grammar, builder);
+            }
+
+            builder.jump(fail.or(Flow::Continue(block)));
+            builder.close_block(block);
+
+            PatternProperties {
+                commit_after: false,
+            }
+        }
+        PatternKind::Group(Group::Maybe) => {
+            let next_success = Flow::None;
+            let next_fail = Flow::None;
+
+            for child in pattern.children() {
+                lower_pattern(child, next_success, next_fail, grammar, builder);
+            }
+
+            PatternProperties {
+                commit_after: false,
+            }
         }
         PatternKind::Commit => {
             // do nothing
@@ -184,86 +270,23 @@ fn lower_pattern(
                 commit_after: false,
             }
         }
-        PatternKind::UnresolvedIdent(_)
+        PatternKind::Group(Group::OneOrMore | Group::InlineCall { .. })
+        | PatternKind::UnresolvedIdent(_)
         | PatternKind::UnresolvedLiteral(_)
         | PatternKind::InlineParameter(_)
-        | PatternKind::Pratt(_) => unreachable!("Should have been lowered"),
+        | PatternKind::Pratt(_) => panic!("Should have been lowered"),
     }
 }
 
 pub fn optimize(structure: &mut StructureBuilder) {
-    let mut stack = Vec::new();
+    // let mut stack = Vec::new();
 
-    structure.events.retain(|event| match event {
-        TreeEvent::Open(_) => todo!(),
-        TreeEvent::Close(_) => todo!(),
-        TreeEvent::Statement(_) => todo!(),
-        TreeEvent::Jump(_) => todo!(),
-    });
+    // structure.events.retain(|event| match event {
+    //     TreeEvent::Open(_) => todo!(),
+    //     TreeEvent::Close(_) => todo!(),
+    //     TreeEvent::Statement(_) => todo!(),
+    //     TreeEvent::Jump(_) => todo!(),
+    // });
+
+    // TODO
 }
-
-// fn transition(transition: &Transition, rcx: &RenderCx, grammar: &Grammar) -> Fragment {
-//     match *transition {
-//         Transition::Error => render!(rcx, panic!("Error")),
-//         Transition::Rule(handle) => {
-//             let rule = grammar.get_rule(handle).unwrap();
-//             let name = &rule.name;
-
-//             if rule.kind.is_lexer() {
-//                 render!(rcx, l.token(nodeKind::#name))
-//             } else {
-//                 render!(rcx, #name (p))
-//             }
-//         }
-//         Transition::Not(ref a) => match *a {
-//             NotPattern::Byte(a) => render!(rcx, l.not_byte(#{a.display()})),
-//             NotPattern::Unicode(a) => render!(rcx, l.not_utf8(#a)),
-//             NotPattern::ByteSet(ref a) => render!(rcx, l.not_byte_set(#a)),
-//             NotPattern::CharacterClass { class: _, unicode } => match unicode {
-//                 true => render!(rcx, l.not_utf8_class(CharacterClass::TODO)),
-//                 false => render!(rcx, l.not_ascii_class(CharacterClass::TODO)),
-//             },
-//             NotPattern::Token(a) => render!(rcx, p.not(NodeKind::#{a.name(grammar)})),
-//         },
-//         Transition::Any(ref a) => match a {
-//             AnyPattern::Byte => render!(rcx, p.any_byte()),
-//             AnyPattern::Unicode => render!(rcx, p.any_utf8()),
-//             AnyPattern::Token => render!(rcx, p.any()),
-//         },
-//         Transition::ByteSet(ref a) => render!(rcx, l.byte_set(#a)),
-//         Transition::Bytes(ref a) => render!(rcx, l.bytes(#{a.display()})),
-//         Transition::CharacterClass { class: _, unicode } => match unicode {
-//             true => render!(rcx, l.utf8_class(CharacterClass::TODO)),
-//             false => render!(rcx, l.ascii_class(CharacterClass::TODO)),
-//         },
-//         Transition::StringLike { delimiter } => render!(rcx, l.string_like(#{delimiter.display()})),
-//         Transition::ConsumeUntil {
-//             ref until,
-//             inclusive,
-//         } => match until {
-//             ConsumeUntil::Byte(a) => render!(rcx,
-//                 l.consume_until_byte(#{a.display()}, #inclusive)
-//             ),
-//             ConsumeUntil::Sequence(a) => render!(rcx,
-//                 l.consume_until_sequence(#{a.display()}, #inclusive)
-//             ),
-//         },
-//         Transition::Keyword(ref a) => render!(rcx, l.keyword(#{a.display()})),
-//         Transition::PrattRule(handle, precedence) => {
-//             let name = handle.name(grammar);
-//             render!(rcx, #name (p, #precedence) )
-//         }
-//         Transition::CompareBindingPower(comparison, max_precedence) => match comparison {
-//             ComparisonKind::Lower => render!(rcx, precedence < #max_precedence),
-//             ComparisonKind::LowerEqual => render!(rcx, precedence <= #max_precedence),
-//         },
-//         Transition::SaveState => render!(rcx, let checkpoint = p.save_state()),
-//         Transition::RestoreState => render!(rcx, p.restore_state(checkpoint)),
-//         Transition::CloseSpan(a) => render!(rcx, p.close_span(NodeKind::#{a.name(grammar)})),
-//         Transition::Return(a) => render!(rcx, return #a),
-//         Transition::LexerReturn(a) => match a {
-//             Some(a) => render!(rcx, return Some(NodeKind::#{a.name(grammar)})),
-//             None => render!(rcx, return None),
-//         },
-//     }
-// }

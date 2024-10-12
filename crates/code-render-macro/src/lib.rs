@@ -3,6 +3,7 @@ use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenSt
 enum TemplateAst {
     Static(String),
     Substitution(Box<TokenTree>),
+    Concatenate,
     Error {
         message: &'static str,
         span: Span,
@@ -75,7 +76,11 @@ impl TemplateBuilder {
     fn substitution(&mut self, expr: TokenTree) {
         self.flush_string();
         self.actions
-            .push(TemplateAst::Substitution(Box::new(expr.into())))
+            .push(TemplateAst::Substitution(Box::new(expr.into())));
+    }
+    fn concatenate(&mut self) {
+        self.flush_string();
+        self.actions.push(TemplateAst::Concatenate);
     }
     fn iteration(&mut self, span: Span, children: Vec<TemplateAst>) {
         self.flush_string();
@@ -178,6 +183,15 @@ fn parse_body_iter(iter: &mut TokenIter, builder: &mut TemplateBuilder) {
                     continue;
                 }
                 '#' => {
+                    let peek = iter.clone().next();
+
+                    // two hashes creates a concatenation
+                    if is_punct(peek, '#') {
+                        iter.next();
+                        builder.concatenate();
+                        continue;
+                    }
+
                     if parse_substitution(iter, builder) {
                         continue;
                     }
@@ -269,6 +283,16 @@ fn ast_to_code(render_cx: &TokenTree, ast: Vec<TemplateAst>) -> TokenStream {
                     punct('.'),
                     ident_mixed_hygiene("render_into"),
                     group(Delimiter::Parenthesis, render_cx.clone()),
+                    punct(';'),
+                ]);
+            }
+            TemplateAst::Concatenate => {
+                // cx.append_concatenate()
+                stream.extend([
+                    render_cx.clone(),
+                    punct('.'),
+                    ident_mixed_hygiene("append_concatenate"),
+                    group(Delimiter::Parenthesis, TokenStream::new()),
                     punct(';'),
                 ]);
             }

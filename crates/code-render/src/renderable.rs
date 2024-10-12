@@ -1,10 +1,10 @@
 use std::fmt::Display;
 
-use crate::{interner::InternedFragments, Fragment, RenderCx};
+use crate::{Fragments, RenderCx};
 
 pub trait Renderable {
     fn render_into(&self, rcx: &RenderCx);
-    fn render(&self, rcx: &RenderCx) -> Fragment {
+    fn render(&self, rcx: &RenderCx) -> Fragments {
         let start = rcx.start_render();
         self.render_into(rcx);
         rcx.finish_render(start)
@@ -17,7 +17,7 @@ impl<T: Display> Renderable for T {
     }
 }
 
-impl Renderable for Fragment {
+impl Renderable for Fragments {
     fn render_into(&self, rcx: &RenderCx) {
         rcx.append_fragment(*self)
     }
@@ -37,7 +37,7 @@ where
 }
 
 pub trait CollectFragments {
-    fn collect_fragments(self, rcx: &RenderCx) -> InternedFragments;
+    fn collect_fragments(self, rcx: &RenderCx) -> Fragments;
 }
 
 impl<I> CollectFragments for I
@@ -45,7 +45,7 @@ where
     I: IntoIterator,
     I::Item: Renderable,
 {
-    fn collect_fragments(self, rcx: &RenderCx) -> InternedFragments {
+    fn collect_fragments(self, rcx: &RenderCx) -> Fragments {
         let start = rcx.start_render();
         for element in self {
             let fragment = element.render(rcx);

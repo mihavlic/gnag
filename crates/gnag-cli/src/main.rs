@@ -192,6 +192,7 @@ fn run() -> Result<(), ()> {
 
     let mut do_parse = false;
     let mut do_ast = false;
+    let mut do_lower = false;
     let mut do_grammar = false;
     let mut do_code = false;
 
@@ -208,6 +209,7 @@ fn run() -> Result<(), ()> {
         match arg {
             "--parse" => do_parse = true,
             "--ast" => do_ast = true,
+            "--lower" => do_lower = true,
             "--grammar" => do_grammar = true,
             "--code" => do_code = true,
             "--errors" => {
@@ -232,6 +234,10 @@ fn run() -> Result<(), ()> {
                     .expect("Expected argument")
                     .parse::<u32>()
                     .expect("Expected number");
+            }
+            _ if arg.starts_with("--") => {
+                eprintln!("Unknown arg {arg:?}");
+                return Err(());
             }
             _ => files.push(arg),
         }
@@ -283,16 +289,17 @@ fn run() -> Result<(), ()> {
         print!("{}", trace.display(&LANGUAGE, false));
     }
 
-    if !do_ast {
+    if !do_ast || do_lower || do_code {
         grammar.resolve(&err);
         grammar.lower(&err);
         grammar.create_lexer(&err);
         grammar.create_pratt_rules(&err);
+        grammar.finish_rules();
     }
 
     let mut buf = String::new();
 
-    if do_ast || do_grammar || (!do_parse && !do_code) {
+    if do_ast || do_grammar || (!do_parse && !do_code) || do_lower {
         for (_, rule) in grammar.rules.iter() {
             _ = write!(buf, "\n{} =\n", rule.name);
             rule.pattern.display_into_indent(&mut buf, &grammar, 1);
@@ -304,9 +311,10 @@ fn run() -> Result<(), ()> {
         let fragments = render_file(&grammar, &rcx);
         let mut buf = String::new();
         fragments.fmt_write_to(&mut buf, &rcx);
-        let output = rustfmt_format(&buf).unwrap();
+        buf = buf.replace('}', "\n}");
+        buf = rustfmt_format(&buf).unwrap();
 
-        print!("\n{output}");
+        print!("\n{buf}");
     }
 
     print!("{buf}");

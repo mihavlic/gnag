@@ -1,20 +1,13 @@
 use std::fmt::Display;
 
-use code_render::{render, render_into, Fragments, RenderCx};
-use cranelift_entity::{entity_impl, EntitySet, PrimaryMap};
+use cranelift_entity::{entity_impl, EntityRef, EntitySet, PrimaryMap};
 
 use crate::{
-    ast::{
-        display::{ByteExt, ByteSliceExt},
-        pattern::{
-            AnyPattern, ComparisonKind, ConsumeUntil, Group, NotPattern, Pattern, PatternKind,
-            Transition, TransitionEffects,
-        },
-    },
+    ast::pattern::{Group, Pattern, PatternKind, Transition, TransitionEffects},
     backend::grammar::Grammar,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ScopeHandle(u32);
 entity_impl!(ScopeHandle);
 
@@ -24,11 +17,17 @@ impl Display for ScopeHandle {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct StatementHandle(u32);
 entity_impl!(StatementHandle);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+impl StatementHandle {
+    pub fn next(self) -> StatementHandle {
+        Self(self.0 + 1)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Flow {
     None,
     Continue(ScopeHandle),
@@ -68,15 +67,23 @@ pub struct Scope {
     /// index of the first step in this block
     pub start: StatementHandle,
     /// number of steps in this block and its child blocks
-    pub len: u32,
+    pub end: StatementHandle,
 }
 
+impl Scope {
+    pub fn is_empty(&self) -> bool {
+        self.start != self.end
+    }
+}
+
+#[derive(Clone)]
 pub struct Step {
     pub transition: Transition,
     pub success: Flow,
     pub fail: Flow,
 }
 
+#[derive(Clone)]
 pub enum Statement {
     Step(Step),
     Jump(Flow),
@@ -99,7 +106,7 @@ pub enum TreeEventValue<'a> {
 pub struct StructureBuilder {
     events: Vec<TreeEvent>,
     statements: PrimaryMap<StatementHandle, Statement>,
-    blocks: PrimaryMap<ScopeHandle, Scope>,
+    scopes: PrimaryMap<ScopeHandle, Scope>,
 }
 
 impl StructureBuilder {
@@ -107,46 +114,94 @@ impl StructureBuilder {
         Self {
             events: Vec::new(),
             statements: PrimaryMap::new(),
-            blocks: PrimaryMap::new(),
+            scopes: PrimaryMap::new(),
         }
     }
     pub fn scopes_len(&self) -> usize {
-        self.blocks.len()
+        self.scopes.len()
+    }
+    pub fn statements_len(&self) -> usize {
+        self.statements.len()
     }
     pub fn iter(&self) -> impl Iterator<Item = TreeEventValue> {
         self.events.iter().map(|event| match *event {
-            TreeEvent::Open(i) => TreeEventValue::Open(i, &self.blocks[i]),
-            TreeEvent::Close(i) => TreeEventValue::Close(i, &self.blocks[i]),
-            TreeEvent::Statement(i) => TreeEventValue::Statement(i, &self.statements[i]),
+            TreeEvent::Open(i) => TreeEventValue::Open(i, self.get_scope(i)),
+            TreeEvent::Close(i) => TreeEventValue::Close(i, self.get_scope(i)),
+            TreeEvent::Statement(i) => TreeEventValue::Statement(i, self.get_statement(i)),
         })
+    }
+    #[track_caller]
+    pub fn get_statement(&self, handle: StatementHandle) -> &Statement {
+        &self.statements[handle]
+    }
+    #[track_caller]
+    pub fn get_scope(&self, handle: ScopeHandle) -> &Scope {
+        &self.scopes[handle]
     }
     pub fn clear(&mut self) {
         self.events.clear();
         self.statements.clear();
-        self.blocks.clear();
+        self.scopes.clear();
+    }
+    pub fn retain_statements(&mut self, retain: &EntitySet<StatementHandle>) {
+        let mut new_keys = std::iter::repeat(StatementHandle::from_u32(0))
+            .take(self.statements_len())
+            .collect::<PrimaryMap<StatementHandle, StatementHandle>>();
+
+        let mut dst = StatementHandle::from_u32(0);
+
+        for src in self.statements.keys() {
+            new_keys[src] = dst;
+            if retain.contains(src) {
+                dst = dst.next();
+            }
+        }
+
+        let end = StatementHandle::new(self.statements_len());
+        let get_new = |handle: StatementHandle| new_keys.get(handle).copied().unwrap_or(end);
+
+        for scope in self.scopes.values_mut() {
+            scope.start = get_new(scope.start);
+            scope.end = get_new(scope.end);
+        }
+
+        self.events.retain_mut(|event| {
+            if let TreeEvent::Statement(handle) = event {
+                let retained = retain.contains(*handle);
+                if retained {
+                    *handle = get_new(*handle);
+                } else {
+                    // remove not-retained statements
+                    return false;
+                }
+            }
+            return true;
+        });
     }
 
-    fn step(&mut self, step: Step) -> StatementHandle {
-        let handle = self.statements.push(Statement::Step(step));
+    fn step(&mut self, step: Step) {
+        let handle = self.statements.next_key();
+        self.statements.push(Statement::Step(step));
         self.events.push(TreeEvent::Statement(handle));
-        handle
     }
     fn open_block(&mut self) -> ScopeHandle {
         let start = self.statements.next_key();
-        let handle = self.blocks.push(Scope { start, len: 0 });
+        let handle = self.scopes.push(Scope { start, end: start });
         self.events.push(TreeEvent::Open(handle));
         handle
     }
     fn close_block(&mut self, handle: ScopeHandle) {
         let end = self.statements.next_key();
-        let block = &mut self.blocks[handle];
-        block.len = end.as_u32() - block.start.as_u32();
+        let block = &mut self.scopes[handle];
+        block.end = end;
 
         self.events.push(TreeEvent::Close(handle));
     }
-    fn jump(&mut self, action: Flow) -> StatementHandle {
-        assert!(action.is_some());
-        self.statements.push(Statement::Jump(action))
+    fn jump(&mut self, action: Flow) {
+        assert!(action.is_some(), "Jumping with Flow::None makes no sense");
+        let handle = self.statements.next_key();
+        self.statements.push(Statement::Jump(action));
+        self.events.push(TreeEvent::Statement(handle));
     }
 }
 
@@ -176,10 +231,17 @@ pub fn lower_pattern(
             }
         }
         PatternKind::Group(Group::Sequence { .. }) => {
+            let reset_block = builder.open_block();
+            builder.step(Step {
+                transition: Transition::SaveState,
+                success: Flow::None,
+                fail: Flow::None,
+            });
+
             let block = builder.open_block();
 
             let next_success = Flow::None;
-            let mut next_fail = fail;
+            let mut next_fail = Flow::Break(block);
 
             let commit_index = children
                 .iter()
@@ -188,7 +250,7 @@ pub fn lower_pattern(
             let mut commit_after = false;
             let mut commit = false;
 
-            for (index, child) in pattern.children().iter().enumerate() {
+            for (index, child) in children.iter().enumerate() {
                 let child = lower_pattern(child, next_success, next_fail, grammar, builder);
 
                 commit_after |= child.commit_after;
@@ -211,8 +273,16 @@ pub fn lower_pattern(
             }
 
             // all children of sequence matched, success
-            builder.jump(success.or(Flow::Break(block)));
+            builder.jump(success.or(Flow::Break(reset_block)));
             builder.close_block(block);
+
+            builder.step(Step {
+                transition: Transition::RestoreState,
+                success: Flow::None,
+                fail: Flow::None,
+            });
+            builder.jump(fail.or(Flow::Break(reset_block)));
+            builder.close_block(reset_block);
 
             PatternProperties { commit_after }
         }
@@ -224,7 +294,7 @@ pub fn lower_pattern(
 
             let mut commit_after = true;
 
-            for child in pattern.children() {
+            for child in children {
                 let child = lower_pattern(child, next_success, next_fail, grammar, builder);
                 commit_after &= child.commit_after;
             }
@@ -238,14 +308,13 @@ pub fn lower_pattern(
         PatternKind::Group(Group::Loop) => {
             let block = builder.open_block();
 
-            let next_success = Flow::None;
+            let next_success = Flow::Continue(block);
             let next_fail = success.or(Flow::Break(block));
 
-            for child in pattern.children() {
+            for child in children {
                 lower_pattern(child, next_success, next_fail, grammar, builder);
             }
 
-            builder.jump(fail.or(Flow::Continue(block)));
             builder.close_block(block);
 
             PatternProperties {
@@ -253,10 +322,10 @@ pub fn lower_pattern(
             }
         }
         PatternKind::Group(Group::Maybe) => {
-            let next_success = Flow::None;
-            let next_fail = Flow::None;
+            let next_success = success;
+            let next_fail = success;
 
-            for child in pattern.children() {
+            for child in children {
                 lower_pattern(child, next_success, next_fail, grammar, builder);
             }
 
@@ -278,7 +347,76 @@ pub fn lower_pattern(
     }
 }
 
-pub fn optimize(structure: &mut StructureBuilder) {
+pub fn remove_unreachable(structure: &mut StructureBuilder) {
+    let mut skipping_scopes: u32 = 0;
+    let mut reachable_statements = EntitySet::with_capacity(structure.statements_len());
+
+    reachable_statements.insert(StatementHandle::from_u32(0));
+
+    for event in structure.iter() {
+        match event {
+            TreeEventValue::Open(_, scope) => {
+                let scope_reachable = reachable_statements.contains(scope.start);
+                if !scope_reachable || skipping_scopes > 0 {
+                    skipping_scopes += 1;
+                }
+            }
+            TreeEventValue::Close(_, scope) => {
+                skipping_scopes = skipping_scopes.saturating_sub(1);
+                if skipping_scopes == 0 {
+                    // start skipping if no control flow points to the next statement
+                    let statement_reachable = reachable_statements.contains(scope.end);
+                    if !statement_reachable {
+                        skipping_scopes = 1;
+                        continue;
+                    }
+                }
+            }
+            TreeEventValue::Statement(handle, statement) => {
+                if skipping_scopes > 0 {
+                    continue;
+                }
+
+                let mut handle_flow = |flow: Flow| {
+                    let next = match flow {
+                        Flow::None => handle.next(),
+                        Flow::Continue(s) => structure.get_scope(s).start,
+                        Flow::Break(s) => structure.get_scope(s).end,
+                        Flow::Unreachable => return,
+                    };
+                    reachable_statements.insert(next);
+                };
+
+                match statement {
+                    Statement::Step(a) => {
+                        let effects = a.transition.effects();
+                        if effects == TransitionEffects::Noreturn {
+                            skipping_scopes = 1;
+                            continue;
+                        }
+                        if effects.can_succeed() {
+                            handle_flow(a.success);
+                        }
+                        if effects.can_fail() {
+                            handle_flow(a.fail);
+                        }
+                    }
+                    Statement::Jump(a) => {
+                        handle_flow(*a);
+                        // skip the rest of this block if this flow breaks from it
+                        if a.is_some() {
+                            skipping_scopes = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    structure.retain_statements(&reachable_statements);
+}
+
+pub fn optimize(_builder: &mut StructureBuilder) {
     // let mut stack = Vec::new();
 
     // structure.events.retain(|event| match event {

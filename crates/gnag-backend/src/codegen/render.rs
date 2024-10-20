@@ -43,45 +43,51 @@ pub fn render_expression(
 
                         let effects = step.transition.effects();
                         let success = step.success;
-                        let fail = step.fail;
+                        let mut fail = step.fail;
+
+                        if let TransitionEffects::Infallible = effects {
+                            fail = success;
+                        }
 
                         match effects {
-                            TransitionEffects::Fallible => match (success, fail) {
-                                (Flow::None, Flow::None) => {
-                                    render_into!(rcx,
-                                        #body;
-                                    )
-                                }
-                                (_, Flow::None) => {
-                                    render_into!(rcx,
-                                        if #body {
+                            TransitionEffects::Fallible | TransitionEffects::Infallible => {
+                                match (success, fail) {
+                                    (Flow::None, Flow::None) => {
+                                        render_into!(rcx,
+                                            #body;
+                                        )
+                                    }
+                                    (_, Flow::None) => {
+                                        render_into!(rcx,
+                                            if #body {
+                                                #success;
+                                            }
+                                        )
+                                    }
+                                    (Flow::None, _) => {
+                                        render_into!(rcx,
+                                            if !#body {
+                                                #fail;
+                                            }
+                                        )
+                                    }
+                                    _ if success == fail => {
+                                        render_into!(rcx,
+                                            #body;
                                             #success;
-                                        }
-                                    )
+                                        )
+                                    }
+                                    _ => {
+                                        render_into!(rcx,
+                                            match #body {
+                                                true => #success,
+                                                false => #fail,
+                                            }
+                                        )
+                                    }
                                 }
-                                (Flow::None, _) => {
-                                    render_into!(rcx,
-                                        if !#body {
-                                            #fail;
-                                        }
-                                    )
-                                }
-                                _ if success == fail => {
-                                    render_into!(rcx,
-                                        #body;
-                                        #success;
-                                    )
-                                }
-                                _ => {
-                                    render_into!(rcx,
-                                        match #body {
-                                            true => #success,
-                                            false => #fail,
-                                        }
-                                    )
-                                }
-                            },
-                            TransitionEffects::Infallible | TransitionEffects::Noreturn => {
+                            }
+                            TransitionEffects::Noreturn => {
                                 render_into!(rcx,
                                     #body;
                                 )
@@ -89,11 +95,11 @@ pub fn render_expression(
                         }
                     }
                     Statement::Jump(flow) => match flow {
-                        Flow::None => {}
-                        Flow::Continue(scope) => render_into!(rcx, continue #scope),
-                        Flow::Break(scope) => render_into!(rcx, break #scope),
+                        Flow::None => render_into!(rcx, "// Flow::None\n"),
+                        Flow::Continue(scope) => render_into!(rcx, continue #scope;),
+                        Flow::Break(scope) => render_into!(rcx, break #scope;),
                         Flow::Unreachable => {
-                            render_into!(rcx, unreachable!("Flow::Unreachable"))
+                            render_into!(rcx, unreachable!();)
                         }
                     },
                 },

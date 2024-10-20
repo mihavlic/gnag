@@ -38,7 +38,8 @@
                 }
             },
             "args": [
-                "test.gng"
+                "test.gng",
+                "--code"
             ],
             "cwd": "${workspaceFolder}"
         },

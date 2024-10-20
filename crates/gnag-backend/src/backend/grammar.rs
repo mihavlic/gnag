@@ -5,7 +5,7 @@ use cranelift_entity::{entity_impl, PrimaryMap, SecondaryMap};
 use crate::{
     ast::{
         self,
-        pattern::{Pattern, PatternKind},
+        pattern::{Pattern, PatternKind, Transition},
         Ast, ItemGroupKind, RcString,
     },
     error::ErrorAccumulator,
@@ -16,7 +16,7 @@ use super::{
     lower::{self, LowerCx},
     pratt,
     resolve::{self, ResolveCx},
-    Attributes, LexerKind, Rule, RuleKind,
+    Attributes, LexerKind, ParserKind, Rule, RuleKind,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -264,6 +264,23 @@ impl Grammar {
                 let rule = self.get_rule_mut(handle).unwrap();
                 rule.pattern = pattern;
                 rule.kind = RuleKind::Parser(super::ParserKind::Pratt);
+            }
+        }
+    }
+    pub fn finish_rules(&mut self) {
+        for (handle, rule, _) in self.iter_mut() {
+            if let RuleKind::Parser(kind @ (ParserKind::Rule | ParserKind::Pratt)) = rule.kind {
+                let pattern = &mut rule.pattern;
+                let span = pattern.span();
+
+                let seq = pattern.to_sequence(false);
+                if let ParserKind::Rule = kind {
+                    seq.push(Transition::CloseSpan(handle).to_pattern(span));
+                }
+                seq.push(Transition::Return(true).to_pattern(span));
+
+                let choice = pattern.to_choice();
+                choice.push(Transition::Return(false).to_pattern(span));
             }
         }
     }

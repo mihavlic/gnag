@@ -5,7 +5,7 @@ pub mod structure;
 
 use code_render::{render, CollectFragments, Fragments, RenderCx};
 use render::render_expression;
-use structure::{lower_pattern, Flow, StructureBuilder};
+use structure::{lower_pattern, remove_unreachable, Flow, StructureBuilder};
 
 use crate::backend::{grammar::Grammar, LexerKind, ParserKind, Rule, RuleKind};
 
@@ -44,6 +44,7 @@ fn render_rule(rule: &Rule, grammar: &Grammar, rcx: &RenderCx) -> Fragments {
         grammar,
         &mut builder,
     );
+    // remove_unreachable(&mut builder);
 
     let body = render_expression(&builder, rcx, grammar);
 

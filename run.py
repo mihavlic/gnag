@@ -23,6 +23,7 @@ args = sys.argv[1:]
 watch = '--watch' in args
 release = '--release' in args
 generate = '--generate' in args
+debug = '--debug' in args
 
 if watch:
     args.remove('--watch')
@@ -33,7 +34,10 @@ if release:
 if generate:
     args.remove('--generate')
     args += ['--file']
-
+    
+if debug:
+    args.remove('--debug')
+    
 if "--repeats" in args:
     print("--repeats is used, suppressing errors", file=sys.stderr)
     args += ['--errors', 'off']
@@ -43,6 +47,35 @@ files = [x for x in args if not x.startswith('--')]
 observer = Observer()
 observer.schedule(EventHandler(files), '.', recursive=True)
 
+def run():
+    command = ["cargo", "build", "--quiet", "--bin", "gnag-cli"]
+
+    path = "target/debug/gnag-cli"
+    
+    if release:
+        command += ['--release']
+        path = "target/release/gnag-cli"
+
+    # build cli
+    a = subprocess.run(command)
+    
+    # run binary
+    if debug:
+        subprocess.run(["rust-gdb", "--quiet", "--args", path] + args)
+        os.exit(0)
+    else:
+        capture_output = generate
+        process = subprocess.run([path] + args, capture_output=capture_output)
+    
+        if capture_output:
+            sys.stderr.buffer.write(process.stderr)
+            sys.stderr.flush()
+            if generate:
+                output_path = "crates/gnag-parser/src/lib.rs"
+                with open(output_path, "wb") as output:
+                    output.write(process.stdout)
+                print(f"Generated file written to {output_path}", file=sys.stderr)
+
 if watch:
     observer.start()
 
@@ -50,25 +83,8 @@ if watch:
 try:
     while True:
         if should_run:
+            run()
             should_run = False
-            command = ["cargo", "run", "--quiet", "--bin", "gnag-cli"]
-            
-            if release:
-                command += ['--release']
-
-            capture_output = generate
-            process = subprocess.run(command + ["--"] + args, capture_output=capture_output)
-            
-            if capture_output:
-                sys.stderr.buffer.write(process.stderr)
-                sys.stderr.flush()
-                if generate:
-                    output_path = "crates/gnag-parser/src/lib.rs"
-                    with open(output_path, "wb") as output:
-                        output.write(process.stdout)
-                    print(f"Generated file written to {output_path}", file=sys.stderr)
-
-
         if not watch:
             break
         

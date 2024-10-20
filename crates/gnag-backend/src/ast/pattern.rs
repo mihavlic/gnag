@@ -119,6 +119,15 @@ pub enum TransitionEffects {
     Noreturn,
 }
 
+impl TransitionEffects {
+    pub fn can_fail(self) -> bool {
+        matches!(self, TransitionEffects::Fallible)
+    }
+    pub fn can_succeed(self) -> bool {
+        !matches!(self, TransitionEffects::Noreturn)
+    }
+}
+
 impl Transition {
     pub fn to_pattern(self, span: Span) -> Pattern {
         Pattern {
@@ -352,6 +361,16 @@ impl Pattern {
             }
             _ => {
                 *self = Group::Sequence { explicit }.to_pattern(vec![self.take()], self.span());
+            }
+        }
+
+        return self.children_vec_mut();
+    }
+    pub fn to_choice(&mut self) -> &mut Vec<Pattern> {
+        match &mut self.kind {
+            PatternKind::Group(Group::Choice) => {}
+            _ => {
+                *self = Group::Choice.to_pattern(vec![self.take()], self.span());
             }
         }
 

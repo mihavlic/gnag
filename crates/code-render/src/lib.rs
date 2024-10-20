@@ -71,7 +71,8 @@ impl RenderCxInner {
         self.stack.push(FragmentData::Concatenate);
     }
 
-    fn start_render(&self) -> usize {
+    fn start_render(&mut self) -> usize {
+        self.flush_writes();
         self.stack.len()
     }
 
@@ -133,7 +134,7 @@ impl RenderCx {
 
     #[doc(hidden)]
     pub fn start_render(&self) -> usize {
-        self.inner.borrow().start_render()
+        self.inner.borrow_mut().start_render()
     }
 
     #[doc(hidden)]

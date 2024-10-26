@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use cranelift_entity::{entity_impl, EntityRef, EntitySet, PrimaryMap};
+use cranelift_entity::{entity_impl, EntityRef, EntitySet, PrimaryMap, SecondaryMap};
 
 use crate::{
     ast::pattern::{Group, Pattern, PatternKind, Transition, TransitionEffects},
@@ -105,7 +105,7 @@ pub enum TreeEventValue<'a> {
 
 pub struct StructureBuilder {
     events: Vec<TreeEvent>,
-    statements: PrimaryMap<StatementHandle, Statement>,
+    statements: Vec<Statement>,
     scopes: PrimaryMap<ScopeHandle, Scope>,
 }
 
@@ -113,7 +113,7 @@ impl StructureBuilder {
     pub fn new() -> StructureBuilder {
         Self {
             events: Vec::new(),
-            statements: PrimaryMap::new(),
+            statements: Vec::new(),
             scopes: PrimaryMap::new(),
         }
     }
@@ -132,7 +132,7 @@ impl StructureBuilder {
     }
     #[track_caller]
     pub fn get_statement(&self, handle: StatementHandle) -> &Statement {
-        &self.statements[handle]
+        &self.statements[handle.index()]
     }
     #[track_caller]
     pub fn get_scope(&self, handle: ScopeHandle) -> &Scope {
@@ -148,14 +148,18 @@ impl StructureBuilder {
             .take(self.statements_len())
             .collect::<PrimaryMap<StatementHandle, StatementHandle>>();
 
-        let mut dst = StatementHandle::from_u32(0);
+        let mut src = StatementHandle::from_u32(0);
+        let mut dst = src;
 
-        for src in self.statements.keys() {
+        self.statements.retain(|_| {
             new_keys[src] = dst;
-            if retain.contains(src) {
+            let retain = retain.contains(src);
+            if retain {
                 dst = dst.next();
             }
-        }
+            src = src.next();
+            retain
+        });
 
         let end = StatementHandle::new(self.statements_len());
         let get_new = |handle: StatementHandle| new_keys.get(handle).copied().unwrap_or(end);
@@ -180,18 +184,18 @@ impl StructureBuilder {
     }
 
     fn step(&mut self, step: Step) {
-        let handle = self.statements.next_key();
+        let handle = StatementHandle::new(self.statements.len());
         self.statements.push(Statement::Step(step));
         self.events.push(TreeEvent::Statement(handle));
     }
     fn open_block(&mut self) -> ScopeHandle {
-        let start = self.statements.next_key();
+        let start = StatementHandle::new(self.statements.len());
         let handle = self.scopes.push(Scope { start, end: start });
         self.events.push(TreeEvent::Open(handle));
         handle
     }
     fn close_block(&mut self, handle: ScopeHandle) {
-        let end = self.statements.next_key();
+        let end = StatementHandle::new(self.statements.len());
         let block = &mut self.scopes[handle];
         block.end = end;
 
@@ -199,7 +203,7 @@ impl StructureBuilder {
     }
     fn jump(&mut self, action: Flow) {
         assert!(action.is_some(), "Jumping with Flow::None makes no sense");
-        let handle = self.statements.next_key();
+        let handle = StatementHandle::new(self.statements.len());
         self.statements.push(Statement::Jump(action));
         self.events.push(TreeEvent::Statement(handle));
     }
@@ -273,7 +277,9 @@ pub fn lower_pattern(
             }
 
             // all children of sequence matched, success
-            builder.jump(success.or(Flow::Break(reset_block)));
+            if success.is_some() {
+                builder.jump(success);
+            }
             builder.close_block(block);
 
             builder.step(Step {
@@ -281,7 +287,9 @@ pub fn lower_pattern(
                 success: Flow::None,
                 fail: Flow::None,
             });
-            builder.jump(fail.or(Flow::Break(reset_block)));
+            if fail.is_some() {
+                builder.jump(fail);
+            }
             builder.close_block(reset_block);
 
             PatternProperties { commit_after }
@@ -350,6 +358,8 @@ pub fn lower_pattern(
 pub fn remove_unreachable(structure: &mut StructureBuilder) {
     let mut skipping_scopes: u32 = 0;
     let mut reachable_statements = EntitySet::with_capacity(structure.statements_len());
+    // let mut statement_states = SecondaryMap::with_capacity(structure.statements_len());
+    // let mut
 
     reachable_statements.insert(StatementHandle::from_u32(0));
 

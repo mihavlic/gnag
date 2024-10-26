@@ -44,7 +44,7 @@ fn render_rule(rule: &Rule, grammar: &Grammar, rcx: &RenderCx) -> Fragments {
         grammar,
         &mut builder,
     );
-    // remove_unreachable(&mut builder);
+    remove_unreachable(&mut builder);
 
     let body = render_expression(&builder, rcx, grammar);
 

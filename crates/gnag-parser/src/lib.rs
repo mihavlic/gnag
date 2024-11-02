@@ -8,48 +8,48 @@ use gnag_runtime::parser::*;
 use gnag_runtime::*;
 
 pub mod kinds {
-    use gnag_runtime::{NodeKind, NodeType};
+    use gnag_runtime::{NodeKind, NodeMeta, NodeType};
 
-    pub const Whitespace: NodeKind = NodeKind::new(1, NodeType::Skip);
-    pub const Comment: NodeKind = NodeKind::new(2, NodeType::Skip);
-    pub const Newline: NodeKind = NodeKind::new(3, NodeType::Token);
-    pub const String: NodeKind = NodeKind::new(4, NodeType::Token);
-    pub const Ident: NodeKind = NodeKind::new(5, NodeType::Token);
-    pub const InlineKeyword: NodeKind = NodeKind::new(6, NodeType::Token);
-    pub const LexerKeyword: NodeKind = NodeKind::new(7, NodeType::Token);
-    pub const ParserKeyword: NodeKind = NodeKind::new(8, NodeType::Token);
-    pub const PrattKeyword: NodeKind = NodeKind::new(9, NodeType::Token);
-    pub const GroupKeyword: NodeKind = NodeKind::new(10, NodeType::Token);
-    pub const LCurly: NodeKind = NodeKind::new(11, NodeType::Token);
-    pub const RCurly: NodeKind = NodeKind::new(12, NodeType::Token);
-    pub const LParen: NodeKind = NodeKind::new(13, NodeType::Token);
-    pub const RParen: NodeKind = NodeKind::new(14, NodeType::Token);
-    pub const LBracket: NodeKind = NodeKind::new(15, NodeType::Token);
-    pub const RBracket: NodeKind = NodeKind::new(16, NodeType::Token);
-    pub const LAngle: NodeKind = NodeKind::new(17, NodeType::Token);
-    pub const RAngle: NodeKind = NodeKind::new(18, NodeType::Token);
-    pub const Question: NodeKind = NodeKind::new(19, NodeType::Token);
-    pub const Pipe: NodeKind = NodeKind::new(20, NodeType::Token);
-    pub const Star: NodeKind = NodeKind::new(21, NodeType::Token);
-    pub const Plus: NodeKind = NodeKind::new(22, NodeType::Token);
-    pub const At: NodeKind = NodeKind::new(23, NodeType::Token);
-    pub const Colon: NodeKind = NodeKind::new(24, NodeType::Token);
-    pub const Comma: NodeKind = NodeKind::new(25, NodeType::Token);
-    pub const Dot: NodeKind = NodeKind::new(26, NodeType::Token);
-    pub const Equals: NodeKind = NodeKind::new(27, NodeType::Token);
-    pub const Error: NodeKind = NodeKind::new(28, NodeType::Token);
-    pub const File: NodeKind = NodeKind::new(30, NodeType::Nonterminal);
-    pub const RuleGroup: NodeKind = NodeKind::new(31, NodeType::Nonterminal);
-    pub const Attribute: NodeKind = NodeKind::new(32, NodeType::Nonterminal);
-    pub const Parameters: NodeKind = NodeKind::new(33, NodeType::Nonterminal);
-    pub const Rule: NodeKind = NodeKind::new(34, NodeType::Nonterminal);
-    pub const Atom: NodeKind = NodeKind::new(35, NodeType::Nonterminal);
-    pub const CallExpr: NodeKind = NodeKind::new(36, NodeType::Nonterminal);
-    pub const ParenExpr: NodeKind = NodeKind::new(37, NodeType::Nonterminal);
-    pub const PrattExpr: NodeKind = NodeKind::new(38, NodeType::Nonterminal);
-    pub const PostExpr: NodeKind = NodeKind::new(39, NodeType::Nonterminal);
-    pub const SequenceExpr: NodeKind = NodeKind::new(40, NodeType::Nonterminal);
-    pub const ChoiceExpr: NodeKind = NodeKind::new(41, NodeType::Nonterminal);
+    pub const Whitespace: NodeKind = NodeKind::new(1, NodeType::Token, NodeMeta::Skip);
+    pub const Comment: NodeKind = NodeKind::new(2, NodeType::Token, NodeMeta::Skip);
+    pub const Newline: NodeKind = NodeKind::new(3, NodeType::Token, NodeMeta::None);
+    pub const String: NodeKind = NodeKind::new(4, NodeType::Token, NodeMeta::None);
+    pub const Ident: NodeKind = NodeKind::new(5, NodeType::Token, NodeMeta::Word);
+    pub const InlineKeyword: NodeKind = NodeKind::new(6, NodeType::Token, NodeMeta::Word);
+    pub const LexerKeyword: NodeKind = NodeKind::new(7, NodeType::Token, NodeMeta::Word);
+    pub const ParserKeyword: NodeKind = NodeKind::new(8, NodeType::Token, NodeMeta::Word);
+    pub const PrattKeyword: NodeKind = NodeKind::new(9, NodeType::Token, NodeMeta::Word);
+    pub const GroupKeyword: NodeKind = NodeKind::new(10, NodeType::Token, NodeMeta::Word);
+    pub const LCurly: NodeKind = NodeKind::new(11, NodeType::Token, NodeMeta::None);
+    pub const RCurly: NodeKind = NodeKind::new(12, NodeType::Token, NodeMeta::None);
+    pub const LParen: NodeKind = NodeKind::new(13, NodeType::Token, NodeMeta::None);
+    pub const RParen: NodeKind = NodeKind::new(14, NodeType::Token, NodeMeta::None);
+    pub const LBracket: NodeKind = NodeKind::new(15, NodeType::Token, NodeMeta::None);
+    pub const RBracket: NodeKind = NodeKind::new(16, NodeType::Token, NodeMeta::None);
+    pub const LAngle: NodeKind = NodeKind::new(17, NodeType::Token, NodeMeta::None);
+    pub const RAngle: NodeKind = NodeKind::new(18, NodeType::Token, NodeMeta::None);
+    pub const Question: NodeKind = NodeKind::new(19, NodeType::Token, NodeMeta::None);
+    pub const Pipe: NodeKind = NodeKind::new(20, NodeType::Token, NodeMeta::None);
+    pub const Star: NodeKind = NodeKind::new(21, NodeType::Token, NodeMeta::None);
+    pub const Plus: NodeKind = NodeKind::new(22, NodeType::Token, NodeMeta::None);
+    pub const At: NodeKind = NodeKind::new(23, NodeType::Token, NodeMeta::None);
+    pub const Colon: NodeKind = NodeKind::new(24, NodeType::Token, NodeMeta::None);
+    pub const Comma: NodeKind = NodeKind::new(25, NodeType::Token, NodeMeta::None);
+    pub const Dot: NodeKind = NodeKind::new(26, NodeType::Token, NodeMeta::None);
+    pub const Equals: NodeKind = NodeKind::new(27, NodeType::Token, NodeMeta::None);
+    pub const Error: NodeKind = NodeKind::new(28, NodeType::Token, NodeMeta::Error);
+    pub const File: NodeKind = NodeKind::new(30, NodeType::Nonterminal, NodeMeta::None);
+    pub const RuleGroup: NodeKind = NodeKind::new(31, NodeType::Nonterminal, NodeMeta::None);
+    pub const Attribute: NodeKind = NodeKind::new(32, NodeType::Nonterminal, NodeMeta::None);
+    pub const Parameters: NodeKind = NodeKind::new(33, NodeType::Nonterminal, NodeMeta::None);
+    pub const Rule: NodeKind = NodeKind::new(34, NodeType::Nonterminal, NodeMeta::None);
+    pub const Atom: NodeKind = NodeKind::new(35, NodeType::Nonterminal, NodeMeta::None);
+    pub const CallExpr: NodeKind = NodeKind::new(36, NodeType::Nonterminal, NodeMeta::None);
+    pub const ParenExpr: NodeKind = NodeKind::new(37, NodeType::Nonterminal, NodeMeta::None);
+    pub const PrattExpr: NodeKind = NodeKind::new(38, NodeType::Nonterminal, NodeMeta::None);
+    pub const PostExpr: NodeKind = NodeKind::new(39, NodeType::Nonterminal, NodeMeta::None);
+    pub const SequenceExpr: NodeKind = NodeKind::new(40, NodeType::Nonterminal, NodeMeta::None);
+    pub const ChoiceExpr: NodeKind = NodeKind::new(41, NodeType::Nonterminal, NodeMeta::None);
 }
 
 pub const LANGUAGE: Language = Language {
@@ -257,7 +257,7 @@ mod rules {
             return Some(Whitespace);
         }
         if l.byte_sequence(b"//") {
-            l.string_like(b'\n');
+            l.consume_until_byte(b'\n', false);
             return Some(Comment);
         }
         if l.string_like(b'\'') {

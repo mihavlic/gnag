@@ -343,8 +343,8 @@ fn test_reorder() {
         names: &["1", "2"],
     };
 
-    let token = NodeKind::new(0, crate::NodeType::Token);
-    let rule = NodeKind::new(1, crate::NodeType::Nonterminal);
+    let token = NodeKind::new(0, crate::NodeType::Token, crate::NodeMeta::None);
+    let rule = NodeKind::new(1, crate::NodeType::Nonterminal, crate::NodeMeta::None);
 
     let tokens = &[NodeEvent {
         kind: token,

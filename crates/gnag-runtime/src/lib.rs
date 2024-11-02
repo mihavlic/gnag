@@ -4,6 +4,7 @@ pub mod trace;
 
 mod resetable_slice;
 
+use core::panic;
 use std::{borrow::Borrow, u16};
 
 use lexer::Lexer;
@@ -12,22 +13,55 @@ use trace::{PostorderTrace, Tokens};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {
+    Token = 0,
+    Nonterminal,
+}
+
+impl From<u16> for NodeType {
+    fn from(value: u16) -> NodeType {
+        match value {
+            0 => NodeType::Token,
+            1 => NodeType::Nonterminal,
+            _ => panic!("Invalid value"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NodeMeta {
     Skip = 0,
-    Token = 1,
-    Nonterminal = 2,
+    Word,
+    Error,
+    None,
+}
+
+impl From<u16> for NodeMeta {
+    fn from(value: u16) -> NodeMeta {
+        match value {
+            0 => NodeMeta::Skip,
+            1 => NodeMeta::Word,
+            2 => NodeMeta::Error,
+            _ => panic!("Invalid value"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Bit packed syntax node metadata
+///
+/// 13b index | 1b NodeMeta | 2b TokenType
 pub struct NodeKind(pub std::num::NonZeroU16);
 
 impl NodeKind {
-    pub const fn new(index: u16, tag: NodeType) -> NodeKind {
-        assert!(index < (1 << 6), "Index too high");
+    pub const fn new(index: u16, kind: NodeType, meta: NodeMeta) -> NodeKind {
+        assert!(index < ((1 << 13) - 1), "Index too high");
 
         // invert the index to turn 0 to MAX
         let index = !index;
-        let tag = tag as u16;
-        let raw = (index << 2) | tag;
+        let kind = kind as u16;
+        let meta = meta as u16;
+
+        let raw = (index << 3) | (kind << 2) | meta;
 
         match std::num::NonZeroU16::new(raw) {
             Some(a) => NodeKind(a),
@@ -37,27 +71,32 @@ impl NodeKind {
 
     #[inline]
     pub const fn get_index(self) -> u16 {
-        !self.0.get() >> 2
+        !self.0.get() >> 3
     }
 
     #[inline]
-    pub const fn is_tag(self, tag: NodeType) -> bool {
-        (self.0.get() & 0b11) == (tag as u16)
+    pub const fn is_kind(self, kind: NodeType) -> bool {
+        ((self.0.get() >> 2) & 0b1) == (kind as u16)
+    }
+
+    #[inline]
+    pub const fn is_meta(self, meta: NodeMeta) -> bool {
+        (self.0.get() & 0b11) == (meta as u16)
     }
 
     #[inline]
     pub const fn is_skip(self) -> bool {
-        self.is_tag(NodeType::Skip)
+        self.is_meta(NodeMeta::Skip)
     }
 
     #[inline]
     pub const fn is_token(self) -> bool {
-        !self.is_tag(NodeType::Nonterminal)
+        self.is_kind(NodeType::Token)
     }
 
     #[inline]
     pub const fn is_nonterminal(self) -> bool {
-        self.is_tag(NodeType::Nonterminal)
+        self.is_kind(NodeType::Nonterminal)
     }
 
     pub fn name<T>(self, language: T) -> &'static str
@@ -70,11 +109,14 @@ impl NodeKind {
 
 #[test]
 fn test_node_kind() {
-    for &index in &[0, 1, 2, (1 << 6) - 1] {
-        for &tag in &[NodeType::Skip, NodeType::Token, NodeType::Nonterminal] {
-            let kind = NodeKind::new(index, tag);
-            assert!(kind.is_tag(tag));
-            assert_eq!(kind.get_index(), index);
+    for &index in &[0, 1, 2, (1 << 13) - 1] {
+        for &kind in &[NodeType::Token, NodeType::Nonterminal] {
+            for &meta in &[NodeMeta::Skip, NodeMeta::Word, NodeMeta::Error] {
+                let node = NodeKind::new(index, kind, meta);
+                assert_eq!(node.get_index(), index);
+                assert!(node.is_kind(kind));
+                assert!(node.is_meta(meta));
+            }
         }
     }
 }

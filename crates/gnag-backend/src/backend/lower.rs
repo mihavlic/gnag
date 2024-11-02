@@ -1,6 +1,7 @@
 use crate::{
-    ast::pattern::{Group, Pattern, PatternKind},
+    ast::pattern::{Group, Pattern, PatternKind, Transition},
     error::ErrorAccumulator,
+    span::Span,
 };
 
 use super::{builtin::lower_builtin, grammar::Grammar};
@@ -21,6 +22,25 @@ pub fn lower(grammar: &mut Grammar, cx: &LowerCx) {
             lower_pattern(pattern, cx);
         });
     }
+}
+
+pub enum LoweredKind {
+    Transition(Transition),
+    Sequence,
+    Choice,
+    Maybe { expect: bool },
+    Loop,
+}
+
+pub struct LoweredNode {
+    kind: LoweredKind,
+    span: Span,
+    children: Vec<LoweredNode>,
+}
+
+pub struct PatternProperties {
+    maybe_advances: bool,
+    always_advances: bool,
 }
 
 pub fn lower_pattern(pattern: &mut Pattern, cx: &LowerCx) {

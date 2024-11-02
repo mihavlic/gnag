@@ -276,17 +276,17 @@ fn run() -> Result<(), ()> {
     let trace = LANGUAGE.parse_all(&tokens);
     let trace = trace.to_preorder(&mut Vec::new());
 
+    if do_parse {
+        println!();
+        print!("{}", trace.display(&LANGUAGE, false));
+    }
+
     let ast = Ast::new(&src, &trace, &err);
 
     let mut grammar = Grammar::new(&ast, &err);
 
     if grammar.rules.iter().count() == 0 {
         println!("Parsing produced no rules");
-    }
-
-    if do_parse {
-        println!();
-        print!("{}", trace.display(&LANGUAGE, false));
     }
 
     if !do_ast || do_lower || do_code {

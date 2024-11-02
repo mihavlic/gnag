@@ -1,0 +1,22 @@
+lexer {
+    @skip
+    Space = <ascii_whitespace>+
+    Plus = '+'
+    Star = '*'
+    Number = <ascii_digit>+
+    // the last token, consumes anything to make forward progress
+    @error
+    Error = <any>
+}
+
+parser {
+    @root
+    File = Expression
+    // this is lowered to a pratt precedence parser,
+    // the order of rules dictates precedence
+    Expression = pratt {
+        Atom = Number
+        Mul = Expression '*' Expression
+        Add = Expression '+' Expression
+    }
+}

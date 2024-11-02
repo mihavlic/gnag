@@ -1,0 +1,89 @@
+
+Space =
+  Sequence
+    Whitespace(ascii)
+    Loop
+      Whitespace(ascii)
+
+Plus =
+  Bytes(b"+")
+
+Star =
+  Bytes(b"*")
+
+Number =
+  Sequence
+    Digit(ascii)
+    Loop
+      Digit(ascii)
+
+Error =
+  Any(Token)
+
+File =
+  Choice
+    Sequence
+      Rule(Expression)
+      CloseSpan(File)
+      Return(true)
+    Return(false)
+
+Atom =
+  Rule(Number)
+
+Mul =
+  Sequence
+    Rule(Expression)
+    Rule(Star)
+    Rule(Expression)
+
+Add =
+  Sequence
+    Rule(Expression)
+    Rule(Plus)
+    Rule(Expression)
+
+Expression =
+  Choice
+    Sequence
+      Choice
+        Sequence
+          Rule(Number)
+          CloseSpan(Atom)
+      Loop
+        Choice
+          Sequence
+            CompareBindingPower(Lower, 1)
+            Rule(Plus)
+            Rule(Expression)
+            CloseSpan(Add)
+          Sequence
+            CompareBindingPower(Lower, 2)
+            Rule(Star)
+            Rule(Expression)
+            CloseSpan(Mul)
+      Return(true)
+    Return(false)
+
+Lexer =
+  Choice
+    Sequence
+      Whitespace(ascii)
+      Loop
+        Whitespace(ascii)
+      LexerReturn(Space)
+    Sequence
+      Bytes(b"+")
+      LexerReturn(Plus)
+    Sequence
+      Bytes(b"*")
+      LexerReturn(Star)
+    Sequence
+      Digit(ascii)
+      Loop
+        Digit(ascii)
+      LexerReturn(Number)
+    Sequence
+      Any(Token)
+      LexerReturn(Error)
+    LexerReturn(None)

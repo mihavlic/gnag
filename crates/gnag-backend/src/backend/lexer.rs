@@ -9,7 +9,11 @@ pub(crate) fn create_lexer_expr(grammar: &mut Grammar, cx: &LowerCx) -> Pattern 
     let mut has_word_token = false;
     let mut keyword_cases = Vec::new();
 
-    for (handle, rule, ast) in grammar.iter() {
+    for handle in grammar.iter_keys() {
+        let rule = &grammar.rules[handle];
+        let ast = grammar.ast[handle].as_ref();
+        let pattern = grammar.resolved[handle].as_ref().unwrap();
+
         if !rule.kind.is_lexer() {
             continue;
         }
@@ -26,8 +30,8 @@ pub(crate) fn create_lexer_expr(grammar: &mut Grammar, cx: &LowerCx) -> Pattern 
         }
 
         if is_keyword {
-            let span = rule.pattern.span();
-            match rule.pattern.kind() {
+            let span = pattern.span();
+            match pattern.kind() {
                 PatternKind::Transition(Transition::Bytes(bytes)) => {
                     let pattern = Group::Sequence { explicit: false }.to_pattern(
                         vec![

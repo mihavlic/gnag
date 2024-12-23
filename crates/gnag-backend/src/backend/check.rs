@@ -13,10 +13,9 @@ use super::grammar::{Grammar, RuleHandle};
 pub fn check_left_recursion(grammar: &Grammar, err: &ErrorAccumulator) {
     let mut prefix_rules = SecondaryMap::new();
 
-    for (handle, rule, _) in grammar.iter() {
-        let mut set = HashMap::new();
-        collect_prefix_rules(&rule.pattern, &mut set);
-        prefix_rules[handle] = set;
+    for (handle, pattern) in grammar.iter_resolved() {
+        let set = &mut prefix_rules[handle];
+        collect_prefix_rules(pattern, set);
     }
 
     let mut visited = EntitySet::new();

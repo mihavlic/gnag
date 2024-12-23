@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write,
     ops::{BitAnd, BitOr},
     rc::Rc,
 };
@@ -110,6 +111,8 @@ pub enum Transition {
     CloseSpan(RuleHandle),
     Return(bool),
     LexerReturn(Option<RuleHandle>),
+    // error handling
+    EmitError(RcString),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -153,9 +156,10 @@ impl Transition {
             | Transition::CharacterClass { .. }
             | Transition::StringLike { .. }
             | Transition::ConsumeUntil { .. } => TransitionEffects::Fallible,
-            Transition::SaveState | Transition::RestoreState | Transition::CloseSpan(_) => {
-                TransitionEffects::Infallible
-            }
+            Transition::SaveState
+            | Transition::RestoreState
+            | Transition::CloseSpan(_)
+            | Transition::EmitError(_) => TransitionEffects::Infallible,
             Transition::Return(_) | Transition::LexerReturn(_) => TransitionEffects::Noreturn,
         }
     }
@@ -177,7 +181,8 @@ impl Transition {
             | Transition::RestoreState
             | Transition::CloseSpan(_)
             | Transition::Return(_)
-            | Transition::LexerReturn(_) => false,
+            | Transition::LexerReturn(_)
+            | Self::EmitError(_) => false,
         }
     }
     pub fn display_into(&self, buf: &mut dyn std::fmt::Write, cx: &Grammar) -> std::fmt::Result {
@@ -235,6 +240,7 @@ impl Transition {
                 };
                 write!(buf, "LexerReturn({name})")
             }
+            Transition::EmitError(ref a) => write!(buf, "EmitError({a})"),
         }
     }
 }

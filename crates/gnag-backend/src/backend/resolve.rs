@@ -63,7 +63,7 @@ pub fn resolve(grammar: &mut Grammar, cx: &ResolveCx) {
 }
 
 fn resolve_template_parameters(grammar: &mut Grammar) {
-    for (_, rule, ast) in grammar.iter_mut() {
+    for (_, rule, ast) in grammar.modname::iter_mut() {
         if rule.kind == RuleKind::Template {
             let Some(parameters) = &ast.unwrap().parameters else {
                 continue;
@@ -84,7 +84,7 @@ fn resolve_template_parameters(grammar: &mut Grammar) {
 fn inline_templates(grammar: &mut Grammar, cx: &ResolveCx) {
     let mut call_stack = Vec::<RuleHandle>::new();
 
-    for handle in grammar.iter_keys() {
+    for handle in grammar.keys() {
         // we call the inlining function for every rule, if it contains no inlines, the rule is unchanged
         _ = inline_rule_recursive(handle, grammar, cx, &mut call_stack);
     }

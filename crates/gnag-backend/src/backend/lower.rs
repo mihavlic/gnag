@@ -28,14 +28,15 @@ pub enum LoweredKind {
     Transition(Transition),
     Sequence,
     Choice,
-    Maybe { expect: bool },
+    Maybe,
     Loop,
 }
 
-pub struct LoweredNode {
+#[derive(Clone, Debug)]
+pub struct LoweredPattern {
     kind: LoweredKind,
     span: Span,
-    children: Vec<LoweredNode>,
+    children: Vec<LoweredPattern>,
 }
 
 pub struct PatternProperties {

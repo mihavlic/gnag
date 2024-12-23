@@ -148,5 +148,4 @@ pub struct Rule {
     pub name: RcString,
     pub kind: RuleKind,
     pub attributes: Attributes,
-    pub pattern: Pattern,
 }

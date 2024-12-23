@@ -5,7 +5,6 @@ lexer {
     Star = '*'
     Number = <ascii_digit>+
     // the last token, consumes anything to make forward progress
-    @error
     Error = <any>
 }
 
